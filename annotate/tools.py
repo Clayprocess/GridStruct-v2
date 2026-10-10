@@ -264,22 +264,9 @@ class MagnifierTool(MarkTool):
 
 
 class SerialTool(MarkTool):
-    def __init__(self, style):
-        super().__init__(style)
-        self._next = 0 if SERIAL_START_FROM_ZERO else 1
-
     def on_press(self, scene, pos, undo):
-        global _serial_global_next
         self._scene = scene
-        if SERIAL_GLOBAL_COUNTING:
-            if _serial_global_next is None:
-                _serial_global_next = 0 if SERIAL_START_FROM_ZERO else 1
-            index = _serial_global_next
-            _serial_global_next += 1
-        else:
-            index = self._next
-            self._next += 1
-        self._item = SerialMarkItem(self._style, index)
+        self._item = SerialMarkItem(self._style, _next_serial_index(scene))
         self._item.setPos(pos)
         scene.addItem(self._item)
 
@@ -292,6 +279,22 @@ class SerialTool(MarkTool):
 
     def set_index(self, item, value):
         item.set_index(value)
+
+
+def _next_serial_index(scene) -> int:
+    """序号计数器。放 scene 属性上，不随工具实例重建而重置。"""
+    if SERIAL_GLOBAL_COUNTING:
+        global _serial_global_next
+        if _serial_global_next is None:
+            _serial_global_next = 0 if SERIAL_START_FROM_ZERO else 1
+        idx = _serial_global_next
+        _serial_global_next += 1
+        return idx
+    nxt = scene.property("serial_next")
+    if nxt is None:
+        nxt = 0 if SERIAL_START_FROM_ZERO else 1
+    scene.setProperty("serial_next", int(nxt) + 1)
+    return int(nxt)
 
 
 def renumber_serials_after_delete(scene, deleted_indices):

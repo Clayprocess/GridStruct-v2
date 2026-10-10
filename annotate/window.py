@@ -142,11 +142,19 @@ class AnnotationWindow(QWidget):
         self.close()
 
     def _save(self):
+        import os
+        from PySide6.QtCore import QSettings, QStandardPaths
+        from PySide6.QtWidgets import QApplication
+        s = QSettings("GridStruct", "GridStruct")
+        default_dir = s.value("screenshot_dir", "") or \
+            QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
+        start = os.path.join(default_dir, "PixShot.png")
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存截图", "", "PNG (*.png);;JPG (*.jpg);;BMP (*.bmp)")
+            self, "保存截图", start, "PNG (*.png);;JPG (*.jpg);;BMP (*.bmp)")
         if path:
             self._canvas.render_to_pixmap().save(path)
-            print(f"[保存] {path}")
+            QApplication.clipboard().setText(path)
+            print(f"[保存] {path}（路径已复制）")
 
     def _run_ocr(self):
         from PySide6.QtWidgets import QApplication
