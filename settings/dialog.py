@@ -1,0 +1,159 @@
+# 设置窗口：QTabWidget 四个 tab，QSettings 持久化。
+# organization/app 名按任务约定为 GridStruct/GridStruct。
+
+import sys
+
+from PySide6.QtWidgets import (
+    QTabWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
+    QComboBox, QCheckBox, QLineEdit, QPushButton, QFileDialog,
+    QDialogButtonBox, QWidget, QApplication,
+)
+from PySide6.QtCore import QSettings
+
+from ui.dialogs import BaseDialog
+from styles.theme import apply_theme
+from tray.hotkey import GlobalHotkey
+
+_ORG, _APP = "GridStruct", "GridStruct"
+_VERSION = "0.1.0"
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def _read_autostart() -> bool:
+    """读开机自启（Windows）。注册表无值视为关闭。"""
+    if sys.platform != "win32":
+        return False
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+            winreg.QueryValueEx(k, "PixShot")
+        return True
+    except OSError:
+        return False
+
+
+def _write_autostart(enabled: bool):
+    """写开机自启。失败静默跳过（任务要求不报错）。"""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY,
+                             0, winreg.KEY_SET_VALUE) as k:
+            if enabled:
+                winreg.SetValueEx(k, "PixShot", 0, winreg.REG_SZ,
+                                  sys.executable)
+            else:
+                winreg.DeleteValue(k, "PixShot")
+    except OSError:
+        pass
+
+
+class SettingsDialog(BaseDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("设置")
+        self.resize(420, 360)
+        self._s = QSettings(_ORG, _APP)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._general_tab(), "通用")
+        tabs.addTab(self._shot_tab(), "截图")
+        tabs.addTab(self._hotkey_tab(), "热键")
+        tabs.addTab(self._about_tab(), "关于")
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("确定")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.Ok).setProperty("class", "primary")
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(tabs)
+        layout.addWidget(buttons)
+
+    # ---------- 通用 ----------
+
+    def _general_tab(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+        self._theme = QComboBox()
+        self._theme.addItem("浅色", "light")
+        self._theme.addItem("深色", "dark")
+        self._theme.addItem("跟随系统", "system")
+        cur = self._s.value("theme", "system")
+        self._theme.setCurrentIndex(max(0, self._theme.findData(cur)))
+        self._theme.currentIndexChanged.connect(self._on_theme_changed)
+        form.addRow("主题", self._theme)
+
+        self._autostart = QCheckBox("开机自启")
+        if sys.platform != "win32":
+            self._autostart.setEnabled(False)
+            self._autostart.setToolTip("仅 Windows 支持")
+        else:
+            self._autostart.setChecked(_read_autostart())
+        form.addRow("", self._autostart)
+        return w
+
+    def _on_theme_changed(self, _idx: int):
+        mode = self._theme.currentData()
+        apply_theme(QApplication.instance(), mode)
+        self._s.setValue("theme", mode)
+
+    # ---------- 截图 ----------
+
+    def _shot_tab(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+        row = QHBoxLayout()
+        self._shot_dir = QLineEdit(self._s.value("screenshot_dir", ""))
+        self._shot_dir.setPlaceholderText("默认：图片文件夹")
+        browse = QPushButton("浏览")
+        browse.setProperty("class", "secondary")
+        browse.clicked.connect(self._browse_dir)
+        row.addWidget(self._shot_dir, 1)
+        row.addWidget(browse)
+        form.addRow("保存目录", row)
+
+        self._img_fmt = QComboBox()
+        self._img_fmt.addItems(["png", "jpg"])
+        self._img_fmt.setCurrentText(self._s.value("image_format", "png"))
+        form.addRow("图片格式", self._img_fmt)
+        return w
+
+    def _browse_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "选择保存目录")
+        if d:
+            self._shot_dir.setText(d)
+
+    # ---------- 热键 ----------
+
+    def _hotkey_tab(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+        le = QLineEdit(GlobalHotkey.hotkey_name())
+        le.setReadOnly(True)
+        form.addRow("截图", le)
+        form.addRow("", QLabel("P0 暂不支持修改热键"))
+        return w
+
+    # ---------- 关于 ----------
+
+    def _about_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.addWidget(QLabel("PixShot（GridStruct v2）"))
+        layout.addWidget(QLabel(f"版本 {_VERSION}"))
+        layout.addStretch()
+        return w
+
+    # ---------- 保存 ----------
+
+    def _save(self):
+        self._s.setValue("theme", self._theme.currentData())
+        self._s.setValue("screenshot_dir", self._shot_dir.text())
+        self._s.setValue("image_format", self._img_fmt.currentText())
+        if sys.platform == "win32":
+            _write_autostart(self._autostart.isChecked())
+            self._s.setValue("autostart", self._autostart.isChecked())
+        self.accept()

@@ -18,6 +18,8 @@ from styles import tokens as T
 from ui.icons import tinted_icon
 from tray import create_tray, GlobalHotkey
 from capture import ScreenshotFlow
+from pin import show_pin_from_clipboard
+from settings import SettingsDialog
 
 APP_NAME = "PixShot"
 _SINGLE_INSTANCE_KEY = "PixShot_SingleInstance_v1"
@@ -55,9 +57,9 @@ def main() -> int:
 
     callbacks = {
         "screenshot": flow.start,
-        "pin": _placeholder("贴图"),
+        "pin": show_pin_from_clipboard,
         "longshot": _placeholder("长截图"),
-        "settings": _placeholder("设置"),
+        "settings": lambda: SettingsDialog().exec(),
         "update": _placeholder("检查更新"),
         "about": _placeholder("关于"),
         "exit": app.quit,
