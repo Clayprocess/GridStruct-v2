@@ -38,6 +38,24 @@ class ScreenShotWindow(QWidget):
         self.setMouseTracking(True)
         self.setCursor(QCursor(Qt.CrossCursor))
 
+        # 智能吸附（异步，Windows 才有真数据）
+        from .snap import RegionDetector
+        self._snap = RegionDetector()
+        self._snap_rect = QRect()
+        self._snap.regionDetected.connect(self._on_snap)
+
+    def _on_snap(self, rect: QRect):
+        """吸附结果（虚拟桌面坐标）-> 本地坐标。仅在未框选时显示。"""
+        if not self._sel.isNull() or self._drag_mode is not None:
+            self._snap_rect = QRect()
+        else:
+            self._snap_rect = self._to_local(rect)
+        self.update()
+
+    def closeEvent(self, e):
+        self._snap.shutdown()
+        super().closeEvent(e)
+
     # ---------- 选区几何 ----------
 
     def _to_local(self, r: QRect) -> QRect:
@@ -95,6 +113,10 @@ class ScreenShotWindow(QWidget):
             self._draw_size_tip(p)
         else:
             p.fillRect(self.rect(), _DIM)
+            # 智能吸附高亮（未框选时）
+            if not self._snap_rect.isNull():
+                p.setPen(QPen(QColor("#3b82f6"), 2))
+                p.drawRect(self._snap_rect.adjusted(1, 1, -1, -1))
 
     def _draw_size_tip(self, p: QPainter):
         text = f"{self._sel.width()} × {self._sel.height()}"
@@ -127,6 +149,14 @@ class ScreenShotWindow(QWidget):
             self._drag_mode = h
         elif not self._sel.isNull() and self._sel.contains(pos):
             self._drag_mode = "move"
+        elif (self._sel.isNull() and not self._snap_rect.isNull()
+                and self._snap_rect.contains(pos)):
+            # 点击吸附到的窗口：直接采用
+            self._sel = QRect(self._snap_rect)
+            self._snap_rect = QRect()
+            self._drag_mode = None
+            self.update()
+            return
         else:
             self._drag_mode = "create"
             self._sel = QRect(pos, pos)
@@ -147,6 +177,8 @@ class ScreenShotWindow(QWidget):
                 self.setCursor(QCursor(Qt.SizeAllCursor))
             else:
                 self.setCursor(QCursor(Qt.CrossCursor))
+                # 未框选时请求智能吸附（虚拟桌面坐标）
+                self._snap.detect(pos + self._vg.topLeft())
             self.update()  # 尺寸提示跟随
             return
 

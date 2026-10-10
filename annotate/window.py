@@ -53,6 +53,7 @@ class AnnotationWindow(QWidget):
         self._toolbar.actionTriggered.connect(self._on_action)
         self._toolbar.set_position_near(self.geometry())
         self._toolbar.show()
+        self._canvas.pipettePicked.connect(self._on_pipette_picked)
 
     # ---------- 样式条 ----------
 
@@ -80,7 +81,26 @@ class AnnotationWindow(QWidget):
         slider.valueChanged.connect(self._set_width)
         hl.addWidget(slider)
         hl.addStretch()
+        # 取色器
+        pip = QToolButton()
+        pip.setIcon(tinted_icon("pipette", self._mode))
+        pip.setCheckable(True)
+        pip.setToolTip("取色器")
+        pip.toggled.connect(self._toggle_pipette)
+        hl.addWidget(pip)
+        self._pip_btn = pip
         return bar
+
+    def _toggle_pipette(self, on: bool):
+        self._canvas.set_pipette_mode(on)
+        if on:
+            print("[取色器] 点击画布取色")
+
+    def _on_pipette_picked(self, hex_code: str):
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(hex_code)
+        self._pip_btn.setChecked(False)
+        print(f"[取色器] {hex_code} 已复制")
 
     def _set_color(self, color: str):
         self._canvas.style.color = QColor(color)

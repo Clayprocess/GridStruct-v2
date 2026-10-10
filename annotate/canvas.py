@@ -8,19 +8,24 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import (
     QPainter, QPixmap, QKeySequence, QUndoStack, QUndoCommand,
 )
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRectF, Signal
 
 from .items import MarkStyle
 from .tools import create_tool
 from .commands import RemoveMarkCommand
+from .pipette import PipettePopup
 
 
 class AnnotationCanvas(QGraphicsView):
+    pipettePicked = Signal(str)  # 取色完成，HEX
+
     def __init__(self, pixmap: QPixmap):
         super().__init__()
         self._dpr = pixmap.devicePixelRatio() or 1.0
+        self._bg_pixmap = pixmap
         self._style = MarkStyle()
         self._tool = None
+        self._pipette = None
         self._undo = QUndoStack(self)
 
         self._scene = QGraphicsScene(self)
@@ -53,6 +58,23 @@ class AnnotationCanvas(QGraphicsView):
         self._tool = None
         self.viewport().setCursor(Qt.ArrowCursor)
 
+    # ---------- 取色器 ----------
+
+    def set_pipette_mode(self, on: bool):
+        if on:
+            self._tool = None
+            self._pipette = PipettePopup(self._bg_pixmap, self._dpr)
+            self.viewport().setCursor(Qt.CrossCursor)
+        else:
+            if self._pipette is not None:
+                self._pipette.close()
+                self._pipette = None
+            self.viewport().setCursor(Qt.ArrowCursor)
+
+    @property
+    def pipette_active(self) -> bool:
+        return self._pipette is not None
+
     @property
     def style(self) -> MarkStyle:
         return self._style
@@ -80,6 +102,11 @@ class AnnotationCanvas(QGraphicsView):
     # ---------- 事件 ----------
 
     def mousePressEvent(self, e):
+        if self._pipette is not None and e.button() == Qt.LeftButton:
+            color = self._pipette.color
+            self.set_pipette_mode(False)
+            self.pipettePicked.emit(color.name().upper())
+            return
         if e.button() == Qt.LeftButton and self._tool is not None:
             self._tool.on_press(self._scene, self.mapToScene(e.pos()),
                                 self._undo)
@@ -87,7 +114,11 @@ class AnnotationCanvas(QGraphicsView):
             super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
-        if self._tool is not None and e.buttons() & Qt.LeftButton:
+        if self._pipette is not None:
+            from PySide6.QtWidgets import QApplication
+            self._pipette.pick(self.mapToScene(e.pos()),
+                               self.mapToGlobal(e.pos()))
+        elif self._tool is not None and e.buttons() & Qt.LeftButton:
             self._tool.on_move(self.mapToScene(e.pos()))
         else:
             super().mouseMoveEvent(e)
