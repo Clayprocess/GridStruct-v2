@@ -3,8 +3,12 @@
 
 import math
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsTextItem
-from PySide6.QtGui import QPen, QColor, QPainter, QPolygonF, QFont
+from PySide6.QtGui import (
+    QBrush, QFont, QColor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+)
 from PySide6.QtCore import Qt, QRectF, QPointF
+
+from styles import tokens as T
 
 
 class MarkStyle:
@@ -43,6 +47,215 @@ class RectMarkItem(_MarkItemBase):
     def paint(self, p: QPainter, _opt, _w):
         p.setPen(QPen(self._color, self._width))
         p.drawRect(self._rect)
+
+
+class EllipseMarkItem(RectMarkItem):
+    def paint(self, p: QPainter, _opt, _w):
+        p.setPen(QPen(self._color, self._width))
+        p.drawEllipse(self._rect)
+
+
+class LineMarkItem(_MarkItemBase):
+    def __init__(self, style: MarkStyle):
+        super().__init__(style)
+        self._p1 = QPointF()
+        self._p2 = QPointF()
+
+    def set_line(self, p1: QPointF, p2: QPointF):
+        self.prepareGeometryChange()
+        self._p1, self._p2 = p1, p2
+
+    def boundingRect(self):
+        p = self._pad()
+        return QRectF(self._p1, self._p2).normalized().adjusted(-p, -p, p, p)
+
+    def paint(self, p: QPainter, _opt, _w):
+        pen = QPen(self._color, self._width, Qt.SolidLine, Qt.RoundCap)
+        p.setPen(pen)
+        p.drawLine(self._p1, self._p2)
+
+
+class PolylineMarkItem(_MarkItemBase):
+    def __init__(self, style: MarkStyle):
+        super().__init__(style)
+        self.points: list[QPointF] = []
+        self._preview: QPointF | None = None
+
+    def add_point(self, point: QPointF):
+        self.prepareGeometryChange()
+        self.points.append(QPointF(point))
+        self._preview = None
+
+    def set_preview(self, point: QPointF):
+        self.prepareGeometryChange()
+        self._preview = QPointF(point)
+
+    def remove_last_point(self):
+        self.prepareGeometryChange()
+        self.points.pop()
+
+    def boundingRect(self):
+        points = self.points + ([self._preview] if self._preview is not None else [])
+        if not points:
+            return QRectF()
+        rect = QRectF(points[0], points[0])
+        for point in points[1:]:
+            rect = rect.united(QRectF(point, point))
+        p = self._pad()
+        return rect.adjusted(-p, -p, p, p)
+
+    def paint(self, p: QPainter, _opt, _w):
+        points = self.points + ([self._preview] if self._preview is not None else [])
+        if len(points) < 2:
+            return
+        p.setPen(QPen(self._color, self._width, Qt.SolidLine,
+                      Qt.RoundCap, Qt.RoundJoin))
+        p.drawPolyline(QPolygonF(points))
+
+
+class PencilMarkItem(_MarkItemBase):
+    def __init__(self, style: MarkStyle):
+        super().__init__(style)
+        self._path = QPainterPath()
+        self.point_count = 0
+
+    def move_to(self, point: QPointF):
+        self.prepareGeometryChange()
+        self._path.moveTo(point)
+        self.point_count = 1
+
+    def line_to(self, point: QPointF):
+        self.prepareGeometryChange()
+        self._path.lineTo(point)
+        self.point_count += 1
+
+    def boundingRect(self):
+        p = self._pad()
+        return self._path.boundingRect().adjusted(-p, -p, p, p)
+
+    def paint(self, p: QPainter, _opt, _w):
+        p.setPen(QPen(self._color, self._width, Qt.SolidLine,
+                      Qt.RoundCap, Qt.RoundJoin))
+        p.drawPath(self._path)
+
+
+class HighlightMarkItem(_MarkItemBase):
+    def __init__(self, style: MarkStyle):
+        super().__init__(style)
+        self._path = QPainterPath()
+        self.point_count = 0
+        self._highlight_width = max(14, self._width * 4)
+
+    def move_to(self, point: QPointF):
+        self.prepareGeometryChange()
+        self._path.moveTo(point)
+        self.point_count = 1
+
+    def line_to(self, point: QPointF):
+        self.prepareGeometryChange()
+        self._path.lineTo(point)
+        self.point_count += 1
+
+    def boundingRect(self):
+        p = self._highlight_width + 2
+        return self._path.boundingRect().adjusted(-p, -p, p, p)
+
+    def paint(self, p: QPainter, _opt, _w):
+        color = QColor(self._color)
+        color.setAlpha(80)
+        p.setPen(QPen(color, self._highlight_width, Qt.SolidLine,
+                      Qt.RoundCap, Qt.RoundJoin))
+        p.drawPath(self._path)
+
+
+class MosaicMarkItem(QGraphicsItem):
+    def __init__(self):
+        super().__init__()
+        self._pixmap = QPixmap()
+        self._rect = QRectF()
+        self.setFlags(QGraphicsItem.ItemIsSelectable)
+
+    def set_preview_rect(self, rect: QRectF):
+        self.prepareGeometryChange()
+        self._rect = rect
+
+    def set_mosaic(self, pixmap: QPixmap, rect: QRectF):
+        self.prepareGeometryChange()
+        self._pixmap = pixmap
+        self._rect = rect
+
+    def boundingRect(self):
+        return self._rect
+
+    def paint(self, p: QPainter, _opt, _w):
+        if self._pixmap.isNull():
+            color = QColor(T.LIGHT["foreground"])
+            color.setAlpha(40)
+            p.fillRect(self._rect, color)
+            return
+        p.drawPixmap(self._rect, self._pixmap, QRectF(self._pixmap.rect()))
+
+
+class MagnifierMarkItem(QGraphicsItem):
+    def __init__(self, bg_pixmap: QPixmap, center: QPointF,
+                 radius=70.0, zoom=2.0):
+        super().__init__()
+        self._bg_pixmap = bg_pixmap
+        self._center = QPointF(center)
+        self._radius = radius
+        self._zoom = zoom
+        self.setFlags(QGraphicsItem.ItemIsSelectable)
+
+    def boundingRect(self):
+        r = self._radius
+        return QRectF(self._center.x() - r, self._center.y() - r,
+                      r * 2, r * 2)
+
+    def paint(self, p: QPainter, _opt, _w):
+        target = self.boundingRect()
+        source_size = self._radius * 2 / self._zoom
+        dpr = self._bg_pixmap.devicePixelRatio()
+        source = QRectF(
+            (self._center.x() - source_size / 2) * dpr,
+            (self._center.y() - source_size / 2) * dpr,
+            source_size * dpr,
+            source_size * dpr,
+        )
+        clip = QPainterPath()
+        clip.addEllipse(target)
+        p.save()
+        p.setClipPath(clip)
+        p.drawPixmap(target, self._bg_pixmap, source)
+        p.restore()
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(T.LIGHT["foreground"]), 2))
+        p.drawEllipse(target)
+
+
+class SerialMarkItem(_MarkItemBase):
+    def __init__(self, style: MarkStyle, index: int):
+        super().__init__(style)
+        self.index = index
+        self._font_size = style.font_size
+
+    def set_index(self, index: int):
+        self.index = index
+        self.update()
+
+    def boundingRect(self):
+        r = self._font_size
+        return QRectF(-r, -r, r * 2, r * 2)
+
+    def paint(self, p: QPainter, _opt, _w):
+        rect = self.boundingRect()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(self._color))
+        p.drawEllipse(rect)
+        font = QFont()
+        font.setPointSize(self._font_size)
+        p.setFont(font)
+        p.setPen(QColor(T.LIGHT["background"]))
+        p.drawText(rect, Qt.AlignCenter, str(self.index))
 
 
 class ArrowMarkItem(_MarkItemBase):

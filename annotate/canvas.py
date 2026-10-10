@@ -10,8 +10,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import Qt, QRectF, Signal
 
-from .items import MarkStyle
-from .tools import create_tool
+from .items import MarkStyle, SerialMarkItem
+from .tools import create_tool, renumber_serials_after_delete
 from .commands import RemoveMarkCommand
 from .pipette import PipettePopup
 
@@ -57,6 +57,9 @@ class AnnotationCanvas(QGraphicsView):
     def clear_tool(self):
         self._tool = None
         self.viewport().setCursor(Qt.ArrowCursor)
+
+    def scene_background(self) -> QPixmap:
+        return self._bg_pixmap
 
     # ---------- 取色器 ----------
 
@@ -110,8 +113,17 @@ class AnnotationCanvas(QGraphicsView):
         if e.button() == Qt.LeftButton and self._tool is not None:
             self._tool.on_press(self._scene, self.mapToScene(e.pos()),
                                 self._undo)
+        elif e.button() == Qt.RightButton and self._tool is not None:
+            self._tool.on_right_press(self.mapToScene(e.pos()), self._undo)
         else:
             super().mousePressEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if self._tool is not None and e.button() == Qt.LeftButton:
+            self._tool.on_double_click(self._scene, self.mapToScene(e.pos()),
+                                       self._undo)
+        else:
+            super().mouseDoubleClickEvent(e)
 
     def mouseMoveEvent(self, e):
         if self._pipette is not None:
@@ -134,5 +146,8 @@ class AnnotationCanvas(QGraphicsView):
             sel = self._scene.selectedItems()
             if sel:
                 self._undo.push(RemoveMarkCommand(self._scene, sel))
+                indices = [item.index for item in sel
+                           if isinstance(item, SerialMarkItem)]
+                renumber_serials_after_delete(self._scene, indices)
         else:
             super().keyPressEvent(e)
