@@ -129,6 +129,8 @@ class AnnotationWindow(QWidget):
             self._finish()
         elif action == "save":
             self._save()
+        elif action == "ocr":
+            self._run_ocr()
         elif action == "cancel":
             self.cancelled.emit()
             self.close()
@@ -140,11 +142,31 @@ class AnnotationWindow(QWidget):
         self.close()
 
     def _save(self):
+        import os
+        from PySide6.QtCore import QSettings, QStandardPaths
+        from PySide6.QtWidgets import QApplication
+        s = QSettings("GridStruct", "GridStruct")
+        default_dir = s.value("screenshot_dir", "") or \
+            QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
+        start = os.path.join(default_dir, "PixShot.png")
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存截图", "", "PNG (*.png);;JPG (*.jpg);;BMP (*.bmp)")
+            self, "保存截图", start, "PNG (*.png);;JPG (*.jpg);;BMP (*.bmp)")
         if path:
             self._canvas.render_to_pixmap().save(path)
-            print(f"[保存] {path}")
+            QApplication.clipboard().setText(path)
+            print(f"[保存] {path}（路径已复制）")
+
+    def _run_ocr(self):
+        from PySide6.QtWidgets import QApplication
+        from ocr.engine import OCREngine
+        from ocr.dialog import OCRResultDialog
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            results = OCREngine().recognize(self._canvas.render_to_pixmap())
+        finally:
+            QApplication.restoreOverrideCursor()
+        print(f"[OCR] 识别到 {len(results)} 行")
+        OCRResultDialog(results, self).exec()
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:

@@ -3,7 +3,6 @@
 
 from PySide6.QtWidgets import QGraphicsScene
 from PySide6.QtGui import QUndoCommand
-from PySide6.QtGui import QColor
 
 
 class AddMarkCommand(QUndoCommand):
@@ -24,6 +23,9 @@ class AddMarkCommand(QUndoCommand):
 
 
 class RemoveMarkCommand(QUndoCommand):
+    # redo/undo 幂等：橡皮擦在 push 前已把图元移出 scene（即时反馈），
+    # 而 Delete 键路径 push 时图元还在 scene 里。按 it.scene() 判断，
+    # 两种调用都正确，不打 Qt 警告。
     def __init__(self, scene: QGraphicsScene, items: list):
         super().__init__("删除标注")
         self._scene = scene
@@ -31,8 +33,10 @@ class RemoveMarkCommand(QUndoCommand):
 
     def redo(self):
         for it in self._items:
-            self._scene.removeItem(it)
+            if it.scene() is self._scene:
+                self._scene.removeItem(it)
 
     def undo(self):
         for it in self._items:
-            self._scene.addItem(it)
+            if it.scene() is not self._scene:
+                self._scene.addItem(it)
