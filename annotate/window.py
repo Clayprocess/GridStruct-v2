@@ -129,6 +129,8 @@ class AnnotationWindow(QWidget):
             self._finish()
         elif action == "save":
             self._save()
+        elif action == "ocr":
+            self._run_ocr()
         elif action == "cancel":
             self.cancelled.emit()
             self.close()
@@ -145,6 +147,18 @@ class AnnotationWindow(QWidget):
         if path:
             self._canvas.render_to_pixmap().save(path)
             print(f"[保存] {path}")
+
+    def _run_ocr(self):
+        from PySide6.QtWidgets import QApplication
+        from ocr.engine import OCREngine
+        from ocr.dialog import OCRResultDialog
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            results = OCREngine().recognize(self._canvas.render_to_pixmap())
+        finally:
+            QApplication.restoreOverrideCursor()
+        print(f"[OCR] 识别到 {len(results)} 行")
+        OCRResultDialog(results, self).exec()
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:
