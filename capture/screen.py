@@ -20,7 +20,8 @@ def capture_virtual_desktop() -> QPixmap:
     vg = virtual_geometry()
     max_dpr = max((s.devicePixelRatio() for s in screens), default=1.0)
 
-    pm = QPixmap((vg.size() * max_dpr).toSize())
+    size = vg.size()
+    pm = QPixmap(int(size.width() * max_dpr), int(size.height() * max_dpr))
     pm.setDevicePixelRatio(max_dpr)
     pm.fill(Qt.black)
 

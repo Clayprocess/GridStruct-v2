@@ -17,6 +17,7 @@ from styles.theme import apply_theme
 from styles import tokens as T
 from ui.icons import tinted_icon
 from tray import create_tray, GlobalHotkey
+from capture import ScreenshotFlow
 
 APP_NAME = "PixShot"
 _SINGLE_INSTANCE_KEY = "PixShot_SingleInstance_v1"
@@ -29,11 +30,6 @@ def _ensure_single_instance() -> QSharedMemory | None:
         return mem
     print("[PixShot] 已有实例在运行，退出。")
     return None
-
-
-def _on_screenshot():
-    # P0-A 后续由 capture/ 实现完整截图流程；此处为回调占位。
-    print("[回调] 截图：capture/ 未实现（占位）")
 
 
 def _placeholder(name: str):
@@ -55,8 +51,10 @@ def main() -> int:
     mode = apply_theme(app, "system")
     print(f"[PixShot] 启动，主题：{mode}")
 
+    flow = ScreenshotFlow(app, theme_mode=mode)
+
     callbacks = {
-        "screenshot": _on_screenshot,
+        "screenshot": flow.start,
         "pin": _placeholder("贴图"),
         "longshot": _placeholder("长截图"),
         "settings": _placeholder("设置"),
