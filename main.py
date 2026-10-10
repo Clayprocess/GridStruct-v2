@@ -18,8 +18,15 @@ from styles import tokens as T
 from ui.icons import tinted_icon
 from tray import create_tray, GlobalHotkey
 from capture import ScreenshotFlow
-from pin import show_pin_from_clipboard
-from settings import SettingsDialog
+
+try:
+    from pin import show_pin_from_clipboard
+except ImportError:
+    show_pin_from_clipboard = None
+try:
+    from settings import SettingsDialog
+except ImportError:
+    SettingsDialog = None
 
 APP_NAME = "PixShot"
 _SINGLE_INSTANCE_KEY = "PixShot_SingleInstance_v1"
@@ -55,11 +62,41 @@ def main() -> int:
 
     flow = ScreenshotFlow(app, theme_mode=mode)
 
+    def _open_longshot():
+        from capture.longshot import LongShotFlow
+        from annotate.window import AnnotationWindow
+        from PySide6.QtCore import QPoint
+
+        def _to_annotate(pixmap):
+            dpr = pixmap.devicePixelRatio() or 1.0
+            w = AnnotationWindow(
+                pixmap, QPoint(100, 100), mode)
+            w.finished.connect(
+                lambda pm: QApplication.clipboard().setPixmap(pm))
+            w.cancelled.connect(w.close)
+            w.show()
+            # 保持引用防止 GC
+            _to_annotate._wins.append(w)
+        _to_annotate._wins = getattr(_to_annotate, "_wins", [])
+        LongShotFlow(app, _to_annotate).start()
+
+    def _open_pin():
+        if show_pin_from_clipboard is not None:
+            show_pin_from_clipboard()
+        else:
+            print("[回调] 贴图：模块未就绪")
+
+    def _open_settings():
+        if SettingsDialog is not None:
+            SettingsDialog().exec()
+        else:
+            print("[回调] 设置：模块未就绪")
+
     callbacks = {
         "screenshot": flow.start,
-        "pin": show_pin_from_clipboard,
-        "longshot": _placeholder("长截图"),
-        "settings": lambda: SettingsDialog().exec(),
+        "pin": _open_pin,
+        "longshot": _open_longshot,
+        "settings": _open_settings,
         "update": _placeholder("检查更新"),
         "about": _placeholder("关于"),
         "exit": app.quit,
