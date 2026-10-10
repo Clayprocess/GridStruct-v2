@@ -95,6 +95,32 @@ QToolButton:disabled {{
     color: {t['muted_foreground']};
 }}
 
+/* ===== FloatPanel 浮动工具条 ===== */
+/* 注：面板本体的圆角卡片背景由 FloatPanel.paintEvent 手绘
+   （WA_TranslucentBackground 下 QSS 不绘制自身背景），颜色取自 tokens */
+QFrame#FloatPanelSeparator {{
+    background-color: {t['border']};
+    border: none;
+    min-width: 1px;
+    max-width: 1px;
+    margin: 8px 4px;
+}}
+/* 工具条确认 / 取消：primary / destructive 变体 */
+QToolButton[class="primary"] {{
+    background-color: {t['primary']};
+    border-radius: {T.RADIUS_SM}px;
+}}
+QToolButton[class="primary"]:hover {{
+    background-color: {t['primary']};
+}}
+QToolButton[class="destructive"] {{
+    background-color: {t['destructive']};
+    border-radius: {T.RADIUS_SM}px;
+}}
+QToolButton[class="destructive"]:hover {{
+    background-color: {t['destructive']};
+}}
+
 /* ===== 输入框 ===== */
 QLineEdit, QComboBox, QSpinBox {{
     background-color: {t['background']};
