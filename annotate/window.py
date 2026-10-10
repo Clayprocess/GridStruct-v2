@@ -1,0 +1,138 @@
+# 标注窗口：画布 + 样式条 + 浮动工具条。
+# finished(QPixmap) 携带渲染结果；cancelled 取消。
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QToolButton, QSlider, QFileDialog,
+    QLabel,
+)
+from PySide6.QtGui import QPixmap, QIcon, QColor
+from PySide6.QtCore import Qt, QPoint, Signal
+
+from .canvas import AnnotationCanvas
+from .toolbar import FloatPanel
+from ui.icons import tinted_icon
+from styles import tokens as T
+
+_SWATCHES = ["#ef4444", "#18181b", "#ffffff", "#3b82f6", "#22c55e", "#eab308"]
+
+
+def _swatch_icon(color: str, size: int = 16) -> QIcon:
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    from PySide6.QtGui import QPainter
+    with QPainter(pm) as p:
+        p.setBrush(QColor(color))
+        p.setPen(QColor("#71717a") if color == "#ffffff" else Qt.NoPen)
+        p.drawEllipse(1, 1, size - 2, size - 2)
+    return QIcon(pm)
+
+
+class AnnotationWindow(QWidget):
+    finished = Signal(QPixmap)
+    cancelled = Signal()
+
+    def __init__(self, pixmap: QPixmap, pos: QPoint, theme_mode: str = "light"):
+        super().__init__(
+            None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self._mode = theme_mode
+
+        dpr = pixmap.devicePixelRatio() or 1.0
+        lw, lh = int(pixmap.width() / dpr), int(pixmap.height() / dpr)
+
+        self._canvas = AnnotationCanvas(pixmap)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._canvas, 1)
+        layout.addWidget(self._style_strip(), 0)
+        self.resize(lw, lh + 44)
+        self.move(pos)
+
+        self._toolbar = FloatPanel(mode=theme_mode)
+        self._toolbar.toolSelected.connect(self._on_tool)
+        self._toolbar.actionTriggered.connect(self._on_action)
+        self._toolbar.set_position_near(self.geometry())
+        self._toolbar.show()
+
+    # ---------- 样式条 ----------
+
+    def _style_strip(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("StyleStrip")
+        hl = QHBoxLayout(bar)
+        hl.setContentsMargins(12, 6, 12, 6)
+        hl.addWidget(QLabel("颜色"))
+        self._swatches = []
+        for c in _SWATCHES:
+            b = QToolButton()
+            b.setIcon(_swatch_icon(c))
+            b.setCheckable(True)
+            b.setToolTip(c)
+            b.clicked.connect(lambda _=False, _c=c: self._set_color(_c))
+            hl.addWidget(b)
+            self._swatches.append((c, b))
+        self._swatches[0][1].setChecked(True)
+        hl.addWidget(QLabel("粗细"))
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(1, 10)
+        slider.setValue(self._canvas.style.width)
+        slider.setFixedWidth(120)
+        slider.valueChanged.connect(self._set_width)
+        hl.addWidget(slider)
+        hl.addStretch()
+        return bar
+
+    def _set_color(self, color: str):
+        self._canvas.style.color = QColor(color)
+        for c, b in self._swatches:
+            b.setChecked(c == color)
+
+    def _set_width(self, w: int):
+        self._canvas.style.width = w
+
+    # ---------- 工具条 ----------
+
+    def _on_tool(self, tool_id: str):
+        if not self._canvas.set_tool_by_id(tool_id):
+            print(f"[标注] 工具 {tool_id}：P0-A 后续实现")
+
+    def _on_action(self, action: str):
+        if action == "undo":
+            self._canvas.undo()
+        elif action == "redo":
+            self._canvas.redo()
+        elif action == "confirm":
+            self._finish()
+        elif action == "copy":
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setPixmap(self._canvas.render_to_pixmap())
+            self._finish()
+        elif action == "save":
+            self._save()
+        elif action == "cancel":
+            self.cancelled.emit()
+            self.close()
+        else:
+            print(f"[工具条] {action}：P0-A 后续实现")
+
+    def _finish(self):
+        self.finished.emit(self._canvas.render_to_pixmap())
+        self.close()
+
+    def _save(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存截图", "", "PNG (*.png);;JPG (*.jpg);;BMP (*.bmp)")
+        if path:
+            self._canvas.render_to_pixmap().save(path)
+            print(f"[保存] {path}")
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.cancelled.emit()
+            self.close()
+        else:
+            super().keyPressEvent(e)
+
+    def closeEvent(self, e):
+        self._toolbar.close()
+        super().closeEvent(e)
