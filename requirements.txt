@@ -1,0 +1,5 @@
+PySide6>=6.7
+
+# P0-C 需要（PP-OCRv6 small，onnxruntime 引擎）
+onnxruntime>=1.17
+rapidocr-onnxruntime>=3.9.0

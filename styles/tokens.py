@@ -1,0 +1,71 @@
+# 设计真值源：翻译自 shadcn/ui 默认 zinc 主题的 CSS 变量。
+# 原始值为 HSL（如 --primary: 240 5.9% 10%），此处已换算为十六进制。
+# 任何 UI 代码需要颜色/圆角/间距，必须从这里取，不许手写十六进制。
+
+LIGHT = {
+    # 底色与文字
+    "background":        "#ffffff",  # --background: 0 0% 100%
+    "foreground":        "#09090b",  # --foreground: 240 10% 3.9%
+    # 卡片 / 浮层
+    "card":              "#ffffff",  # --card
+    "card_foreground":   "#09090b",  # --card-foreground
+    "popover":           "#ffffff",  # --popover
+    "popover_foreground":"#09090b",  # --popover-foreground
+    # 主按钮（深底白字）
+    "primary":           "#18181b",  # --primary: 240 5.9% 10%
+    "primary_foreground":"#fafafa",  # --primary-foreground: 0 0% 98%
+    # 次按钮 / 柔和背景
+    "secondary":         "#f4f4f5",  # --secondary: 240 4.8% 95.9%
+    "secondary_foreground": "#18181b",
+    "muted":             "#f4f4f5",  # --muted
+    "muted_foreground":  "#71717a",  # --muted-foreground: 240 3.8% 46.1%
+    "accent":            "#f4f4f5",  # --accent（hover 背景）
+    "accent_foreground": "#18181b",
+    # 危险操作
+    "destructive":       "#ef4444",  # --destructive: 0 84.2% 60.2%
+    "destructive_foreground": "#fafafa",
+    # 边框与输入框
+    "border":            "#e4e4e7",  # --border: 240 5.9% 90%
+    "input":             "#e4e4e7",  # --input
+    "ring":              "#18181b",  # --ring（focus 环）
+}
+
+DARK = {
+    "background":        "#09090b",  # --background: 240 10% 3.9%
+    "foreground":        "#fafafa",  # --foreground: 0 0% 98%
+    "card":              "#09090b",
+    "card_foreground":   "#fafafa",
+    "popover":           "#09090b",
+    "popover_foreground":"#fafafa",
+    "primary":           "#fafafa",  # 深色下主按钮反转为白底黑字
+    "primary_foreground":"#18181b",
+    "secondary":         "#27272a",  # --secondary: 240 3.7% 15.9%
+    "secondary_foreground": "#fafafa",
+    "muted":             "#27272a",
+    "muted_foreground":  "#a1a1aa",  # --muted-foreground: 240 5% 64.9%
+    "accent":            "#27272a",
+    "accent_foreground": "#fafafa",
+    "destructive":       "#7f1d1d",  # --destructive: 0 62.8% 30.6%
+    "destructive_foreground": "#fafafa",
+    "border":            "#27272a",
+    "input":             "#27272a",
+    "ring":              "#d4d4d8",  # --ring: 240 4.9% 83.9%
+}
+
+# 圆角（--radius: 0.5rem = 8px）
+RADIUS_SM = 4
+RADIUS_MD = 6
+RADIUS_LG = 8
+
+# 间距基数 4px
+SPACE_1 = 4
+SPACE_2 = 8
+SPACE_3 = 12
+SPACE_4 = 16
+
+# 字号
+FONT_SM = 12
+FONT_MD = 13
+FONT_LG = 15
+
+THEMES = {"light": LIGHT, "dark": DARK}
