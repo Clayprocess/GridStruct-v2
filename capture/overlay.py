@@ -9,7 +9,7 @@
 #   拖拽时显示实时尺寸 tooltip
 
 from PySide6.QtWidgets import QApplication, QWidget, QMessageBox
-from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QCursor
+from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QCursor, QRegion
 from PySide6.QtCore import Qt, QRect, QPoint, Signal
 from styles import tokens as T
 from ui import floating_window_type
@@ -46,6 +46,7 @@ class ScreenShotWindow(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setGeometry(virtual_geo)
+        self._pointer_pos = self.mapFromGlobal(QCursor.pos())
         self.setMouseTracking(True)
         self.setCursor(QCursor(Qt.CrossCursor))
 
@@ -69,8 +70,22 @@ class ScreenShotWindow(QWidget):
             new_rect = self._to_local(rect)
         # 高亮不变不重绘：全屏截图重画很贵
         if new_rect != self._snap_rect:
+            dirty = self._snap_border_region(self._snap_rect) | self._snap_border_region(new_rect)
             self._snap_rect = new_rect
-            self.update()
+            self.update(dirty)
+
+    def _snap_border_region(self, rect: QRect) -> QRegion:
+        if rect.isNull():
+            return QRegion()
+        return QRegion(rect.adjusted(-2, -2, 2, 2)) - QRegion(rect.adjusted(3, 3, -3, -3))
+
+    def _hover_region(self) -> QRegion:
+        if not self._sel.isNull():
+            return QRegion(self._size_tip()[0].adjusted(-1, -1, 1, 1))
+        if not self._guides:
+            return QRegion()
+        x, y = self._pointer_pos.x(), self._pointer_pos.y()
+        return QRegion(QRect(x - 1, 0, 3, self.height())) | QRegion(QRect(0, y - 1, self.width(), 3))
 
     def closeEvent(self, e):
         self._snap.shutdown()
@@ -114,7 +129,6 @@ class ScreenShotWindow(QWidget):
 
         # 选区外变暗
         if not self._sel.isNull():
-            from PySide6.QtGui import QRegion
             region = QRegion(self.rect())
             region -= QRegion(self._sel)
             p.setClipRegion(region)
@@ -144,26 +158,29 @@ class ScreenShotWindow(QWidget):
                 p.setPen(QPen(QColor(T.ANNOTATION_COLORS[3]), 2))
                 p.drawRect(self._snap_rect.adjusted(1, 1, -1, -1))
         if self._guides and not self._frozen:
-            center = self._sel.center() if not self._sel.isNull() else self.mapFromGlobal(QCursor.pos())
+            center = self._sel.center() if not self._sel.isNull() else self._pointer_pos
             p.setPen(QPen(QColor(*T.CAPTURE_GUIDE), 1, Qt.DashLine))
             p.drawLine(center.x(), 0, center.x(), self.height())
             p.drawLine(0, center.y(), self.width(), center.y())
 
-    def _draw_size_tip(self, p: QPainter):
+    def _size_tip(self):
         dpr = self._shot.devicePixelRatio()
         text = f"{round(self._sel.width() * dpr)} × {round(self._sel.height() * dpr)} px"
-        fm = p.fontMetrics()
+        fm = self.fontMetrics()
         tw = fm.horizontalAdvance(text) + 16
         th = fm.height() + 10
         # 跟随鼠标右下方，放不下就换边
-        mp = self.mapFromGlobal(QCursor.pos())
+        mp = self._pointer_pos
         x = mp.x() + 16
         y = mp.y() + 20
         if x + tw > self.width():
             x = mp.x() - tw - 8
         if y + th > self.height():
             y = mp.y() - th - 8
-        tip = QRect(x, y, tw, th)
+        return QRect(x, y, tw, th), text
+
+    def _draw_size_tip(self, p: QPainter):
+        tip, text = self._size_tip()
         p.setBrush(QColor(*T.CAPTURE_TIP))
         p.setPen(Qt.NoPen)
         p.drawRoundedRect(tip, 6, 6)
@@ -178,6 +195,7 @@ class ScreenShotWindow(QWidget):
         if e.button() != Qt.LeftButton:
             return
         pos = e.pos()
+        self._pointer_pos = pos
         h = self._hit_handle(pos)
         if h is not None:
             self._drag_mode = h
@@ -200,6 +218,8 @@ class ScreenShotWindow(QWidget):
         if self._frozen:
             return
         pos = e.pos()
+        dirty = self._hover_region()
+        self._pointer_pos = pos
         # 截图像素从虚拟桌面的左上角起算，取样使用窗口局部坐标。
         self._loupe.pick(pos, e.globalPos())
         if self._drag_mode is None:
@@ -215,9 +235,10 @@ class ScreenShotWindow(QWidget):
                 self.setCursor(QCursor(Qt.CrossCursor))
                 # 未框选时请求智能吸附（虚拟桌面坐标）
                 self._snap.detect(pos + self._vg.topLeft())
-            # 辅助线和尺寸提示跟随鼠标；其余 hover 只在吸附高亮变化时重绘。
-            if self._guides or not self._sel.isNull():
-                self.update()
+            # 十字线合并成矩形会退化为全屏重绘，保留细条组成的区域。
+            dirty |= self._hover_region()
+            if not dirty.isEmpty():
+                self.update(dirty)
             return
 
         dx, dy = pos.x() - self._drag_start.x(), pos.y() - self._drag_start.y()

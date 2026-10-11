@@ -4,7 +4,7 @@
 #   三级检测：UIA 元素矩形 -> Win32 窗口矩形 -> 有效性校验，
 #   后台线程异步，结果经信号回传，带矩形缓存。
 #
-# 本实现：窗口快照即时预览 + QThread UIAutomation 精化，无额外包。
+# 本实现：窗口/控件快照同步点查 + 每窗口一次 QThread UIAutomation 精化。
 # 非 Windows 平台返回空（Linux 开发机不断）。
 
 import sys
@@ -15,32 +15,30 @@ _IS_WIN = sys.platform == "win32"
 
 
 class _SnapWorker(QObject):
-    done = Signal(int, QRect, bool)
+    done = Signal(int, object)
 
-    def __init__(self, only_window: bool, ignored_hwnd: int):
+    def __init__(self):
         super().__init__()
-        self._only_window = only_window
-        self._ignored_hwnd = ignored_hwnd
         self._uia = None
         self._uia_initialized = False
 
-    @Slot(int, int, int)
-    def query(self, request_id: int, x: int, y: int):
-        rect = None
+    @Slot(int, "qulonglong")
+    def query(self, request_id: int, hwnd: int):
+        started = time.perf_counter()
+        rects = []
         if _IS_WIN:
-            if not self._only_window:
-                if not self._uia_initialized:
-                    self._uia = _try_init_uia()
-                    self._uia_initialized = True
-                if self._uia is not None:
-                    rect = _detect_uia(self._uia, x, y, self._ignored_hwnd)
-            if rect is None:
-                rect = _detect_win32(x, y, self._only_window, self._ignored_hwnd)
-        self.done.emit(request_id, rect if rect is not None else QRect(), rect is not None)
-
-    @Slot(bool)
-    def set_only_window(self, enabled):
-        self._only_window = enabled
+            if not self._uia_initialized:
+                self._uia = _try_init_uia()
+                self._uia_initialized = True
+            if self._uia is not None:
+                try:
+                    rects = self._uia.window_rectangles(hwnd)
+                except OSError as exc:
+                    print(f"[GridStruct-V2] UIA 精化失败：{exc}", flush=True)
+        detection_ms = (time.perf_counter() - started) * 1000
+        print(f"[GridStruct-V2] UIA request={request_id} detectionMs={detection_ms:.2f} "
+              f"rectangles={len(rects)}", flush=True)
+        self.done.emit(request_id, rects)
 
     @Slot()
     def cleanup(self):
@@ -50,16 +48,14 @@ class _SnapWorker(QObject):
 
 
 class RegionDetector(QObject):
-    """异步检测窗口，regionDetected 返回虚拟桌面逻辑坐标，空矩形表示无目标。
-
-    only_window=True 只吸附顶层窗口；ignored_hwnd 排除截图覆盖层。
-    """
+    """同步命中窗口/控件快照，后台只收集 UIA 控件矩形。"""
 
     regionDetected = Signal(QRect)
 
     def __init__(self, only_window: bool = True, ignored_hwnd: int = 0):
         super().__init__()
-        self._cache: dict[tuple[int, int], tuple[float, QRect]] = {}
+        self._only_window = only_window
+        self._cache = {}
         self._requests = {}
         self._request_id = 0
         self._mode_revision = 0
@@ -69,6 +65,7 @@ class RegionDetector(QObject):
         self._ignored_hwnd = ignored_hwnd
         self._windows = []
         self._last_rect = QRect()
+        self._last = None
         self._window_api = _win32_api() if _IS_WIN else None
         self._snapshot_timer = QTimer(self)
         self._snapshot_timer.timeout.connect(self._refresh_snapshot)
@@ -76,46 +73,55 @@ class RegionDetector(QObject):
             self._refresh_snapshot()
             self._snapshot_timer.start(2000)
         self._thread = QThread(self)
-        self._worker = _SnapWorker(only_window, ignored_hwnd)
+        self._worker = _SnapWorker()
         self._worker.moveToThread(self._thread)
         self._worker.done.connect(self._on_done)
         self._thread.finished.connect(self._worker.cleanup)
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.start()
-        self._last = None
 
     def detect(self, pos: QPoint):
-        """查询合并为一个在途请求和最后一个位置，不积压鼠标移动事件。"""
         from PySide6.QtGui import QGuiApplication
 
-        key = (pos.x(), pos.y())
-        if key == self._last:
+        if self._stopping:
             return
-        self._last = key
-        self._request_id += 1
-        self._discard_queued()
-        hit = self._cache.get(key)
-        if hit and time.monotonic() - hit[0] < 2.0:
-            self._publish(hit[1])
-            return
+        self._last = QPoint(pos)
         screen = QGuiApplication.screenAt(pos)
         if screen is None:
+            self._discard_queued()
             self._publish(QRect())
             return
-        origin = screen.geometry().topLeft()
-        dpr = screen.devicePixelRatio()
-        self._requests[self._request_id] = (key, origin, dpr, self._mode_revision)
-        # Qt 的屏幕原点保留原生位置，屏幕内偏移才按 DPR 缩放。
+        origin, dpr = screen.geometry().topLeft(), screen.devicePixelRatio()
+        # Qt 保留屏幕原生原点，只有屏幕内偏移乘 DPR。
         x = origin.x() + round((pos.x() - origin.x()) * dpr)
         y = origin.y() + round((pos.y() - origin.y()) * dpr)
-        # 快照只提供立即可见的窗口预览；最终结果仍由已验证的 UIA/Win32 路径给出。
-        if not self._last_rect.contains(pos):
-            preview = self._lookup(x, y)
-            self._publish(_logical_rect(preview, origin, dpr) if preview is not None else QRect())
+        hit = self._lookup(x, y)
+        if hit is None:
+            self._discard_queued()
+            self._publish(QRect())
+            return
+        hwnd, window_rect = hit
+        key = (hwnd, window_rect.getRect())
+        rect = window_rect
+        if not self._only_window:
+            for candidate in self._cache.get(key, ()):
+                if candidate.contains(x, y):
+                    rect = candidate
+                    break
+        self._publish(_logical_rect(rect, origin, dpr))
+        # 冻结截图内按窗口收集一次控件，按钮之间移动也无需再跨 COM。
+        if self._queued is not None and self._requests[self._queued[0]][0] != key:
+            self._discard_queued()
+        if (self._only_window or key in self._cache or
+                any(request[0] == key for request in self._requests.values())):
+            return
+        self._request_id += 1
+        self._requests[self._request_id] = (key, self._mode_revision)
+        request = (self._request_id, hwnd)
         if self._inflight:
-            self._queued = (self._request_id, x, y)
+            self._queued = request
         else:
-            self._dispatch(self._request_id, x, y)
+            self._dispatch(*request)
 
     def _publish(self, rect):
         if rect != self._last_rect:
@@ -126,51 +132,53 @@ class RegionDetector(QObject):
         for hwnd, rect in self._windows:
             if (rect.contains(x, y) and self._window_api.IsWindow(hwnd)
                     and self._window_api.IsWindowVisible(hwnd)):
-                return rect
+                return hwnd, rect
         return None
 
     def _refresh_snapshot(self):
         self._windows = _snapshot_windows(self._ignored_hwnd)
+        alive = {(hwnd, rect.getRect()) for hwnd, rect in self._windows}
+        self._cache = {key: rects for key, rects in self._cache.items() if key in alive}
+        if self._last is not None:
+            self.detect(self._last)
 
-    def _dispatch(self, request_id, x, y):
+    def _dispatch(self, request_id, hwnd):
         from PySide6.QtCore import QMetaObject, Qt, Q_ARG
         self._inflight = True
+        # HWND 是指针宽度，不能放进 Qt 的 32 位 int 参数。
         QMetaObject.invokeMethod(
             self._worker, "query", Qt.QueuedConnection,
-            Q_ARG(int, request_id), Q_ARG(int, x), Q_ARG(int, y))
+            Q_ARG(int, request_id), Q_ARG("qulonglong", hwnd))
 
     def _discard_queued(self):
         if self._queued is not None:
             self._requests.pop(self._queued[0])
             self._queued = None
 
-    @Slot(int, QRect, bool)
-    def _on_done(self, request_id: int, rect: QRect, ok: bool):
-        key, origin, dpr, revision = self._requests.pop(request_id)
-        if not self._stopping and revision == self._mode_revision:
-            if ok:
-                rect = _logical_rect(rect, origin, dpr)
-                self._cache[key] = (time.monotonic(), QRect(rect))
-                if len(self._cache) > 256:
-                    self._cache.pop(next(iter(self._cache)))
-            if request_id == self._request_id:
-                self._publish(rect if ok else QRect())
+    @Slot(int, object)
+    def _on_done(self, request_id, rects):
+        key, revision = self._requests.pop(request_id)
+        alive = any((hwnd, rect.getRect()) == key for hwnd, rect in self._windows)
+        if not self._stopping and revision == self._mode_revision and alive:
+            window_rect = QRect(*key[1])
+            unique = {r.intersected(window_rect).getRect() for r in rects}
+            self._cache[key] = sorted(
+                (QRect(*r) for r in unique if r[2] >= 8 and r[3] >= 8),
+                key=lambda r: r.width() * r.height())
         self._inflight = False
         if self._queued is not None and not self._stopping:
             request, self._queued = self._queued, None
             self._dispatch(*request)
+        if not self._stopping and self._last is not None:
+            self.detect(self._last)
 
     def setIsOnlyWindow(self, enabled: bool):
-        """切换检测范围并丢弃之前模式的缓存、迟到结果。"""
-        from PySide6.QtCore import QMetaObject, Qt, Q_ARG
-        self._request_id += 1
+        self._only_window = enabled
         self._mode_revision += 1
         self._discard_queued()
-        self._last = None
         self._cache.clear()
-        self._last_rect = QRect()
-        QMetaObject.invokeMethod(
-            self._worker, "set_only_window", Qt.QueuedConnection, Q_ARG(bool, enabled))
+        if self._last is not None:
+            self.detect(self._last)
 
     def shutdown(self):
         self._stopping = True
@@ -331,6 +339,7 @@ def _detect_win32(x: int, y: int, only_window: bool = True,
 
 
 class _UIAutomation:
+    # Windows build 26300 x64 实测：IUIAutomation2 61/63/14/6/7、element 43/38、walker 4/6、Release 2。
     def __init__(self):
         import ctypes
         from uuid import UUID
@@ -417,6 +426,43 @@ class _UIAutomation:
                 self._release(child)
             child = next_child
         return best
+
+    def window_rectangles(self, hwnd):
+        from ctypes import wintypes
+        ctypes = self._ctypes
+        root = ctypes.c_void_p()
+        self._call(self._automation, 6, [wintypes.HWND, ctypes.POINTER(ctypes.c_void_p)],
+                   hwnd, ctypes.byref(root))
+        if not root:
+            return []
+        # 广度优先先覆盖工具栏等浅层控件，避免正文深树耗尽预算。
+        pending = [root]
+        rects = []
+        deadline = time.monotonic() + 0.2
+        try:
+            index = 0
+            while index < len(pending) and time.monotonic() < deadline:
+                element = pending[index]
+                index += 1
+                rc = wintypes.RECT()
+                self._call(element, 43, [ctypes.POINTER(wintypes.RECT)], ctypes.byref(rc))
+                offscreen = wintypes.BOOL()
+                self._call(element, 38, [ctypes.POINTER(wintypes.BOOL)], ctypes.byref(offscreen))
+                if offscreen.value:
+                    continue
+                rect = QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top)
+                if _valid_rect(rect, rc.left, rc.top):
+                    rects.append(rect)
+                child = self._relative(element, 4)
+                while child:
+                    pending.append(child)
+                    if time.monotonic() >= deadline:
+                        break
+                    child = self._relative(child, 6)
+            return rects
+        finally:
+            for element in pending:
+                self._release(element)
 
     def rectangle_at(self, x, y, target, covered):
         from ctypes import wintypes
