@@ -58,7 +58,7 @@ class AnnotationCanvas(QGraphicsView):
         bg = QGraphicsPixmapItem(pixmap)
         # QGraphicsPixmapItem 已按 pixmap 的 DPR 使用逻辑尺寸。
         self._scene.addItem(bg)
-        lw, lh = pixmap.width() / self._dpr, pixmap.height() / self._dpr
+        lw, lh = pixmap.deviceIndependentSize().width(), pixmap.deviceIndependentSize().height()
         self._scene.setSceneRect(QRectF(0, 0, lw, lh))
 
         self.setFrameShape(QFrame.NoFrame)
@@ -88,7 +88,7 @@ class AnnotationCanvas(QGraphicsView):
             self._loupe.close()
             self._loupe = None
         if tool_id == "magnifier":
-            self._loupe = PipettePopup(self._bg_pixmap, self._dpr, grid=True)
+            self._loupe = PipettePopup(self._bg_pixmap, grid=True)
         self.viewport().setCursor(Qt.CrossCursor)
         self.toolChanged.emit(tool_id)
         return True
@@ -111,7 +111,7 @@ class AnnotationCanvas(QGraphicsView):
     def set_pipette_mode(self, on: bool):
         if on:
             self.clear_tool()
-            self._pipette = PipettePopup(self._bg_pixmap, self._dpr)
+            self._pipette = PipettePopup(self._bg_pixmap)
             self.viewport().setCursor(Qt.CrossCursor)
         else:
             if self._pipette is not None:
@@ -174,8 +174,8 @@ class AnnotationCanvas(QGraphicsView):
     def render_to_pixmap(self) -> QPixmap:
         self._finish_tool()
         rect = self._scene.sceneRect()
-        pm = QPixmap(int(rect.width() * self._dpr),
-                     int(rect.height() * self._dpr))
+        from capture import ScreenManager
+        pm = QPixmap(ScreenManager.image_rect_to_physical(rect, self._bg_pixmap).size())
         pm.setDevicePixelRatio(self._dpr)
         pm.fill(Qt.transparent)
         selected = self._scene.selectedItems()

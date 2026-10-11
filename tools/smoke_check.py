@@ -212,7 +212,10 @@ def all_tools():
             tool.on_right_press(QPointF(160, 100), c._undo)
         rendered = c.render_to_pixmap()
         assert not rendered.isNull()
-        if name != "eraser":
+        if name == "magnifier":
+            assert c._loupe is not None and c._undo.count() == 0
+            assert len(c.scene().items()) == 1, "loupe modified the captured image"
+        elif name != "eraser":
             assert c._undo.count() == 1, name
             c.undo()
             assert len(c.scene().items()) == 1, name
@@ -240,7 +243,8 @@ def scroll_sampling():
     flow._bar = LongShotBar()
     flow._bar.move(1000, 1000)
     flow._screen_region = QRect(0, 0, 400, 400)
-    before, after = sample(200, 200), sample(200, 240)
+    before, after = sample(200, 200), sample(200, 200)
+    after.fill(QColor(T.LIGHT["foreground"]))
     flow._last_frame = before
     flow._toggle_capture()
     def append_frame(frame):
@@ -248,7 +252,7 @@ def scroll_sampling():
         return True
     with patch.object(flow, "_grab", side_effect=[before, after, after]) as grab, \
          patch.object(flow, "_append_frame", side_effect=append_frame) as append, \
-         patch("capture.longshot.QCursor.pos", return_value=QPoint(100, 100)):
+         patch.object(flow._manager, "cursor_position", return_value=QPoint(100, 100)):
         flow._on_wheel(-120)
         timer_id = flow._sample_timer.timerId()
         for _ in range(10):
@@ -287,30 +291,41 @@ def scroll_sampling():
 
 
 def screenshot_lifecycle():
-    from capture import ScreenshotFlow
+    from capture import ScreenshotFlow, DesktopCapture, ScreenFrame
     flow = ScreenshotFlow(app)
-    with patch("capture.flow.capture_virtual_desktop", return_value=sample(800, 600)), \
-         patch("capture.flow.virtual_geometry", return_value=QRect(-800, 0, 800, 600)):
+    source = sample(800, 600)
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(-800, 0, 800, 600), source, QPoint(-800, 0))])
+    copied = []
+    clipboard = SimpleNamespace(setPixmap=lambda pixmap: copied.append(QPixmap(pixmap)))
+    with patch("capture.flow.capture_virtual_desktop", return_value=shot), \
+         patch("capture.flow.QApplication.clipboard", return_value=clipboard):
         for _ in range(3):
             flow.start()
-            flow._win._sel = QRect(40, 50, 300, 200)
-            QTest.keyClick(flow._win, Qt.Key_Return)
+            flow._win._sel = QRect(-760, 50, 300, 200)
+            flow._win.confirm()
             window = flow._ann
             assert window.pos() == QPoint(-760, 50), window.pos()
             window._on_action("confirm")
             flush()
+            assert (copied[-1].toImage().convertToFormat(QImage.Format_RGBA8888)
+                    == source.copy(40, 50, 300, 200).toImage().convertToFormat(QImage.Format_RGBA8888))
             assert flow._ann is None and flow._win is None
+        flow.start()
+        flow._win._sel = QRect(-760, 50, 300, 200)
+        QTest.keyClick(flow._win._windows[0], Qt.Key_Return)
+        flush()
+        assert flow._ann is None and flow._win is None, "Enter did not complete capture"
         flow.start()
         flow._win.cancelled.emit()
         flush()
         assert flow._win is None
         flow.start()
-        flow._win.close()
+        flow._win._windows[0].close()
         flush()
         assert flow._win is None, "window-manager close left capture session active"
         flow.start()
-        flow._win._sel = QRect(40, 50, 300, 200)
-        QTest.keyClick(flow._win, Qt.Key_Return)
+        flow._win._sel = QRect(-760, 50, 300, 200)
+        flow._win.confirm()
         flow._ann.close()
         flush()
         assert flow._ann is None, "window-manager close left annotation session active"
@@ -329,20 +344,20 @@ def pin_lifecycle():
 
 
 def longshot_lifecycle():
-    from capture import LongShotFlow
+    from capture import LongShotFlow, DesktopCapture, ScreenFrame
     result = []
     flow = LongShotFlow(app, result.append)
     source = sample(800, 600)
-    with patch("capture.screen.capture_virtual_desktop", return_value=source), \
-         patch("capture.screen.virtual_geometry", return_value=QRect(0, 0, 800, 600)), \
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(-800, 0, 800, 600), source, QPoint(-800, 0))])
+    with patch("capture.longshot.capture_virtual_desktop", return_value=shot), \
          patch("capture.wheelhook.WheelHook.start", return_value=True), \
          patch.object(flow, "_grab", side_effect=AssertionError("first frame captured overlay")):
         flow.start()
         overlay = flow._win
         flow.start()
         assert flow._win is overlay, "duplicate longshot session"
-        flow._win._sel = QRect(20, 30, 300, 200)
-        QTest.keyClick(flow._win, Qt.Key_Return)
+        flow._win._sel = QRect(-780, 30, 300, 200)
+        QTest.keyClick(flow._win._windows[0], Qt.Key_Return)
         assert flow._last_frame.toImage() == source.copy(20, 30, 300, 200).toImage()
         flow._toggle_capture()
         flow._sample_timer.start()
@@ -350,8 +365,8 @@ def longshot_lifecycle():
         flush()
         assert flow._bar is None and flow._hook is None and not flow._sample_timer.isActive()
         flow.start()
-        flow._win._sel = QRect(20, 30, 300, 200)
-        QTest.keyClick(flow._win, Qt.Key_Return)
+        flow._win._sel = QRect(-780, 30, 300, 200)
+        QTest.keyClick(flow._win._windows[0], Qt.Key_Return)
         flow._finish()
         flush()
         assert len(result) == 1 and result[0].size() == source.copy(20, 30, 300, 200).size()

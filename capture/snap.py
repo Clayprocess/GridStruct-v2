@@ -52,7 +52,7 @@ class RegionDetector(QObject):
 
     regionDetected = Signal(QRect)
 
-    def __init__(self, only_window: bool = True, ignored_hwnd: int = 0):
+    def __init__(self, only_window: bool = True, ignored_hwnd: int = 0, *, ignored_hwnds=()):
         super().__init__()
         self._only_window = only_window
         self._cache = {}
@@ -62,7 +62,7 @@ class RegionDetector(QObject):
         self._inflight = False
         self._queued = None
         self._stopping = False
-        self._ignored_hwnd = ignored_hwnd
+        self._ignored_hwnd = frozenset(ignored_hwnds) | {ignored_hwnd}
         self._windows = []
         self._last_rect = QRect()
         self._last = None
@@ -81,20 +81,19 @@ class RegionDetector(QObject):
         self._thread.start()
 
     def detect(self, pos: QPoint):
-        from PySide6.QtGui import QGuiApplication
+        from .screen import ScreenManager
 
         if self._stopping:
             return
         self._last = QPoint(pos)
-        screen = QGuiApplication.screenAt(pos)
+        manager = ScreenManager.instance()
+        screen = manager.screen_at(pos)
         if screen is None:
             self._discard_queued()
             self._publish(QRect())
             return
-        origin, dpr = screen.geometry().topLeft(), screen.devicePixelRatio()
-        # Qt 保留屏幕原生原点，只有屏幕内偏移乘 DPR。
-        x = origin.x() + round((pos.x() - origin.x()) * dpr)
-        y = origin.y() + round((pos.y() - origin.y()) * dpr)
+        point = manager.logical_to_physical(pos, screen)
+        x, y = point.x(), point.y()
         hit = self._lookup(x, y)
         if hit is None:
             self._discard_queued()
@@ -108,7 +107,7 @@ class RegionDetector(QObject):
                 if candidate.contains(x, y):
                     rect = candidate
                     break
-        self._publish(_logical_rect(rect, origin, dpr))
+        self._publish(manager.physical_rect_to_logical(rect))
         # 冻结截图内按窗口收集一次控件，按钮之间移动也无需再跨 COM。
         if self._queued is not None and self._requests[self._queued[0]][0] != key:
             self._discard_queued()
@@ -215,12 +214,6 @@ def _win32_api():
     return user32
 
 
-def _logical_rect(rect, origin, dpr):
-    return QRect(origin.x() + round((rect.x() - origin.x()) / dpr),
-                 origin.y() + round((rect.y() - origin.y()) / dpr),
-                 round(rect.width() / dpr), round(rect.height() / dpr))
-
-
 def _dwm_api():
     import ctypes
     from ctypes import wintypes
@@ -233,7 +226,8 @@ def _dwm_api():
 def _usable_window(user32, dwm, hwnd, ignored_hwnd):
     import ctypes
     from ctypes import wintypes
-    if (not hwnd or hwnd == ignored_hwnd or not user32.IsWindow(hwnd)
+    excluded = hwnd in ignored_hwnd if isinstance(ignored_hwnd, (set, frozenset)) else hwnd == ignored_hwnd
+    if (not hwnd or excluded or not user32.IsWindow(hwnd)
             or not user32.IsWindowVisible(hwnd) or user32.IsHungAppWindow(hwnd)):
         return False
     exstyle = user32.GetWindowLongW(hwnd, -20)

@@ -5,7 +5,7 @@ import os
 from threading import Lock
 from dataclasses import dataclass
 from PySide6.QtGui import QPixmap, QImage
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QRect, QRectF
 
 _MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "assets", "models")
 _MODEL_DIR = os.path.abspath(_MODEL_DIR)
@@ -62,7 +62,7 @@ class OCREngine:
 
     def _recognize_image(self, image: QImage) -> list[OCRResult]:
         self._ensure()
-        dpr = image.devicePixelRatio() or 1.0
+        from capture import ScreenManager
         img = image.convertToFormat(QImage.Format_BGR888)
         w, h = img.width(), img.height()
         import numpy as np
@@ -75,9 +75,9 @@ class OCREngine:
             for box, txt, score in zip(res.boxes, res.txts, res.scores):
                 xs = [p[0] for p in box]
                 ys = [p[1] for p in box]
-                r = QRect(int(min(xs) / dpr), int(min(ys) / dpr),
-                          int((max(xs) - min(xs)) / dpr),
-                          int((max(ys) - min(ys)) / dpr))
+                physical = QRectF(float(min(xs)), float(min(ys)),
+                                  float(max(xs) - min(xs)), float(max(ys) - min(ys)))
+                r = ScreenManager.image_rect_to_logical(physical, image).toAlignedRect()
                 out.append(OCRResult(r, txt or "", float(score or 0)))
         from .layout import arrange_results
         return arrange_results(out)

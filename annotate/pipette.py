@@ -13,14 +13,13 @@ class PipettePopup(QWidget):
     ZOOM = 6       # 放大倍数
     CELLS = 9      # 取 9x9 像素
 
-    def __init__(self, pixmap: QPixmap, dpr: float, grid: bool = False):
+    def __init__(self, pixmap: QPixmap, grid: bool = False):
         super().__init__(
             None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
             | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self._pm = pixmap
-        self._dpr = dpr
         self._grid = grid  # 放大镜模式：画像素网格线
         # 放大镜按承诺规格 11x11 @8x；取色器保持 9x9 @6x
         self._cells = 11 if grid else self.CELLS
@@ -41,8 +40,9 @@ class PipettePopup(QWidget):
 
     def pick(self, scene_pos: QPoint, cursor_global: QPoint):
         """scene_pos 为逻辑坐标。返回 QColor。"""
-        px = int(scene_pos.x() * self._dpr)
-        py = int(scene_pos.y() * self._dpr)
+        from capture import ScreenManager
+        pixel = ScreenManager.image_point_to_physical(scene_pos, self._pm)
+        px, py = pixel.x(), pixel.y()
         img = self._pm.toImage()
         px = max(0, min(img.width() - 1, px))
         py = max(0, min(img.height() - 1, py))

@@ -63,7 +63,7 @@ ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使
 
 | 模块 | 职责 | 主要公开接口与边界 |
 |---|---|---|
-| `capture/` | 桌面捕获、选区、吸附、截图流程、长截图 | `ScreenshotFlow`、`LongShotFlow`、`ScreenShotWindow`、`RegionDetector`；将选区/拼接结果交给标注流程 |
+| `capture/` | 屏幕管理、桌面捕获、选区、吸附、截图流程、长截图 | `ScreenManager`、`DesktopCapture`、`ScreenFrame`、`ScreenshotFlow`、`LongShotFlow`、`ScreenShotWindow`、`RegionDetector`；将选区/拼接结果交给标注流程 |
 | `annotate/` | 标注画布、工具、样式和浮动工具条 | `AnnotationWindow`、`AnnotationCanvas`、`MarkStyle`、`FloatPanel`、`create_tool`；输出动作调用其他模块的公开接口 |
 | `pin/` | 图片/文字贴图、窗口管理、会话保存恢复 | `show_pin`、`show_text_pin`、`show_pin_from_clipboard`、`restore_pins`、`save_pins`、`shutdown_pins`、`disable_click_through`；图片识别调用 OCR 接口 |
 | `ocr/` | 本地推理、后台任务、文字结果对话框与文字层 | `OCREngine`、`OCRResult`、`OCRController`、`OCRResultDialog`、`add_text_layer`；不包含表格/公式识别 |
@@ -112,3 +112,18 @@ OCR 后续补齐也已实机验证：截图与图片贴图默认保留原图文�
 合成 OCR 样本只验证回归和接线，不代表真实业务文字准确率。混合 DPI、多屏交互、不同滚动应用和打包后的目标电脑运行需分别记录实测结果。
 
 2026-10-11 合并远程更新后，应用与构建产物统一为 GridStruct-V2；内部自启项和单实例锁保留旧标识，避免升级后重复启动。整合了固定 11×11 @8× 跟随放大镜和窗口快照预览，并保留后台 UIA 控件精化及 OCR 反馈修复。合并后通过源码编译、吸附 provider 回归、可见业务窗口 OCR 反馈回归与模拟注册表兼容检查；`portable-20261011-141553` 构建、资源与原生依赖加载、ZIP CRC 校验通过。该合并包尚未重新完成真实桌面全流程验收，前述旧包实测结果不覆盖新增放大镜和快照行为。
+
+
+## 多显示器与混合 DPI
+
+进程通过 `app.manifest` 和启动时的 `SetProcessDpiAwarenessContext(-4)` 声明 PerMonitorV2；`SetProcessDpiAwareness(2)` 仅作为不支持 V2 系统的兼容回退。两者的区别见 [Microsoft DPI 初始化说明](https://learn.microsoft.com/en-us/windows/win32/hidpi/setting-the-default-dpi-awareness-for-a-process)。
+
+`capture_virtual_desktop()` 返回 `DesktopCapture`，逐屏保留原生 `QPixmap` 和 DPR，不再创建统一最大 DPR 的整桌面位图。每屏有独立覆盖层，共享全局逻辑选区控制器。单屏裁切保持原生像素和 DPR；跨屏裁切按各屏物理位置拼接为 DPR=1 的图片，不重采样，屏幕排列或缩放差异形成的空白保留。跨屏结果在可滚动标注视口中编辑。
+
+屏幕坐标通过 `ScreenManager` 的 `whole_rect`、`screen_at`、点/矩形双向换算进入；图像自身的局部坐标使用同一模块的 `image_*` 方法，避免把标注图片 DPR 误当所在显示器 DPR。Qt 在 Windows 上的逻辑屏幕排列可能有空洞，屏幕原点来自原生监视器信息，参见 [Qt High DPI](https://doc.qt.io/qt-6/highdpi.html)。
+
+屏幕管理使用原生监视器枚举和 Qt 信息兜底、互斥刷新，监听添加/移除、几何/DPI 与 `TaskbarCreated`。捕获仍使用 Qt `grabWindow`，本次没有实现 PixPin DLL 的三套捕获后端。每屏尺寸异常最多重抓两次；原生尺寸用于校验，避免非整数缩放下逻辑尺寸反乘产生一像素误差。截图选区阶段遇到屏幕变化会隐藏旧覆盖层、清空旧选区、重新捕获并重建；已进入标注时结束旧截图会话。长截图会暂停并保留已有结果，防止把不同尺寸或 DPR 的帧混入拼接。
+
+2026-10-11 本机只有一块 3840×2160、150% 显示器。已验证：源码进程 PerMonitorV2、原生整屏裁切逐像素一致、Windows 原生冒烟、BFS 四项、可见 Qt 业务窗口的截图/长截图生命周期与高 DPI 标注/OCR；内存检查覆盖负原点、100/125/150/200/225% 坐标和裁切、混合 DPR 原生拼接以及重试次数。向自身隐藏接收窗口发送 `TaskbarCreated` 后刷新通过，不等于实际重启 Explorer。脚本中的截图复制在边界记录输出，不等于真实系统剪贴板验收。
+
+尚未验证：两块真实混合 DPI 显示器上的文字清晰度、鼠标跨屏连续框选、截图期间真实分辨率/缩放切换、物理插拔，以及任务管理器 DPI 列人工核对。桌面控制工具的应用授权等待超时，真实鼠标验收未完成；上述程序内检查不能替代这些硬件与交互验收。

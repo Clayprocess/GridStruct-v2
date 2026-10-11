@@ -59,6 +59,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    manifest=str(root / "app.manifest"),
     contents_directory="_internal",
 )
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="GridStruct-V2")

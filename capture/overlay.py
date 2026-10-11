@@ -1,105 +1,265 @@
-# 全屏框选窗口：显示变暗的截图，橡皮筋选区。
-#
-# 交互：
-#   按下拖拽      新建选区
-#   选区内拖拽    移动选区
-#   边缘/角拖拽   调整选区（8 手柄）
-#   双击选区内    确认 -> regionSelected(QRect 逻辑坐标)
-#   ESC           取消 -> cancelled
-#   拖拽时显示实时尺寸 tooltip
-
+# 每屏保留原生截图，控制器共享全局逻辑选区，避免混合 DPI 跨窗重采样。
 from PySide6.QtWidgets import QApplication, QWidget, QMessageBox
-from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QCursor, QRegion
-from PySide6.QtCore import Qt, QRect, QPoint, Signal
+from PySide6.QtGui import QPainter, QPen, QColor, QCursor, QRegion
+from PySide6.QtCore import Qt, QRect, QPoint, Signal, QObject, QTimer
 from styles import tokens as T
 from ui import floating_window_type
 from settings import get_settings
+from .screen import ScreenManager, capture_virtual_desktop
+from .snap import RegionDetector
 
-_HANDLE = 8          # 手柄边长（逻辑像素）
-_MIN_SIZE = 4        # 最小选区
+_HANDLE = 8
+_MIN_SIZE = 4
 _DIM = QColor(*T.CAPTURE_MASK)
 
 
-class ScreenShotWindow(QWidget):
+class ScreenShotWindow(QObject):
     regionSelected = Signal(QRect)
     selectionChanged = Signal(QRect)
     actionRequested = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, screenshot: QPixmap, virtual_geo: QRect, keep_open=False):
+    def __init__(self, screenshot, virtual_geo=None, keep_open=False):
         super().__init__()
-        self.setWindowTitle("PixShot 截图选区")
+        self._manager = ScreenManager.instance()
         self._shot = screenshot
-        self._ended = False
+        self._vg = screenshot.geometry
         self._keep_open = keep_open
+        self._ended = False
+        self._closed = False
+        self._refreshing = False
         self._frozen = False
         self._guides = get_settings().value("capture_guides", True, type=bool)
-        self.setAttribute(Qt.WA_DeleteOnClose)
-        self._vg = virtual_geo
-        self._sel = QRect()          # 选区（窗口逻辑坐标）
-        self._drag_mode = None       # 'create' | 'move' | handle_index | None
+        self._sel = QRect()
+        self._snap_rect = QRect()
+        self._drag_mode = None
         self._drag_start = QPoint()
         self._sel_start = QRect()
+        self._pointer_pos = self._manager.cursor_position()
+        self._windows = []
+        self._build_windows()
+        self._manager.changed.connect(self._screens_changed)
 
-        self.setWindowFlags(
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | floating_window_type()
-        )
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setGeometry(virtual_geo)
-        self._pointer_pos = self.mapFromGlobal(QCursor.pos())
-        self.setMouseTracking(True)
-        self.setCursor(QCursor(Qt.CrossCursor))
+    @property
+    def capture(self):
+        return self._shot
 
-        # 智能吸附：快照预览后由后台 UIA 精化。
-        from .snap import RegionDetector
-        self._snap = RegionDetector(ignored_hwnd=int(self.winId()),
-                                    only_window=get_settings().value("snap_only_window", False, type=bool))
-        self._snap_rect = QRect()
+    def _build_windows(self):
+        self._windows = [_ScreenOverlay(self, frame) for frame in self._shot.frames]
+        self._snap = RegionDetector(
+            ignored_hwnds={int(widget.winId()) for window in self._windows
+                           for widget in (window, window.loupe)},
+            only_window=get_settings().value("snap_only_window", False, type=bool))
         self._snap.regionDetected.connect(self._on_snap)
 
-        # 放大镜：跟随鼠标，像素级精确定位
-        from annotate import PipettePopup
-        self._loupe = PipettePopup(
-            screenshot, screenshot.devicePixelRatio() or 1.0, grid=True)
+    def show(self):
+        for window in self._windows:
+            window.show()
+        active = next((w for w in self._windows if w.frame.geometry.contains(self._pointer_pos)), self._windows[0])
+        active.activateWindow()
+        active.setFocus()
 
-    def _on_snap(self, rect: QRect):
-        """吸附结果（虚拟桌面坐标）-> 本地坐标。仅在未框选时显示。"""
-        if not self._sel.isNull() or self._drag_mode is not None:
-            new_rect = QRect()
-        else:
-            new_rect = self._to_local(rect)
-        # 高亮不变不重绘：全屏截图重画很贵
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._manager.changed.disconnect(self._screens_changed)
+        self._snap.shutdown()
+        for window in self._windows:
+            window.loupe.close()
+            window.close()
+        self._windows.clear()
+        if not self._ended:
+            self._ended = True
+            self.cancelled.emit()
+
+    def _screens_changed(self):
+        if self._closed or self._refreshing:
+            return
+        if self._frozen:
+            self.close()
+            self.cancelled.emit()
+            return
+        self._refreshing = True
+        self._sel = QRect()
+        self.selectionChanged.emit(QRect())
+        self._snap.shutdown()
+        for window in self._windows:
+            window.loupe.hide()
+            window.hide()
+        # 等窗口隐藏消息送达桌面合成器，下一次抓图才不会包含旧遮罩。
+        QTimer.singleShot(100, self._refresh_capture)
+
+    def _refresh_capture(self):
+        if self._closed:
+            return
+        try:
+            shot = capture_virtual_desktop()
+        except (RuntimeError, OSError) as error:
+            print(f"[capture] screen refresh failed: {error}")
+            self.close()
+            return
+        for window in self._windows:
+            window.loupe.close()
+            window.close()
+        self._shot = shot
+        self._vg = shot.geometry
+        self._sel = QRect()
+        self._snap_rect = QRect()
+        self._drag_mode = None
+        self._frozen = False
+        self._pointer_pos = self._manager.cursor_position()
+        self._build_windows()
+        self._refreshing = False
+        self.selectionChanged.emit(QRect())
+        self.show()
+
+    def update(self, region=None):
+        for window in self._windows:
+            if region is None:
+                window.update()
+            else:
+                local = region.translated(-window.frame.geometry.topLeft())
+                window.update(local.intersected(QRegion(window.rect())))
+
+    def _on_snap(self, rect):
+        new_rect = QRect() if not self._sel.isNull() or self._drag_mode is not None else rect
         if new_rect != self._snap_rect:
-            dirty = self._snap_border_region(self._snap_rect) | self._snap_border_region(new_rect)
-            self._snap_rect = new_rect
+            dirty = self._border_region(self._snap_rect) | self._border_region(new_rect)
+            self._snap_rect = QRect(new_rect)
             self.update(dirty)
 
-    def _snap_border_region(self, rect: QRect) -> QRegion:
+    @staticmethod
+    def _border_region(rect):
         if rect.isNull():
             return QRegion()
         return QRegion(rect.adjusted(-2, -2, 2, 2)) - QRegion(rect.adjusted(3, 3, -3, -3))
 
-    def _hover_region(self) -> QRegion:
-        if not self._sel.isNull():
-            return QRegion(self._size_tip()[0].adjusted(-1, -1, 1, 1))
-        if not self._guides:
-            return QRegion()
-        x, y = self._pointer_pos.x(), self._pointer_pos.y()
-        return QRegion(QRect(x - 1, 0, 3, self.height())) | QRegion(QRect(0, y - 1, self.width(), 3))
+    def _hover_region(self):
+        region = QRegion()
+        for window in self._windows:
+            region |= window.hover_region()
+        return region
 
-    def closeEvent(self, e):
+    def _clamp_position(self):
+        self._sel.moveLeft(max(self._vg.left(), min(self._sel.x(), self._vg.right() - self._sel.width() + 1)))
+        self._sel.moveTop(max(self._vg.top(), min(self._sel.y(), self._vg.bottom() - self._sel.height() + 1)))
+
+    def mouse_press(self, event):
+        if self._frozen or self._refreshing or event.button() != Qt.LeftButton:
+            return
+        pos = self._manager.cursor_position()
+        self._pointer_pos = pos
+        handle = self._hit_handle(pos)
+        if handle is not None:
+            self._drag_mode = handle
+        elif not self._sel.isNull() and self._sel.contains(pos):
+            self._drag_mode = "move"
+        elif self._sel.isNull() and self._snap_rect.contains(pos):
+            self._sel = QRect(self._snap_rect)
+            self._snap_rect = QRect()
+            self._drag_mode = "snap"
+        else:
+            self._drag_mode = "create"
+            self._sel = QRect(pos, pos)
+        self._drag_start = pos
+        self._sel_start = QRect(self._sel)
+        self.update()
+
+    def mouse_move(self, event):
+        if self._frozen or self._refreshing:
+            return
+        pos = self._manager.cursor_position()
+        dirty = self._hover_region()
+        self._pointer_pos = pos
+        for window in self._windows:
+            if window.frame.geometry.contains(pos):
+                window.loupe.pick(pos - window.frame.geometry.topLeft(), pos)
+            else:
+                window.loupe.hide()
+        if self._drag_mode is None:
+            handle = self._hit_handle(pos)
+            if handle is not None:
+                cursor = [Qt.SizeFDiagCursor, Qt.SizeVerCursor, Qt.SizeBDiagCursor, Qt.SizeHorCursor][handle % 4]
+            elif self._sel.contains(pos):
+                cursor = Qt.SizeAllCursor
+            else:
+                cursor = Qt.CrossCursor
+                if self._sel.isNull():
+                    self._snap.detect(pos)
+            for window in self._windows:
+                window.setCursor(QCursor(cursor))
+            self.update(dirty | self._hover_region())
+            return
+        dx, dy = pos.x() - self._drag_start.x(), pos.y() - self._drag_start.y()
+        if self._drag_mode == "snap":
+            if (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
+                return
+            self._drag_mode = "create"
+        if self._drag_mode == "create":
+            self._sel = QRect(self._drag_start, pos).normalized()
+        elif self._drag_mode == "move":
+            self._sel = self._sel_start.translated(dx, dy)
+            self._clamp_position()
+        else:
+            self._resize_by_handle(self._sel_start, self._drag_mode, dx, dy)
+        self._sel = self._sel.intersected(self._vg)
+        self.update()
+        self.selectionChanged.emit(QRect(self._sel))
+
+    def mouse_release(self, event):
+        if self._frozen or self._refreshing or event.button() != Qt.LeftButton:
+            return
+        self._drag_mode = None
+        if self._sel.width() < _MIN_SIZE or self._sel.height() < _MIN_SIZE:
+            self._sel = QRect()
+        self.update()
+        self.selectionChanged.emit(QRect(self._sel))
+
+    def mouse_double_click(self, event):
+        if not self._frozen and not self._refreshing and event.button() == Qt.LeftButton and self._sel.contains(self._manager.cursor_position()):
+            self._accept_selection()
+
+    def _accept_selection(self):
+        if self._keep_open:
+            self.actionRequested.emit("confirm")
+        else:
+            self.confirm()
+
+    def confirm(self):
+        if self._ended or self._closed or self._refreshing or self._sel.isEmpty():
+            return False
+        self._ended = True
+        self._frozen = self._keep_open
         self._snap.shutdown()
-        self._loupe.close()
-        if not self._ended:
-            self._ended = True
-            self.cancelled.emit()
-        super().closeEvent(e)
+        for window in self._windows:
+            window.loupe.hide()
+        self.update()
+        self.regionSelected.emit(QRect(self._sel))
+        if not self._keep_open:
+            self.close()
+        return True
 
-    # ---------- 选区几何 ----------
-
-    def _to_local(self, r: QRect) -> QRect:
-        return r.translated(-self._vg.topLeft())
-
+    def key_press(self, event, window):
+        if self._frozen or self._refreshing:
+            return
+        key, modifiers = event.key(), event.modifiers()
+        if key == Qt.Key_Escape:
+            if QMessageBox.question(window, "退出截图", "确认退出截图？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+                self.close()
+        elif key in (Qt.Key_Return, Qt.Key_Enter) and not self._sel.isNull():
+            self._accept_selection()
+        elif self._keep_open and not self._sel.isNull() and modifiers & Qt.ControlModifier and key in (Qt.Key_C, Qt.Key_S):
+            self.actionRequested.emit("copy" if key == Qt.Key_C else "save")
+        elif self._keep_open and not self._sel.isNull() and modifiers & Qt.ShiftModifier and key == Qt.Key_O:
+            self.actionRequested.emit("ocr")
+        elif not self._sel.isNull() and key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            step = 10 if modifiers & Qt.ShiftModifier else 1
+            delta = {Qt.Key_Left: (-step, 0), Qt.Key_Right: (step, 0), Qt.Key_Up: (0, -step), Qt.Key_Down: (0, step)}[key]
+            self._sel.translate(*delta)
+            self._clamp_position()
+            self.selectionChanged.emit(QRect(self._sel))
+            self.update()
     def _handles(self):
         """8 手柄：返回 [(index, QRect)]，index 0..7 从左上顺时针。"""
         s = self._sel
@@ -121,150 +281,6 @@ class ScreenShotWindow(QWidget):
                 return i
         return None
 
-    # ---------- 绘制 ----------
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.drawPixmap(0, 0, self._shot)
-
-        # 选区外变暗
-        if not self._sel.isNull():
-            region = QRegion(self.rect())
-            region -= QRegion(self._sel)
-            p.setClipRegion(region)
-            p.fillRect(self.rect(), _DIM)
-            p.setClipping(False)
-
-            # 选区边框：白实线 + 外发光描边
-            p.setPen(QPen(QColor(T.ANNOTATION_COLORS[3]), 2))
-            p.drawRect(self._sel.adjusted(1, 1, -1, -1))
-            p.setPen(QPen(QColor(*T.CAPTURE_GUIDE), 1))
-            p.drawRect(self._sel.adjusted(2, 2, -2, -2))
-
-            # 手柄
-            p.setBrush(QColor(T.ANNOTATION_COLORS[3]))
-            p.setPen(Qt.NoPen)
-            if not self._frozen:
-                for _, r in self._handles():
-                    p.drawRect(r)
-
-            # 尺寸提示
-            if not self._frozen:
-                self._draw_size_tip(p)
-        else:
-            p.fillRect(self.rect(), _DIM)
-            # 智能吸附高亮（未框选时）
-            if not self._snap_rect.isNull():
-                p.setPen(QPen(QColor(T.ANNOTATION_COLORS[3]), 2))
-                p.drawRect(self._snap_rect.adjusted(1, 1, -1, -1))
-        if self._guides and not self._frozen:
-            center = self._sel.center() if not self._sel.isNull() else self._pointer_pos
-            p.setPen(QPen(QColor(*T.CAPTURE_GUIDE), 1, Qt.DashLine))
-            p.drawLine(center.x(), 0, center.x(), self.height())
-            p.drawLine(0, center.y(), self.width(), center.y())
-
-    def _size_tip(self):
-        dpr = self._shot.devicePixelRatio()
-        text = f"{round(self._sel.width() * dpr)} × {round(self._sel.height() * dpr)} px"
-        fm = self.fontMetrics()
-        tw = fm.horizontalAdvance(text) + 16
-        th = fm.height() + 10
-        # 跟随鼠标右下方，放不下就换边
-        mp = self._pointer_pos
-        x = mp.x() + 16
-        y = mp.y() + 20
-        if x + tw > self.width():
-            x = mp.x() - tw - 8
-        if y + th > self.height():
-            y = mp.y() - th - 8
-        return QRect(x, y, tw, th), text
-
-    def _draw_size_tip(self, p: QPainter):
-        tip, text = self._size_tip()
-        p.setBrush(QColor(*T.CAPTURE_TIP))
-        p.setPen(Qt.NoPen)
-        p.drawRoundedRect(tip, 6, 6)
-        p.setPen(QColor(T.DARK["foreground"]))
-        p.drawText(tip, Qt.AlignCenter, text)
-
-    # ---------- 鼠标 ----------
-
-    def mousePressEvent(self, e):
-        if self._frozen:
-            return
-        if e.button() != Qt.LeftButton:
-            return
-        pos = e.pos()
-        self._pointer_pos = pos
-        h = self._hit_handle(pos)
-        if h is not None:
-            self._drag_mode = h
-        elif not self._sel.isNull() and self._sel.contains(pos):
-            self._drag_mode = "move"
-        elif (self._sel.isNull() and not self._snap_rect.isNull()
-                and self._snap_rect.contains(pos)):
-            # 先预览吸附，超过拖动阈值后仍可从按下位置自由框选。
-            self._sel = QRect(self._snap_rect)
-            self._snap_rect = QRect()
-            self._drag_mode = "snap"
-        else:
-            self._drag_mode = "create"
-            self._sel = QRect(pos, pos)
-        self._drag_start = pos
-        self._sel_start = QRect(self._sel)
-        self.update()
-
-    def mouseMoveEvent(self, e):
-        if self._frozen:
-            return
-        pos = e.pos()
-        dirty = self._hover_region()
-        self._pointer_pos = pos
-        # 截图像素从虚拟桌面的左上角起算，取样使用窗口局部坐标。
-        self._loupe.pick(pos, e.globalPos())
-        if self._drag_mode is None:
-            # hover：手柄上换光标
-            h = self._hit_handle(pos)
-            if h is not None:
-                cursors = [Qt.SizeFDiagCursor, Qt.SizeVerCursor,
-                           Qt.SizeBDiagCursor, Qt.SizeHorCursor]
-                self.setCursor(QCursor(cursors[h % 4]))
-            elif not self._sel.isNull() and self._sel.contains(pos):
-                self.setCursor(QCursor(Qt.SizeAllCursor))
-            else:
-                self.setCursor(QCursor(Qt.CrossCursor))
-                # 未框选时请求智能吸附（虚拟桌面坐标）
-                self._snap.detect(pos + self._vg.topLeft())
-            # 十字线合并成矩形会退化为全屏重绘，保留细条组成的区域。
-            dirty |= self._hover_region()
-            if not dirty.isEmpty():
-                self.update(dirty)
-            return
-
-        dx, dy = pos.x() - self._drag_start.x(), pos.y() - self._drag_start.y()
-        s = QRect(self._sel_start)
-
-        if self._drag_mode == "snap":
-            if (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
-                return
-            self._drag_mode = "create"
-
-        if self._drag_mode == "create":
-            self._sel = QRect(self._drag_start, pos).normalized()
-        elif self._drag_mode == "move":
-            self._sel = s.translated(dx, dy)
-            self._clamp_position()
-        else:
-            self._resize_by_handle(s, self._drag_mode, dx, dy)
-
-        # 钳制在窗口内
-        self._sel = self._sel.intersected(self.rect())
-        self.update()
-        self.selectionChanged.emit(QRect(self._sel))
-
-    def _clamp_position(self):
-        self._sel.moveLeft(max(0, min(self._sel.x(), self.width() - self._sel.width())))
-        self._sel.moveTop(max(0, min(self._sel.y(), self.height() - self._sel.height())))
 
     def _resize_by_handle(self, s: QRect, h: int, dx: int, dy: int):
         x, y, w, hh = s.x(), s.y(), s.width(), s.height()
@@ -283,60 +299,100 @@ class ScreenShotWindow(QWidget):
             hh = _MIN_SIZE
         self._sel = QRect(x, y, w, hh).normalized()
 
-    def mouseReleaseEvent(self, e):
-        if self._frozen:
-            return
-        if e.button() == Qt.LeftButton:
-            self._drag_mode = None
-            if self._sel.width() < _MIN_SIZE or self._sel.height() < _MIN_SIZE:
-                self._sel = QRect()
-            self.update()
-            self.selectionChanged.emit(QRect(self._sel))
 
-    def mouseDoubleClickEvent(self, e):
-        if self._frozen:
-            return
-        if (e.button() == Qt.LeftButton and not self._sel.isNull()
-                and self._sel.contains(e.pos())):
-            self._accept_selection()
+class _ScreenOverlay(QWidget):
+    def __init__(self, controller, frame):
+        super().__init__()
+        self.controller = controller
+        self.frame = frame
+        self.setWindowTitle("GridStruct-V2 截图选区")
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | floating_window_type())
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setMouseTracking(True)
+        self.setCursor(QCursor(Qt.CrossCursor))
+        self.setScreen(frame.screen)
+        self.setGeometry(frame.geometry)
+        from annotate import PipettePopup
+        self.loupe = PipettePopup(frame.pixmap, grid=True)
 
-    def _accept_selection(self):
-        if self._keep_open:
-            self.actionRequested.emit("confirm")
-        else:
-            self._confirm()
+    def hover_region(self):
+        c = self.controller
+        if not c._sel.isNull():
+            if self.frame.geometry.contains(c._pointer_pos):
+                return QRegion(self._size_tip()[0].translated(self.frame.geometry.topLeft()).adjusted(-1, -1, 1, 1))
+            return QRegion()
+        if not c._guides:
+            return QRegion()
+        geo = self.frame.geometry
+        x, y = c._pointer_pos.x(), c._pointer_pos.y()
+        return (QRegion(QRect(x - 1, geo.top(), 3, geo.height())) | QRegion(QRect(geo.left(), y - 1, geo.width(), 3))).intersected(QRegion(geo))
 
-    def _confirm(self):
-        self._ended = True
-        self._frozen = self._keep_open
-        self._snap.shutdown()
-        self._loupe.hide()
-        self.update()
-        self.regionSelected.emit(QRect(self._sel))
-        if not self._keep_open:
-            self.close()
+    def _size_tip(self):
+        c = self.controller
+        size = c._shot.pixel_size(c._sel)
+        text = f"{size.width()} × {size.height()} px"
+        fm = self.fontMetrics()
+        width, height = fm.horizontalAdvance(text) + 16, fm.height() + 10
+        pos = c._pointer_pos - self.frame.geometry.topLeft()
+        x, y = pos.x() + 16, pos.y() + 20
+        if x + width > self.width():
+            x = pos.x() - width - 8
+        if y + height > self.height():
+            y = pos.y() - height - 8
+        return QRect(max(0, x), max(0, y), width, height), text
 
-    def confirm(self):
-        self._confirm()
+    def paintEvent(self, event):
+        c = self.controller
+        offset = self.frame.geometry.topLeft()
+        selected = c._sel.translated(-offset)
+        with QPainter(self) as painter:
+            painter.drawPixmap(0, 0, self.frame.pixmap)
+            if not c._sel.isNull():
+                painter.setClipRegion(QRegion(self.rect()) - QRegion(selected))
+                painter.fillRect(self.rect(), _DIM)
+                painter.setClipping(False)
+                painter.setPen(QPen(QColor(T.ANNOTATION_COLORS[3]), 2))
+                painter.drawRect(selected.adjusted(1, 1, -1, -1))
+                painter.setPen(QPen(QColor(*T.CAPTURE_GUIDE), 1))
+                painter.drawRect(selected.adjusted(2, 2, -2, -2))
+                painter.setBrush(QColor(T.ANNOTATION_COLORS[3]))
+                painter.setPen(Qt.NoPen)
+                if not c._frozen:
+                    for _, handle in c._handles():
+                        painter.drawRect(handle.translated(-offset))
+                    if self.frame.geometry.contains(c._pointer_pos):
+                        tip, text = self._size_tip()
+                        painter.setBrush(QColor(*T.CAPTURE_TIP))
+                        painter.drawRoundedRect(tip, 6, 6)
+                        painter.setPen(QColor(T.DARK["foreground"]))
+                        painter.drawText(tip, Qt.AlignCenter, text)
+            else:
+                painter.fillRect(self.rect(), _DIM)
+                if not c._snap_rect.isNull():
+                    painter.setPen(QPen(QColor(T.ANNOTATION_COLORS[3]), 2))
+                    painter.drawRect(c._snap_rect.translated(-offset).adjusted(1, 1, -1, -1))
+            if c._guides and not c._frozen:
+                center = (c._sel.center() if not c._sel.isNull() else c._pointer_pos) - offset
+                painter.setPen(QPen(QColor(*T.CAPTURE_GUIDE), 1, Qt.DashLine))
+                painter.drawLine(center.x(), 0, center.x(), self.height())
+                painter.drawLine(0, center.y(), self.width(), center.y())
 
-    def keyPressEvent(self, e):
-        if self._frozen:
-            return
-        if e.key() == Qt.Key_Escape:
-            if QMessageBox.question(self, "退出截图", "确认退出截图？",
-                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
-                self.close()
-        elif e.key() in (Qt.Key_Return, Qt.Key_Enter) and not self._sel.isNull():
-            self._accept_selection()
-        elif self._keep_open and not self._sel.isNull() and e.modifiers() & Qt.ControlModifier and e.key() in (Qt.Key_C, Qt.Key_S):
-            self.actionRequested.emit("copy" if e.key() == Qt.Key_C else "save")
-        elif self._keep_open and not self._sel.isNull() and e.modifiers() & Qt.ShiftModifier and e.key() == Qt.Key_O:
-            self.actionRequested.emit("ocr")
-        elif not self._sel.isNull() and e.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
-            step = 10 if e.modifiers() & Qt.ShiftModifier else 1
-            delta = {Qt.Key_Left: (-step, 0), Qt.Key_Right: (step, 0),
-                     Qt.Key_Up: (0, -step), Qt.Key_Down: (0, step)}[e.key()]
-            self._sel.translate(*delta)
-            self._clamp_position()
-            self.selectionChanged.emit(QRect(self._sel))
-            self.update()
+    def closeEvent(self, event):
+        if not self.controller._closed and not self.controller._refreshing:
+            self.controller.close()
+        super().closeEvent(event)
+
+    def mousePressEvent(self, event):
+        self.controller.mouse_press(event)
+
+    def mouseMoveEvent(self, event):
+        self.controller.mouse_move(event)
+
+    def mouseReleaseEvent(self, event):
+        self.controller.mouse_release(event)
+
+    def mouseDoubleClickEvent(self, event):
+        self.controller.mouse_double_click(event)
+
+    def keyPressEvent(self, event):
+        self.controller.key_press(event, self)

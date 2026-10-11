@@ -17,6 +17,7 @@ from PySide6.QtGui import QPixmap, QImage, QTransform, QPainter, QColor, QPen, Q
 from PySide6.QtCore import Qt, QRect, QPointF, Signal, QObject, QTimer
 from styles import tokens as T
 from ui import floating_window_type
+from .screen import ScreenManager, capture_virtual_desktop
 
 _IS_WIN = sys.platform == "win32"
 
@@ -31,14 +32,16 @@ def _exclude_window(window):
 
 
 class _LongShotMask(QWidget):
-    def __init__(self, geometry, region):
+    def __init__(self, screen, region):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint
                          | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WA_DeleteOnClose)
-        self.setGeometry(geometry)
-        self._region = QRect(region)
+        self.winId()
+        self.windowHandle().setScreen(screen)
+        self.setGeometry(screen.geometry())
+        self._region = region.translated(-screen.geometry().topLeft())
 
     def paintEvent(self, event):
         with QPainter(self) as painter:
@@ -286,7 +289,7 @@ class ImageStitcher:
         from PySide6.QtGui import QPainter
         with QPainter(out) as p:
             p.drawPixmap(0, 0, self._stitched)
-            p.drawPixmap(QPointF(0, self._stitched.height() / dpr), bottom)
+            p.drawPixmap(QPointF(0, self._stitched.deviceIndependentSize().height()), bottom)
         self._stitched = out
         self._last_input = QPixmap(pm)
         return True
@@ -311,7 +314,10 @@ class LongShotFlow(QObject):
         self._on_done = on_done
         self._win = None
         self._bar = None
-        self._mask = None
+        self._masks = []
+        self._manager = ScreenManager.instance()
+        self._manager.changed.connect(self._screens_changed)
+        self._layout_changed = False
         self._hook = None
         self._stitcher = ImageStitcher()
         self._region = QRect()
@@ -360,37 +366,43 @@ class LongShotFlow(QObject):
         self._auto_pending = False
         self._auto_corrected = False
         self._has_increment = False
-        from .screen import capture_virtual_desktop, virtual_geometry
+        self._layout_changed = False
         from .overlay import ScreenShotWindow
-        self._shot = capture_virtual_desktop()
-        self._win = ScreenShotWindow(self._shot, virtual_geometry())
+        try:
+            self._shot = capture_virtual_desktop()
+        except (OSError, RuntimeError) as exc:
+            QMessageBox.warning(None, "无法开始长截图", str(exc))
+            return
+        self._win = ScreenShotWindow(self._shot)
         self._win.regionSelected.connect(self._on_region)
         self._win.cancelled.connect(self._cleanup)
         self._win.show()
 
     def _on_region(self, rect):
-        from .screen import virtual_geometry
         self._region = QRect(rect)
-        self._screen_region = rect.translated(virtual_geometry().topLeft())
+        self._screen_region = QRect(rect)
         window, self._win = self._win, None
+        self._shot = window.capture
         window.close()
         # 首帧沿用框选前快照，避免桌面合成器尚未移除覆盖层。
-        self._last_frame = self._crop(self._shot)
+        self._last_frame = self._shot.crop(self._region)
         self._shot = None
         self._stitcher.feed(self._last_frame)
         self._bar = LongShotBar()
         self._bar.finished.connect(self._finish)
         self._bar.cancelled.connect(self._cleanup)
         self._bar.toggled.connect(self._toggle_capture)
-        self._mask = _LongShotMask(virtual_geometry(), self._region)
-        self._mask.show()
+        self._masks = [_LongShotMask(screen, self._region) for screen in self._manager.screens]
+        for mask in self._masks:
+            mask.show()
         self._bar.show()
         if (_IS_WIN and QApplication.platformName() == "windows"
-                and (not self._bar.exclude_from_capture() or not _exclude_window(self._mask))):
+                and (not self._bar.exclude_from_capture()
+                     or not all(_exclude_window(mask) for mask in self._masks))):
             QMessageBox.warning(self._bar, "无法开始长截图", "无法将操作条从截图中排除，请检查 Windows 截图支持。")
             self._cleanup()
             return
-        screen = self._app.screenAt(self._screen_region.center()) or self._app.primaryScreen()
+        screen = self._manager.screen_at(self._screen_region.center()) or self._app.primaryScreen()
         geo = screen.availableGeometry()
         self._bar.move(geo.right() - self._bar.width() - 12, geo.top() + 12)
         self._bar.set_preview(self._last_frame, self._last_frame)
@@ -405,6 +417,8 @@ class LongShotFlow(QObject):
         self._hook.injectedWheel.connect(self._on_injected_wheel, Qt.QueuedConnection)
 
     def _toggle_capture(self):
+        if self._layout_changed:
+            return
         if self._running:
             self._pause("已暂停；可继续采集，或停止并使用当前结果。")
             return
@@ -425,15 +439,17 @@ class LongShotFlow(QObject):
                 self._pause("操作条覆盖了选区，请重新选择更大的滚动区域。")
                 return
             QCursor.setPos(target)
-            self._mask.hide()
+            for mask in self._masks:
+                mask.hide()
             try:
-                self._scroll_target = _focus_scroll_target(int(self._mask.winId()), self._scroll_target)
+                self._scroll_target = _focus_scroll_target(self._mask_hwnd(), self._scroll_target)
             except OSError as exc:
                 self._pause("无法激活滚动窗口；可改用手动模式。")
                 QMessageBox.warning(self._bar, "自动滚动失败", str(exc))
                 return
             finally:
-                self._mask.show()
+                for mask in self._masks:
+                    mask.show()
                 self._bar.raise_()
             if not self._has_increment:
                 # 激活目标会改变窗口阴影；首次滚动前重取稳定基准，不能替换已有增量。
@@ -463,16 +479,25 @@ class LongShotFlow(QObject):
         self._bar.set_status(message)
 
     def _grab(self):
-        from .screen import capture_virtual_desktop
-        return self._crop(capture_virtual_desktop())
+        return capture_virtual_desktop().crop(self._region)
 
-    def _crop(self, shot):
-        dpr = shot.devicePixelRatio() or 1.0
-        r = self._region
-        pr = QRect(round(r.x() * dpr), round(r.y() * dpr), round(r.width() * dpr), round(r.height() * dpr))
-        cropped = shot.copy(pr)
-        cropped.setDevicePixelRatio(dpr)
-        return cropped
+    def _mask_hwnd(self):
+        point = self._manager.cursor_position()
+        return next((int(mask.winId()) for mask in self._masks if mask.geometry().contains(point)), 0)
+
+    def _screens_changed(self):
+        if self._bar is None or self._hook is None:
+            return
+        # 已拼接帧依赖原来的物理尺寸；布局变化后只能交付旧结果或重新框选。
+        self._layout_changed = True
+        self._pause("显示器布局或缩放已变化；当前结果已保留，请停止并使用结果，或取消后重新框选。")
+        self._bar._toggle.setEnabled(False)
+        for mask in self._masks:
+            mask.close()
+        self._masks = []
+        screen = self._manager.screen_at(self._bar.geometry().center()) or self._app.primaryScreen()
+        geometry = screen.availableGeometry()
+        self._bar.move(geometry.right() - self._bar.width() - 12, geometry.top() + 12)
 
     def _on_wheel(self, delta):
         if self._horizontal:
@@ -488,7 +513,8 @@ class LongShotFlow(QObject):
     def _queue_sample(self, delta):
         if self._bar is None or not self._running or self._preparing_base:
             return  # 已排队的钩子信号可能在暂停或清理后才到达。
-        if not self._screen_region.contains(QCursor.pos()) or self._bar.geometry().contains(QCursor.pos()):
+        point = self._manager.cursor_position()
+        if not self._screen_region.contains(point) or self._bar.geometry().contains(point):
             return
         self._accum += delta
         if abs(self._accum) < 120:
@@ -509,11 +535,12 @@ class LongShotFlow(QObject):
             return
         if self._auto_pending:
             return
-        if not self._screen_region.contains(QCursor.pos()) or self._bar.geometry().contains(QCursor.pos()):
+        point = self._manager.cursor_position()
+        if not self._screen_region.contains(point) or self._bar.geometry().contains(point):
             self._pause("鼠标已离开采集区域，自动滚动已暂停。")
             return
         try:
-            _check_scroll_target(self._scroll_target, int(self._mask.winId()))
+            _check_scroll_target(self._scroll_target, self._mask_hwnd())
             self._auto_pending = True
             tag = self._hook.expect_scroll(120 if self._horizontal else -120, self._horizontal)
             _send_scroll(self._horizontal, self._auto_multiplier, tag)
@@ -544,7 +571,17 @@ class LongShotFlow(QObject):
             self._pause("未收到自动滚轮确认，请改用手动模式。")
 
     def _sample_frame(self):
-        frame = self._grab()
+        try:
+            frame = self._grab()
+        except (OSError, RuntimeError) as exc:
+            self._pause("捕获失败，当前结果已保留；请重试或停止并使用当前结果。")
+            QMessageBox.warning(self._bar, "长截图捕获失败", str(exc))
+            return
+        if self._layout_changed:
+            return
+        if frame.size() != self._last_frame.size() or frame.devicePixelRatio() != self._last_frame.devicePixelRatio():
+            self._screens_changed()
+            return
         self._samples += 1
         changed = frame.toImage() != self._last_frame.toImage()
         automatic = self._bar.mode.currentData() == "auto"
@@ -650,9 +687,9 @@ class LongShotFlow(QObject):
         if self._bar is not None:
             bar, self._bar = self._bar, None
             bar.close()
-        if self._mask is not None:
-            mask, self._mask = self._mask, None
+        for mask in self._masks:
             mask.close()
+        self._masks = []
         if self._win is not None:
             window, self._win = self._win, None
             window.close()

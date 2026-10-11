@@ -2,9 +2,9 @@
 # P0-A 垂直切片拥有者。标注工具的具体实现后续挂到 FloatPanel.toolSelected 上。
 
 from PySide6.QtCore import QObject, QRect
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .screen import capture_virtual_desktop, virtual_geometry
+from .screen import capture_virtual_desktop
 from .overlay import ScreenShotWindow
 from annotate import AnnotationWindow, FloatPanel
 
@@ -24,9 +24,12 @@ class ScreenshotFlow(QObject):
     def start(self):
         if self._win is not None or self._ann is not None:
             return  # 已有会话在跑
-        self._shot = capture_virtual_desktop()
-        vg = virtual_geometry()
-        self._win = ScreenShotWindow(self._shot, vg, keep_open=True)
+        try:
+            self._shot = capture_virtual_desktop()
+        except (RuntimeError, OSError) as exc:
+            QMessageBox.warning(None, "无法截图", str(exc))
+            return
+        self._win = ScreenShotWindow(self._shot, keep_open=True)
         self._win.regionSelected.connect(self._on_region)
         self._win.selectionChanged.connect(self._on_selection)
         self._win.actionRequested.connect(self._trigger_action)
@@ -39,28 +42,26 @@ class ScreenshotFlow(QObject):
                 self._panel.hide()
             return
         if self._panel is None:
-            self._panel = FloatPanel(self._app.property("theme_mode") or self._mode, self._win)
+            self._panel = FloatPanel(self._app.property("theme_mode") or self._mode)
             self._panel.toolSelected.connect(self._select_tool)
             self._panel.actionTriggered.connect(self._trigger_action)
-        self._panel.set_position_near(rect.translated(self._win.pos()))
+        self._panel.set_position_near(rect)
         self._panel.show()
 
     def _select_tool(self, tool):
-        self._win.confirm()
-        self._ann.select_tool(tool)
+        if self._win.confirm():
+            self._ann.select_tool(tool)
 
     def _trigger_action(self, action):
-        self._win.confirm()
-        self._ann.trigger_action(action)
+        if self._win.confirm():
+            self._ann.trigger_action(action)
 
     # ---------- 内部 ----------
 
     def _on_region(self, rect: QRect):
-        dpr = self._shot.devicePixelRatio() or 1.0
-        pr = QRect(int(rect.x() * dpr), int(rect.y() * dpr),
-                   int(rect.width() * dpr), int(rect.height() * dpr))
-        cropped = self._shot.copy(pr)
-        cropped.setDevicePixelRatio(dpr)
+        capture = self._win.capture
+        cropped = capture.crop(rect)
+        crosses_screens = sum(frame.geometry.intersects(rect) for frame in capture.frames) > 1
 
         if self._panel is not None:
             self._panel.close()
@@ -68,9 +69,10 @@ class ScreenshotFlow(QObject):
         self._shot = None
 
         # 标注窗口放在选区原位置
-        position = rect.topLeft() + virtual_geometry().topLeft()
+        position = rect.topLeft()
         mode = self._app.property("theme_mode") or self._mode
-        self._ann = AnnotationWindow(cropped, position, mode)
+        # 跨屏导出保留各屏原生像素，单个标注视口不能再假定统一的屏幕 DPR。
+        self._ann = AnnotationWindow(cropped, position, mode, scrollable=crosses_screens)
         self._ann.finished.connect(self._on_finished)
         self._ann.cancelled.connect(self._cleanup)
         self._ann.show()

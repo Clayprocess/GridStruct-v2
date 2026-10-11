@@ -28,7 +28,6 @@ class AnnotationWindow(QWidget):
         self._text_layer = None
         self._pipette_tool = ""
         self.setAttribute(Qt.WA_DeleteOnClose)
-        dpr = pixmap.devicePixelRatio()
         self._canvas = AnnotationCanvas(pixmap)
         if scrollable:
             self._canvas.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -38,7 +37,7 @@ class AnnotationWindow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._canvas)
-        self.resize(round(pixmap.width() / dpr), round(pixmap.height() / dpr))
+        self.resize(pixmap.deviceIndependentSize().toSize())
         self.move(pos)
 
         self._toolbar = FloatPanel(mode=theme_mode, parent=self)

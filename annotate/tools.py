@@ -254,9 +254,8 @@ class MosaicTool(MarkTool):
     def _update_mosaic(self, rect):
         bg = self._scene.views()[0].scene_background()
         rect = rect.intersected(self._scene.sceneRect())
-        dpr = bg.devicePixelRatio()
-        physical = QRect(int(rect.x() * dpr), int(rect.y() * dpr),
-                         max(1, int(rect.width() * dpr)), max(1, int(rect.height() * dpr)))
+        from capture import ScreenManager
+        physical = ScreenManager.image_rect_to_physical(rect, bg)
         region = bg.copy(physical)
         w, h = region.width(), region.height()
         strength = self._style.mosaic_strength
