@@ -38,9 +38,9 @@ class ScreenShotWindow(QWidget):
         self.setMouseTracking(True)
         self.setCursor(QCursor(Qt.CrossCursor))
 
-        # 智能吸附（异步，Windows 才有真数据）
+        # 智能吸附（快照点查，微秒级；Windows 才有真数据）
         from .snap import RegionDetector
-        self._snap = RegionDetector()
+        self._snap = RegionDetector(exclude_hwnd=int(self.winId()))
         self._snap_rect = QRect()
         self._snap.regionDetected.connect(self._on_snap)
 
@@ -52,10 +52,13 @@ class ScreenShotWindow(QWidget):
     def _on_snap(self, rect: QRect):
         """吸附结果（虚拟桌面坐标）-> 本地坐标。仅在未框选时显示。"""
         if not self._sel.isNull() or self._drag_mode is not None:
-            self._snap_rect = QRect()
+            new_rect = QRect()
         else:
-            self._snap_rect = self._to_local(rect)
-        self.update()
+            new_rect = self._to_local(rect)
+        # 高亮不变不重绘：全屏截图重画很贵
+        if new_rect != self._snap_rect:
+            self._snap_rect = new_rect
+            self.update()
 
     def closeEvent(self, e):
         self._snap.shutdown()
@@ -187,7 +190,7 @@ class ScreenShotWindow(QWidget):
                 self.setCursor(QCursor(Qt.CrossCursor))
                 # 未框选时请求智能吸附（虚拟桌面坐标）
                 self._snap.detect(pos + self._vg.topLeft())
-            self.update()  # 尺寸提示跟随
+            # 高亮变化才重绘（_on_snap 里判断），hover 本身不刷全屏
             return
 
         dx, dy = pos.x() - self._drag_start.x(), pos.y() - self._drag_start.y()
