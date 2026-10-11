@@ -1,11 +1,11 @@
-# 标注图元：QGraphicsItem 子类。样式在创建时从 MarkStyle 快照，
-# 之后改样式不影响已有图元。
+# 每个图元保留自己的样式，默认绘制值与选中编辑互不污染。
 
 import math
+from copy import copy
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsTextItem
 from PySide6.QtGui import (
-    QBrush, QFont, QColor, QPainter, QPainterPath, QPainterPathStroker, QPen, QPixmap, QPolygonF, QTextCharFormat,
-    QTextBlockFormat,
+    QBrush, QFont, QColor, QImage, QPainter, QPainterPath, QPainterPathStroker, QPen, QPixmap, QPolygonF, QTextCharFormat,
+    QTextBlockFormat, QTextCursor,
 )
 from PySide6.QtCore import Qt, QRectF, QPointF
 
@@ -47,11 +47,21 @@ class MarkStyle:
 
 
 class _MarkItemBase(QGraphicsItem):
+    style_keys = ("color", "width")
+
     def __init__(self, style: MarkStyle):
         super().__init__()
+        self.style = copy(style)
         self._color = QColor(style.color)
         self._width = style.width
         self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
+
+    def set_style(self, style):
+        self.prepareGeometryChange()
+        self.style = copy(style)
+        self._color = QColor(style.color)
+        self._width = style.width
+        self.update()
 
     def _pad(self):
         return self._width + 2
@@ -63,9 +73,17 @@ class _MarkItemBase(QGraphicsItem):
 
 
 class RectMarkItem(_MarkItemBase):
+    tool_id = "rect"
+    style_keys = (*_MarkItemBase.style_keys, "fill_mode", "round_radius")
+
     def __init__(self, style: MarkStyle):
         super().__init__(style)
         self._rect = QRectF()
+        self._fill_mode = style.fill_mode
+        self._radius = style.round_radius
+
+    def set_style(self, style):
+        super().set_style(style)
         self._fill_mode = style.fill_mode
         self._radius = style.round_radius
 
@@ -89,6 +107,9 @@ class RectMarkItem(_MarkItemBase):
 
 
 class EllipseMarkItem(RectMarkItem):
+    tool_id = "ellipse"
+    style_keys = (*_MarkItemBase.style_keys, "fill_mode")
+
     def shape(self):
         path = QPainterPath()
         path.addEllipse(self._rect)
@@ -101,10 +122,17 @@ class EllipseMarkItem(RectMarkItem):
 
 
 class LineMarkItem(_MarkItemBase):
+    tool_id = "line"
+    style_keys = (*_MarkItemBase.style_keys, "line_style")
+
     def __init__(self, style: MarkStyle):
         super().__init__(style)
         self._p1 = QPointF()
         self._p2 = QPointF()
+        self._line_style = style.line_style
+
+    def set_style(self, style):
+        super().set_style(style)
         self._line_style = style.line_style
 
     def set_line(self, p1: QPointF, p2: QPointF):
@@ -146,10 +174,18 @@ class LineMarkItem(_MarkItemBase):
 
 
 class PolylineMarkItem(_MarkItemBase):
+    tool_id = "polyline"
+    style_keys = (*_MarkItemBase.style_keys, "polyline_cap", "polyline_join")
+
     def __init__(self, style: MarkStyle):
         super().__init__(style)
         self.points: list[QPointF] = []
         self._preview: QPointF | None = None
+        self._cap = Qt.RoundCap if style.polyline_cap == "round" else Qt.SquareCap
+        self._join = Qt.RoundJoin if style.polyline_join == "round" else Qt.MiterJoin
+
+    def set_style(self, style):
+        super().set_style(style)
         self._cap = Qt.RoundCap if style.polyline_cap == "round" else Qt.SquareCap
         self._join = Qt.RoundJoin if style.polyline_join == "round" else Qt.MiterJoin
 
@@ -202,6 +238,8 @@ class PolylineMarkItem(_MarkItemBase):
 
 
 class PencilMarkItem(_MarkItemBase):
+    tool_id = "pencil"
+
     def __init__(self, style: MarkStyle):
         super().__init__(style)
         self._path = QPainterPath()
@@ -237,11 +275,19 @@ class PencilMarkItem(_MarkItemBase):
 
 
 class HighlightMarkItem(_MarkItemBase):
+    tool_id = "highlight"
+    style_keys = (*_MarkItemBase.style_keys, "opacity")
+
     def __init__(self, style: MarkStyle):
         super().__init__(style)
         self._path = QPainterPath()
         self.point_count = 0
         self._highlight_width = max(14, self._width * 4)
+        self._opacity = style.opacity
+
+    def set_style(self, style):
+        super().set_style(style)
+        self._highlight_width = max(14, style.width * 4)
         self._opacity = style.opacity
 
     def move_to(self, point: QPointF):
@@ -270,19 +316,46 @@ class HighlightMarkItem(_MarkItemBase):
 
 
 class MosaicMarkItem(QGraphicsItem):
-    def __init__(self):
+    tool_id = "mosaic"
+    style_keys = ("mosaic_mode", "mosaic_strength")
+
+    def __init__(self, style=None):
         super().__init__()
+        self.style = copy(style) if style is not None else MarkStyle()
+        self._source = QPixmap()
         self._pixmap = QPixmap()
         self._rect = QRectF()
         self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
 
+    def set_source(self, pixmap, rect):
+        self.prepareGeometryChange()
+        self._source = pixmap
+        self._rect = rect
+        self.set_style(self.style)
+
+    def set_style(self, style):
+        self.style = copy(style)
+        # 保留未处理的采样，二次调节强度时不会反复损失图像信息。
+        if self._source.isNull():
+            return
+        w, h = self._source.width(), self._source.height()
+        strength = style.mosaic_strength
+        if style.mosaic_mode == "blur":
+            import numpy as np
+            image = self._source.toImage().convertToFormat(QImage.Format_RGBA8888)
+            pixels = np.frombuffer(image.constBits(), dtype=np.uint8).reshape(h, image.bytesPerLine())[:, :w * 4].reshape(h, w, 4)
+            padded = np.pad(pixels.astype(np.float64), ((strength, strength), (strength, strength), (0, 0)), mode="edge")
+            integral = np.pad(padded, ((1, 0), (1, 0), (0, 0))).cumsum(0).cumsum(1)
+            size = strength * 2 + 1
+            blurred = ((integral[size:, size:] - integral[:-size, size:] - integral[size:, :-size] + integral[:-size, :-size]) / (size * size)).astype(np.uint8)
+            self._pixmap = QPixmap.fromImage(QImage(blurred.data, w, h, w * 4, QImage.Format_RGBA8888).copy())
+        else:
+            small = self._source.scaled(max(1, w // strength), max(1, h // strength), Qt.IgnoreAspectRatio, Qt.FastTransformation)
+            self._pixmap = small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+        self.update()
+
     def set_preview_rect(self, rect: QRectF):
         self.prepareGeometryChange()
-        self._rect = rect
-
-    def set_mosaic(self, pixmap: QPixmap, rect: QRectF):
-        self.prepareGeometryChange()
-        self._pixmap = pixmap
         self._rect = rect
 
     def boundingRect(self):
@@ -299,9 +372,17 @@ class MosaicMarkItem(QGraphicsItem):
 
 
 class SerialMarkItem(_MarkItemBase):
+    tool_id = "serial"
+    style_keys = ("color", "serial_size")
+
     def __init__(self, style: MarkStyle, index: int):
         super().__init__(style)
         self.index = index
+        self._font_size = style.font_size
+        self._radius = style.serial_size / 2
+
+    def set_style(self, style):
+        super().set_style(style)
         self._font_size = style.font_size
         self._radius = style.serial_size / 2
 
@@ -326,6 +407,9 @@ class SerialMarkItem(_MarkItemBase):
 
 
 class ArrowMarkItem(_MarkItemBase):
+    tool_id = "arrow"
+    style_keys = (*_MarkItemBase.style_keys, "arrow_type", "arrow_size", "arrow_start", "arrow_end")
+
     def __init__(self, style: MarkStyle):
         super().__init__(style)
         self._p1 = QPointF()
@@ -342,6 +426,21 @@ class ArrowMarkItem(_MarkItemBase):
         self.comment_item.document().contentsChanged.connect(self._position_comment)
         self.comment_item.hide()
 
+    def set_style(self, style):
+        super().set_style(style)
+        self._arrow_type = style.arrow_type
+        self._head = style.arrow_size
+        self._start_head = style.arrow_start
+        self._end_head = style.arrow_end
+        if style.arrow_type == "curve":
+            if self._control is None:
+                delta = self._p2 - self._p1
+                self._control = (self._p1 + self._p2) / 2 + QPointF(-delta.y(), delta.x()) / 4
+        else:
+            self._control = None
+        self.comment_item.setDefaultTextColor(self._color)
+        self._position_comment()
+
     def set_line(self, p1: QPointF, p2: QPointF):
         self.prepareGeometryChange()
         self._p1, self._p2 = QPointF(p1), QPointF(p2)
@@ -356,7 +455,7 @@ class ArrowMarkItem(_MarkItemBase):
 
     def set_control_point(self, point):
         self.prepareGeometryChange()
-        self._control = QPointF(point)
+        self._control = QPointF(point) if point is not None else None
         self._position_comment()
         self.update()
 
@@ -459,8 +558,13 @@ class ArrowMarkItem(_MarkItemBase):
 
 
 class TextMarkItem(QGraphicsTextItem):
+    tool_id = "text"
+    style_keys = ("color", "font_size", "font_family", "text_alignment", "text_background",
+                  "background_color", "text_outline", "outline_color")
+
     def __init__(self, style: MarkStyle):
         super().__init__()
+        self.style = copy(style)
         font = QFont(style.font_family)
         font.setPointSize(style.font_size)
         self.setFont(font)
@@ -487,6 +591,30 @@ class TextMarkItem(QGraphicsTextItem):
         self.setFlags(self.flags() | QGraphicsTextItem.ItemIsSelectable | QGraphicsTextItem.ItemIsMovable)
         self.document().contentsChanged.connect(self._resize_text)
 
+    def set_style(self, style):
+        self.prepareGeometryChange()
+        self.style = copy(style)
+        font = QFont(style.font_family, style.font_size)
+        self.setFont(font)
+        self.setDefaultTextColor(style.color)
+        cursor = self.textCursor()
+        cursor.select(QTextCursor.Document)
+        fmt = QTextCharFormat()
+        fmt.setFont(font)
+        fmt.setForeground(style.color)
+        fmt.setTextOutline(QPen(style.outline_color, 1) if style.text_outline else QPen(Qt.NoPen))
+        cursor.mergeCharFormat(fmt)
+        alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter, "right": Qt.AlignRight}[style.text_alignment]
+        option = self.document().defaultTextOption()
+        option.setAlignment(alignment)
+        self.document().setDefaultTextOption(option)
+        block = QTextBlockFormat()
+        block.setAlignment(alignment)
+        cursor.mergeBlockFormat(block)
+        self._background = QColor(style.background_color) if style.text_background else None
+        self._resize_text()
+        self.update()
+
     def _resize_text(self):
         # 多行共享自然宽度才有对齐空间；每次输入后重算，避免固定宽度造成换行。
         self.setTextWidth(-1)
@@ -496,3 +624,66 @@ class TextMarkItem(QGraphicsTextItem):
         if self._background is not None:
             painter.fillRect(self.boundingRect(), self._background)
         super().paint(painter, option, widget)
+
+
+class EraseMarkItem(QGraphicsItem):
+    tool_id = "eraser"
+    style_keys = ("eraser_size", "background_color")
+
+    def __init__(self, style: MarkStyle):
+        super().__init__()
+        self.style = copy(style)
+        self._trail = QPainterPath()
+        self._area = QPainterPath()
+        self._area.setFillRule(Qt.WindingFill)
+        self._last_point = QPointF()
+        self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
+
+    def move_to(self, pos):
+        self.prepareGeometryChange()
+        self._last_point = QPointF(pos)
+        self._trail = QPainterPath(pos)
+        self._area = QPainterPath()
+        self._area.setFillRule(Qt.WindingFill)
+        radius = self.style.eraser_size / 2
+        self._area.addEllipse(pos, radius, radius)
+        self.update()
+
+    def line_to(self, pos):
+        if pos == self._last_point:
+            return
+        self.prepareGeometryChange()
+        segment = QPainterPath(self._last_point)
+        segment.lineTo(pos)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(self.style.eraser_size)
+        stroker.setCapStyle(Qt.RoundCap)
+        # 补齐两次鼠标事件之间的扫掠区域，快速拖动也不会留空洞。
+        self._area.addPath(stroker.createStroke(segment))
+        self._trail.lineTo(pos)
+        self._last_point = QPointF(pos)
+        self.update()
+
+    def set_style(self, style: MarkStyle):
+        self.prepareGeometryChange()
+        self.style = copy(style)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(style.eraser_size)
+        stroker.setCapStyle(Qt.RoundCap)
+        stroker.setJoinStyle(Qt.RoundJoin)
+        self._area = stroker.createStroke(self._trail)
+        self._area.setFillRule(Qt.WindingFill)
+        radius = style.eraser_size / 2
+        self._area.addEllipse(self._trail.pointAtPercent(0), radius, radius)
+        self.update()
+
+    def boundingRect(self):
+        return self._area.boundingRect().adjusted(-1, -1, 1, 1)
+
+    def shape(self):
+        return self._area
+
+    def paint(self, painter, _option, _widget):
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self.style.background_color)
+        painter.drawPath(self._area)

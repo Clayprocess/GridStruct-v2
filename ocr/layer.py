@@ -33,7 +33,12 @@ class _SelectableTextItem(QGraphicsTextItem):
             target = QPolygonF([QPointF(box.left(), box.top()), QPointF(box.left() + box.width(), box.top()),
                                 QPointF(box.left() + box.width(), box.top() + box.height()),
                                 QPointF(box.left(), box.top() + box.height())])
-        self.setTransform(QTransform.quadToQuad(source, target))
+        # 三参数重载明确返回成功标志，避免不同绑定把元组或 None 交给 setTransform。
+        transform = QTransform()
+        if not QTransform.quadToQuad(source, target, transform):
+            delta = target[0] - source[0]
+            transform = QTransform.fromTranslate(delta.x(), delta.y())
+        self.setTransform(transform)
         self.selectionChanged.connect(layer.selectionChanged)
 
     def hoverEnterEvent(self, event):

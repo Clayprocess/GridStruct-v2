@@ -1,8 +1,8 @@
 """截图画布与浮动工具配置，输出与识别通过模块公开接口调用。"""
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication
-from PySide6.QtGui import QPixmap, QColor
-from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QGraphicsTextItem
+from PySide6.QtGui import QPixmap, QColor, QKeySequence
+from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QPropertyAnimation, QEasingCurve, QEvent
 
 from .canvas import AnnotationCanvas
 from .toolbar import FloatPanel, TOOL_SHORTCUTS
@@ -53,6 +53,7 @@ class AnnotationWindow(QWidget):
         self._toolbar.toolSelected.connect(self._on_tool)
         self._toolbar.actionTriggered.connect(self._on_action)
         self._canvas.toolChanged.connect(self._tool_changed)
+        self._canvas.optionsChanged.connect(self._options_changed)
         self._canvas.pipettePicked.connect(self._on_pipette_picked)
         self._ocr = OCRController(self, layer_first=True)
         self._ocr.recognized.connect(self._show_text_layer)
@@ -61,14 +62,16 @@ class AnnotationWindow(QWidget):
         self._options.set_tool("")
         self._position_toolbar()
         self._toolbar.show()
+        QApplication.instance().installEventFilter(self)
         if scrollable:
             # 等窗口布局完成后再定位，避免 QGraphicsView 首次显示时自动居中。
             QTimer.singleShot(0, self, self._scroll_to_start)
 
     def _tool_changed(self, tool_id):
-        self._options.set_tool(tool_id)
         if not tool_id:
             self._toolbar.clear_selection()
+
+    def _options_changed(self, tool_id):
         QTimer.singleShot(0, self, self._position_toolbar)
 
     def showEvent(self, event):
@@ -150,8 +153,9 @@ class AnnotationWindow(QWidget):
             return
         self._toggle_pipette(False)
         self._remove_text_layer()
-        self._canvas.clear_tool()
         if results:
+            # 只有挂载可选文字时进入选择模式；结果失效不能打断连续标注。
+            self._canvas.clear_tool()
             self._text_layer = add_text_layer(self._canvas.scene(), results, self._mode,
                                               on_show_results=self._ocr.show_results)
 
@@ -208,6 +212,28 @@ class AnnotationWindow(QWidget):
         if ask_confirmation(self, "退出截图", "确认退出截图？未复制或保存的标注将丢失。"):
             self.close()
 
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.KeyPress or not isinstance(obj, QWidget):
+            return False
+        if obj.window() not in (self, self._toolbar):
+            return False
+        text = self._canvas.scene().focusItem()
+        if (isinstance(text, QGraphicsTextItem) and text.textInteractionFlags() & Qt.TextEditable
+                and (obj is self._canvas or obj is self._canvas.viewport())):
+            return False
+        # 面板控件会先消化字母和撤销，工具命令必须在 QWidget 的局部编辑之前分发。
+        if (event.modifiers() == Qt.ShiftModifier and Qt.Key_A <= event.key() <= Qt.Key_Z
+                and chr(event.key()) in TOOL_SHORTCUTS):
+            self.select_tool(TOOL_SHORTCUTS[chr(event.key())])
+        elif event.matches(QKeySequence.Undo):
+            self._canvas.undo()
+        elif event.matches(QKeySequence.Redo):
+            self._canvas.redo()
+        else:
+            return False
+        event.accept()
+        return True
+
     def keyPressEvent(self, event):
         key, modifiers = event.key(), event.modifiers()
         if key == Qt.Key_Escape:
@@ -227,6 +253,7 @@ class AnnotationWindow(QWidget):
             super().keyPressEvent(event)
 
     def closeEvent(self, event):
+        QApplication.instance().removeEventFilter(self)
         self._ocr.cancel()
         self._canvas.clear_tool()
         self._canvas.set_pipette_mode(False)

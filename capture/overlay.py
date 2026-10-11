@@ -1,7 +1,8 @@
 # 每屏保留原生截图，控制器共享全局逻辑选区，避免混合 DPI 跨窗重采样。
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor, QRegion
-from PySide6.QtCore import Qt, QRect, QPoint, Signal, QObject, QTimer, QEvent
+from PySide6.QtCore import (Qt, QRect, QPoint, Signal, QObject, QTimer, QEvent,
+                           Property, QPropertyAnimation, QEasingCurve)
 from styles import tokens as T
 from ui import floating_window_type, ask_confirmation
 from settings import get_settings
@@ -35,6 +36,11 @@ class ScreenShotWindow(QObject):
         self._snap_rect = QRect()
         self._drag_mode = None
         self._drag_start = QPoint()
+        self._pending_snap = QRect()
+        self._selection_progress = 1.0
+        self._selection_animation = QPropertyAnimation(self, b"selectionProgress", self)
+        self._selection_animation.setDuration(120)
+        self._selection_animation.setEasingCurve(QEasingCurve.OutCubic)
         self._sel_start = QRect()
         self._pointer_pos = self._manager.cursor_position()
         self._windows = []
@@ -47,6 +53,15 @@ class ScreenShotWindow(QObject):
     @property
     def capture(self):
         return self._shot
+
+    def _get_selection_progress(self):
+        return self._selection_progress
+
+    def _set_selection_progress(self, value):
+        self._selection_progress = value
+        self.update(QRegion(self._sel))
+
+    selectionProgress = Property(float, _get_selection_progress, _set_selection_progress)
 
     def _build_windows(self):
         self._windows = [_ScreenOverlay(self, frame) for frame in self._shot.frames]
@@ -67,6 +82,7 @@ class ScreenShotWindow(QObject):
         if self._closed:
             return
         self._closed = True
+        self._selection_animation.stop()
         QApplication.instance().removeEventFilter(self)
         self._manager.changed.disconnect(self._screens_changed)
         self._snap.shutdown()
@@ -87,6 +103,9 @@ class ScreenShotWindow(QObject):
             return
         self._refreshing = True
         self._sel = QRect()
+        self._pending_snap = QRect()
+        self._selection_animation.stop()
+        self._selection_progress = 1.0
         self.selectionChanged.emit(QRect())
         self._snap.shutdown()
         for window in self._windows:
@@ -188,6 +207,12 @@ class ScreenShotWindow(QObject):
             self.pipettePicked.emit(color.name())
             return
         previous, dirty = QRect(self._sel), self._hover_region() | self._border_region(self._snap_rect)
+        if self._selection_progress < 1.0:
+            # 中断淡入时，旧选区内部也要清除尚未褪完的遮罩。
+            dirty |= QRegion(previous)
+        self._selection_animation.stop()
+        self._selection_progress = 1.0
+        self._pending_snap = QRect()
         self._pointer_pos = pos
         handle = self._hit_handle(pos)
         if handle is not None:
@@ -195,9 +220,9 @@ class ScreenShotWindow(QObject):
         elif not self._sel.isNull() and self._sel.contains(pos):
             self._drag_mode = "move"
         elif self._sel.isNull() and self._snap_rect.contains(pos):
-            self._sel = QRect(self._snap_rect)
-            self._snap_rect = QRect()
-            self._drag_mode = "snap"
+            # 松开才区分单击采用和手工框选，避免按下时选区先跳到整个吸附框。
+            self._pending_snap = QRect(self._snap_rect)
+            self._drag_mode = None
         else:
             self._drag_mode = "create"
             self._sel = QRect(pos, pos)
@@ -220,6 +245,14 @@ class ScreenShotWindow(QObject):
                 window.loupe.hide()
         if self._pipette_mode:
             return
+        if not self._pending_snap.isNull():
+            if (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
+                self.update(dirty | self._hover_region())
+                return
+            dirty |= self._border_region(self._snap_rect)
+            self._pending_snap = QRect()
+            self._snap_rect = QRect()
+            self._drag_mode = "create"
         if self._drag_mode is None:
             handle = self._hit_handle(pos)
             if handle is not None:
@@ -235,10 +268,6 @@ class ScreenShotWindow(QObject):
             self.update(dirty | self._hover_region())
             return
         dx, dy = pos.x() - self._drag_start.x(), pos.y() - self._drag_start.y()
-        if self._drag_mode == "snap":
-            if (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
-                return
-            self._drag_mode = "create"
         if self._drag_mode == "create":
             self._sel = QRect(self._drag_start, pos).normalized()
         elif self._drag_mode == "move":
@@ -253,6 +282,21 @@ class ScreenShotWindow(QObject):
     def mouse_release(self, event):
         if self._frozen or self._refreshing or event.button() != Qt.LeftButton:
             return
+        if not self._pending_snap.isNull():
+            pos = event.globalPosition().toPoint()
+            if (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
+                previous, dirty = QRect(self._sel), self._hover_region() | self._border_region(self._snap_rect)
+                self._sel = QRect(self._pending_snap)
+                self._pending_snap = QRect()
+                self._snap_rect = QRect()
+                self._pointer_pos = pos
+                self.update(dirty | self._selection_region(previous) | self._hover_region())
+                self.selectionChanged.emit(QRect(self._sel))
+                self._selection_animation.setStartValue(0.0)
+                self._selection_animation.setEndValue(1.0)
+                self._selection_animation.start()
+                return
+            self.mouse_move(event)
         if self._drag_mode is None:
             return
         self.mouse_move(event)
@@ -277,6 +321,8 @@ class ScreenShotWindow(QObject):
         if self._ended or self._closed or self._refreshing or self._sel.isEmpty():
             return False
         self._ended = True
+        self._selection_animation.stop()
+        self._selection_progress = 1.0
         self._frozen = self._keep_open
         self._snap.shutdown()
         for window in self._windows:
@@ -415,6 +461,10 @@ class _ScreenOverlay(QWidget):
                 painter.setClipRegion(QRegion(self.rect()) - QRegion(selected))
                 painter.fillRect(self.rect(), _DIM)
                 painter.setClipping(False)
+                if c._selection_progress < 1:
+                    mask = QColor(_DIM)
+                    mask.setAlphaF(mask.alphaF() * (1 - c._selection_progress))
+                    painter.fillRect(selected, mask)
                 painter.setPen(QPen(QColor(T.ANNOTATION_COLORS[3]), 2))
                 painter.drawRect(selected.adjusted(1, 1, -1, -1))
                 painter.setPen(QPen(QColor(*T.CAPTURE_GUIDE), 1))

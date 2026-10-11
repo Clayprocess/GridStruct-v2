@@ -7,11 +7,11 @@
 #   4. 在 TOOL_CLASSES 注册 id（id 必须与 annotate/toolbar.py 的 TOOLS 一致）。
 
 from PySide6.QtCore import QRect, QRectF, QPointF, Qt
-from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QApplication
-from PySide6.QtGui import QUndoStack, QImage, QPixmap, QGuiApplication, QPainterPath
+from PySide6.QtWidgets import QGraphicsScene, QApplication
+from PySide6.QtGui import QUndoStack, QGuiApplication
 
 from .items import (
-    ArrowMarkItem, EllipseMarkItem, HighlightMarkItem, LineMarkItem,
+    ArrowMarkItem, EllipseMarkItem, EraseMarkItem, HighlightMarkItem, LineMarkItem,
     MarkStyle, MosaicMarkItem, PencilMarkItem,
     PolylineMarkItem, RectMarkItem, SerialMarkItem, TextMarkItem,
 )
@@ -231,7 +231,7 @@ class MosaicTool(MarkTool):
     def on_press(self, scene, pos, undo):
         self._scene = scene
         self._start = QPointF(pos)
-        self._item = MosaicMarkItem()
+        self._item = MosaicMarkItem(self._style)
         self._item.set_preview_rect(QRectF(pos, pos))
         scene.addItem(self._item)
 
@@ -257,58 +257,23 @@ class MosaicTool(MarkTool):
         from capture import ScreenManager
         physical = ScreenManager.image_rect_to_physical(rect, bg)
         region = bg.copy(physical)
-        w, h = region.width(), region.height()
-        strength = self._style.mosaic_strength
-        if self._style.mosaic_mode == "blur":
-            import numpy as np
-            image = region.toImage().convertToFormat(QImage.Format_RGBA8888)
-            pixels = np.frombuffer(image.constBits(), dtype=np.uint8).reshape(h, image.bytesPerLine())[:, :w * 4].reshape(h, w, 4)
-            # 积分图实现方框模糊，避免引入图像处理依赖。
-            radius = strength
-            padded = np.pad(pixels.astype(np.float64), ((radius, radius), (radius, radius), (0, 0)), mode="edge")
-            integral = np.pad(padded, ((1, 0), (1, 0), (0, 0))).cumsum(0).cumsum(1)
-            size = radius * 2 + 1
-            blurred = ((integral[size:, size:] - integral[:-size, size:] - integral[size:, :-size] + integral[:-size, :-size]) / (size * size)).astype(np.uint8)
-            mosaic = QPixmap.fromImage(QImage(blurred.data, w, h, w * 4, QImage.Format_RGBA8888).copy())
-        else:
-            small = region.scaled(max(1, w // strength), max(1, h // strength), Qt.IgnoreAspectRatio, Qt.FastTransformation)
-            mosaic = small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
-        self._item.set_mosaic(mosaic, rect)
+        self._item.set_source(region, rect)
 
 
 class EraserTool(MarkTool):
-    def __init__(self, style):
-        super().__init__(style)
-        self._erased = []
-        self._erased_ids = set()
-
     def on_press(self, scene, pos, undo):
         self._scene = scene
-        self._erase(pos)
+        self._item = EraseMarkItem(self._style)
+        self._item.move_to(pos)
+        scene.addItem(self._item)
 
     def on_move(self, pos):
-        self._erase(pos)
+        self._item.line_to(pos)
 
     def on_release(self, pos, undo):
-        if self._erased:
-            undo.push(RemoveMarkCommand(self._scene, self._erased))
-        self._erased = []
-        self._erased_ids = set()
-
-    def _erase(self, pos):
-        radius = self._style.eraser_size / 2
-        # 圆形命中区域必须与预览一致，避免圆外四角意外擦除。
-        area = QPainterPath()
-        area.addEllipse(pos, radius, radius)
-        for item in self._scene.items(area):
-            if isinstance(item.parentItem(), ArrowMarkItem):
-                item = item.parentItem()
-            item_id = id(item)
-            if isinstance(item, QGraphicsPixmapItem) or item_id in self._erased_ids:
-                continue
-            self._scene.removeItem(item)
-            self._erased.append(item)
-            self._erased_ids.add(item_id)
+        self._item.line_to(pos)
+        undo.push(AddMarkCommand(self._scene, self._item))
+        self._item = None
 
 
 class MagnifierTool(MarkTool):

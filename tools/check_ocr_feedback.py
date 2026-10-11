@@ -7,14 +7,62 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PySide6.QtCore import QObject, QPoint, QRect, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, Signal, Qt
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QApplication, QLabel, QAbstractButton
+from PySide6.QtWidgets import QApplication, QLabel, QAbstractButton, QWidget, QPushButton, QVBoxLayout
+from PySide6.QtTest import QTest
 
 from annotate import AnnotationWindow
 from pin import PinWindow
 from ocr import OCRResult
 from styles import apply_theme, tokens as T
+
+
+def _check_tool_focus(app, service):
+    import ctypes
+    from ctypes import wintypes
+    from capture import ScreenshotFlow, DesktopCapture, ScreenFrame
+    foreground = ctypes.windll.user32.GetForegroundWindow
+    foreground.restype = wintypes.HWND
+    screen = app.primaryScreen()
+    pixmap = QPixmap(screen.size())
+    pixmap.fill(T.LIGHT["background"])
+    capture = DesktopCapture([ScreenFrame(screen, screen.geometry(), pixmap, QPoint())])
+    flow = ScreenshotFlow(app, "light")
+    with patch("capture.flow.capture_virtual_desktop", return_value=capture):
+        flow.start()
+    flow._win._sel = QRect(120, 120, 640, 240)
+    flow._win.confirm()
+    owner = flow._ann
+    QTest.qWait(160)
+    assert owner.windowType() == Qt.Tool, "验收必须保留正式 Tool 类型"
+    assert int(foreground()) == int(owner.winId()), "进入标注后前台仍为遮罩"
+    controller = owner._ocr
+    blocker = QWidget()
+    blocker.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint)
+    blocker.setWindowTitle("GridStruct 焦点恢复验收")
+    blocker.resize(240, 80)
+    try:
+        for index in range(12):
+            controller.start(owner._canvas.render_to_pixmap())
+            QTest.qWait(30)
+            blocker.show()
+            blocker.raise_()
+            blocker.activateWindow()
+            QTest.qWait(40)
+            assert int(foreground()) == int(blocker.winId()), "未建立焦点恢复干扰条件"
+            request = controller._request
+            if index % 2:
+                controller.cancel()
+            else:
+                service.finished.emit(request, [OCRResult(QRect(20, 20, 120, 24), "Focus 123", .99)], "")
+            QTest.qWait(80)
+            assert int(foreground()) == int(owner.winId()), f"第 {index + 1} 次 OCR 结束未恢复前台"
+            assert not controller.running and flow._win._frozen
+        print("PASS: native Qt.Tool entry and 12 OCR completion/cancellation focus recoveries")
+    finally:
+        blocker.close()
+        flow.cancel()
 
 
 class _Service(QObject):
@@ -40,6 +88,24 @@ def main():
     with (patch("ocr.controller._get_service", return_value=service),
           patch("settings.get_settings", return_value=settings),
           patch("ocr.controller.show_message") as warning):
+        if "--focus-check" in sys.argv:
+            anchor = QWidget()
+            anchor.setWindowTitle("GridStruct 正式 Tool 焦点验收")
+            layout = QVBoxLayout(anchor)
+            layout.addWidget(QLabel("从可见按钮启动，核对正式 Tool 窗口的真实前台 HWND。"))
+            button = QPushButton("运行焦点验收")
+            layout.addWidget(button)
+            def run_focus_check():
+                try:
+                    _check_tool_focus(app, service)
+                except Exception as error:
+                    print(f"FAIL native focus: {error}", flush=True)
+                    app.exit(1)
+                else:
+                    app.exit(0)
+            button.clicked.connect(run_focus_check)
+            anchor.show()
+            return app.exec()
         for mode in ("light", "dark"):
             apply_theme(app, mode)
             pixmap = QPixmap(640, 240)
@@ -95,6 +161,25 @@ def main():
                         app.processEvents()
                         if not controller._dialogs or not controller._dialogs[-1].isVisible():
                             errors.append("全文按钮未打开结果对话框")
+                        else:
+                            controller._dialogs[-1].close()
+                    window.select_tool("arrow")
+                    canvas = window._canvas
+                    viewport = canvas.viewport()
+                    QTest.mousePress(viewport, Qt.LeftButton, pos=QPoint(200, 80))
+                    QTest.mouseMove(viewport, QPoint(300, 160))
+                    QTest.mouseRelease(viewport, Qt.LeftButton, pos=QPoint(300, 160))
+                    app.processEvents()
+                    if controller.document is not None or window._text_layer is not None:
+                        errors.append(f"{mode}/AnnotationWindow: 新标注未作废旧 OCR")
+                    if canvas.tool_id != "arrow" or not window._options.isVisible():
+                        errors.append(f"{mode}/AnnotationWindow: OCR 失效打断连续标注")
+                    QTest.mousePress(viewport, Qt.LeftButton, pos=QPoint(400, 80))
+                    QTest.mouseMove(viewport, QPoint(500, 160))
+                    QTest.mouseRelease(viewport, Qt.LeftButton, pos=QPoint(500, 160))
+                    marks = [item for item in canvas.scene().items() if getattr(item, "tool_id", "") == "arrow"]
+                    if len(marks) != 2:
+                        errors.append(f"{mode}/AnnotationWindow: OCR 后无法连续绘制两个图形")
                 window._allow_close = True
                 window.close()
                 app.processEvents()

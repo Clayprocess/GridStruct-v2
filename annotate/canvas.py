@@ -9,12 +9,13 @@ from PySide6.QtGui import (
     QPainter, QPixmap, QKeySequence, QUndoStack, QPen, QColor, QCursor, QTextCursor,
 )
 from PySide6.QtCore import Qt, QRect, QRectF, QPointF, Signal, QEvent
+from copy import copy
 
-from .items import MarkStyle, SerialMarkItem, TextMarkItem, MosaicMarkItem, ArrowMarkItem
+from .items import MarkStyle, SerialMarkItem, TextMarkItem, MosaicMarkItem, ArrowMarkItem, EraseMarkItem
 from .tools import create_tool
 from .tools import TOOL_CLASSES
 from .commands import (RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand,
-                       ArrowCommentCommand, ArrowCurveCommand)
+                       ArrowCommentCommand, ArrowCurveCommand, StyleMarksCommand)
 from .pipette import PipettePopup
 from styles import tokens as T
 from settings import get_settings
@@ -25,8 +26,8 @@ _REMEMBERED_STYLE = ("color", "width", "font_size", "font_family",
 
 class AnnotationCanvas(QGraphicsView):
     pipettePicked = Signal(str)  # 取色完成，HEX
-    styleChanged = Signal(str)
     toolChanged = Signal(str)
+    optionsChanged = Signal(str)
 
     def __init__(self, pixmap: QPixmap):
         super().__init__()
@@ -47,6 +48,8 @@ class AnnotationCanvas(QGraphicsView):
         self._style = self.styles["rect"]
         self._tool_id = ""
         self._moving = None
+        self._move_start = None
+        self._selection_style = None
         self._drawing = False
         self._eraser_pos = None
         self._comment_edit = None
@@ -58,6 +61,8 @@ class AnnotationCanvas(QGraphicsView):
 
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
+        self._scene.selectionChanged.connect(self._selection_changed)
+        self._undo.indexChanged.connect(self._selection_changed)
 
         bg = QGraphicsPixmapItem(pixmap)
         # QGraphicsPixmapItem 已按 pixmap 的 DPR 使用逻辑尺寸。
@@ -99,6 +104,7 @@ class AnnotationCanvas(QGraphicsView):
             self._eraser_pos = self.viewport().mapFromGlobal(QCursor.pos())
             self.viewport().update(self._eraser_preview_rect())
         self.toolChanged.emit(tool_id)
+        self.optionsChanged.emit(self.options_tool_id)
         return True
 
     def clear_tool(self):
@@ -111,6 +117,7 @@ class AnnotationCanvas(QGraphicsView):
             self._loupe = None
         self.viewport().setCursor(Qt.ArrowCursor)
         self.toolChanged.emit("")
+        self.optionsChanged.emit(self.options_tool_id)
 
     def scene_background(self) -> QPixmap:
         return self._bg_pixmap
@@ -134,35 +141,79 @@ class AnnotationCanvas(QGraphicsView):
 
     @property
     def style(self) -> MarkStyle:
-        return self._style
+        return self._selection_style or self._style
+
+    @property
+    def options_tool_id(self):
+        selected = self._selected_marks()
+        return selected[0].tool_id if selected else self._tool_id
+
+    def _selected_marks(self):
+        return [item for item in self._scene.selectedItems() if hasattr(item, "style_keys")]
+
+    def _selection_changed(self, *args):
+        selected = self._selected_marks()
+        self._selection_style = copy(selected[0].style) if selected else None
+        if selected:
+            defaults = self.styles[selected[0].tool_id]
+            for key in ("wheel_enabled", "serial_start", "serial_global", "serial_auto_renumber"):
+                setattr(self._selection_style, key, getattr(defaults, key))
+        self.optionsChanged.emit(self.options_tool_id)
+
+    def style_key_enabled(self, key):
+        selected = self._selected_marks()
+        if not selected:
+            return True
+        # 混选只开放共同属性，避免某些图形悄悄保持原值。
+        if key in ("wheel_enabled", "serial_start", "serial_global", "serial_auto_renumber"):
+            return True
+        return all(key in item.style_keys for item in selected)
 
     @property
     def tool_id(self):
         return self._tool_id
 
     def update_style(self, key, value):
+        selected = self._selected_marks()
+        if selected and key not in ("wheel_enabled", "serial_start", "serial_global", "serial_auto_renumber"):
+            changes = {}
+            for item in selected:
+                if key not in item.style_keys or getattr(item.style, key) == value:
+                    continue
+                style = copy(item.style)
+                setattr(style, key, value)
+                if key == "arrow_type":
+                    head = "open" if value.startswith("line") or value == "dimension" else "filled"
+                    style.arrow_start = head if value.endswith("_both") or value == "dimension" else "none"
+                    style.arrow_end = head
+                changes[item] = style
+            if changes:
+                self._finish_tool()
+                self._undo.push(StyleMarksCommand(changes))
+            return
+        style = self.styles[self.options_tool_id] if selected else self._style
         old_preview = self._eraser_preview_rect() if key == "eraser_size" else None
-        setattr(self._style, key, value)
+        setattr(style, key, value)
         if key == "arrow_type":
             head = "open" if value.startswith("line") or value == "dimension" else "filled"
-            self._style.arrow_start = head if value.endswith("_both") or value == "dimension" else "none"
-            self._style.arrow_end = head
+            style.arrow_start = head if value.endswith("_both") or value == "dimension" else "none"
+            style.arrow_end = head
         if old_preview is not None:
             self.viewport().update(old_preview.united(self._eraser_preview_rect()))
-        if key in _REMEMBERED_STYLE and self._tool_id:
+        if key in _REMEMBERED_STYLE and self.options_tool_id:
             stored = value.name() if isinstance(value, QColor) else value
-            self._settings.setValue(f"annotation/{self._tool_id}/{key}", stored)
+            self._settings.setValue(f"annotation/{self.options_tool_id}/{key}", stored)
         if key == "color" and self._settings.value("same_tool_color", False, type=bool):
             for name, style in self.styles.items():
                 style.color = QColor(value)
                 self._settings.setValue(f"annotation/{name}/color", value.name())
         if key == "serial_start":
             self._scene.setProperty("serial_next", value)
-            if self._style.serial_global:
+            if style.serial_global:
                 QApplication.instance().setProperty("serial_counter", value)
         elif key == "serial_auto_renumber":
             self._scene.setProperty("serial_auto_renumber", value)
-        self.styleChanged.emit(self._tool_id)
+        self._selection_changed()
 
     def adjust_serial(self, delta):
         for item in self._scene.selectedItems():
@@ -271,7 +322,7 @@ class AnnotationCanvas(QGraphicsView):
             self.set_pipette_mode(False)
             self.pipettePicked.emit(color.name().upper())
             return
-        hit = self.itemAt(e.pos())
+        hit = self._selection_hit(e.pos())
         if self._comment_edit is not None and hit is not self._comment_edit[0].comment_item:
             self._finish_comment()
         if (e.button() == Qt.LeftButton and isinstance(hit, QGraphicsTextItem)
@@ -307,9 +358,15 @@ class AnnotationCanvas(QGraphicsView):
                 and not e.modifiers() & Qt.AltModifier
                 and not (self._tool is not None and self._tool.preview_on_hover and self._tool._item is not None)):
             self._finish_tool()
-            self._moving = {item: QPointF(item.pos()) for item in self._scene.items()
+            if e.modifiers() & Qt.ControlModifier:
+                hit.setSelected(not hit.isSelected())
+            elif not hit.isSelected():
+                self._scene.clearSelection()
+                hit.setSelected(True)
+            self._move_start = self.mapToScene(e.pos())
+            self._moving = {item: QPointF(item.pos()) for item in self._scene.selectedItems()
                             if item.flags() & QGraphicsItem.ItemIsMovable}
-            super().mousePressEvent(e)
+            e.accept()
             return
         if e.button() == Qt.LeftButton and self._tool is not None:
             if not self._scene.sceneRect().contains(self.mapToScene(e.pos())):
@@ -335,7 +392,7 @@ class AnnotationCanvas(QGraphicsView):
         if self._loupe is not None:
             e.accept()
             return
-        item = self.itemAt(e.pos())
+        item = self._selection_hit(e.pos())
         if (e.button() == Qt.LeftButton and isinstance(item, QGraphicsTextItem)
                 and isinstance(item.parentItem(), ArrowMarkItem)):
             self._moving = None
@@ -355,8 +412,12 @@ class AnnotationCanvas(QGraphicsView):
             e.accept()
             return
         if isinstance(item, TextMarkItem) and e.button() == Qt.LeftButton:
+            self._moving = None
+            self._move_start = None
+            self._drawing = False
             self.set_tool_by_id("text")
             self._tool.edit(item, self._scene, self._undo)
+            item.setSelected(True)
             super().mouseDoubleClickEvent(e)
             return
         if self._tool is not None and e.button() == Qt.LeftButton:
@@ -375,7 +436,9 @@ class AnnotationCanvas(QGraphicsView):
             self._eraser_pos = e.pos()
             self.viewport().update(old_rect.united(self._eraser_preview_rect()))
         if self._moving is not None:
-            super().mouseMoveEvent(e)
+            delta = self.mapToScene(e.pos()) - self._move_start
+            for item, before in self._moving.items():
+                item.setPos(before + delta)
             return
         if self._loupe is not None:
             self._loupe.pick(self.mapToScene(e.pos()),
@@ -397,11 +460,12 @@ class AnnotationCanvas(QGraphicsView):
                 self._undo.push(ArrowCurveCommand(arrow, before, after))
             return
         if self._moving is not None:
-            super().mouseReleaseEvent(e)
+            self.mouseMoveEvent(e)
             changed = {item: before for item, before in self._moving.items() if item.pos() != before}
             if changed:
                 self._undo.push(MoveMarksCommand(changed, {item: QPointF(item.pos()) for item in changed}))
             self._moving = None
+            self._move_start = None
             return
         if self._tool is not None and e.button() == Qt.LeftButton and self._drawing:
             self._tool.on_release(self.mapToScene(e.pos()), self._undo)
@@ -441,7 +505,7 @@ class AnnotationCanvas(QGraphicsView):
         if self._loupe is not None:
             event.ignore()
             return
-        if self._tool is None or not self._style.wheel_enabled:
+        if not self.options_tool_id or not self.style.wheel_enabled:
             if self.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded:
                 super().wheelEvent(event)
             else:
@@ -451,10 +515,21 @@ class AnnotationCanvas(QGraphicsView):
             "text": ("font_size", 6, 96), "serial": ("serial_size", 12, 96),
             "mosaic": ("mosaic_strength", 2, 40), "eraser": ("eraser_size", 4, 120),
             "magnifier": ("zoom", 1, 8),
-        }.get(self._tool_id, ("width", 1, 30))
+        }.get(self.options_tool_id, ("width", 1, 30))
+        if not self.style_key_enabled(key):
+            event.ignore()
+            return
         step = 1 if event.angleDelta().y() > 0 else -1
-        self.update_style(key, max(lo, min(hi, getattr(self._style, key) + step)))
+        self.update_style(key, max(lo, min(hi, getattr(self.style, key) + step)))
         event.accept()
+
+    def _selection_hit(self, pos):
+        hits = self.items(pos)
+        for item in hits:
+            if not isinstance(item, EraseMarkItem) and (item.flags() & QGraphicsItem.ItemIsSelectable
+                                                       or isinstance(item, QGraphicsTextItem)):
+                return item
+        return next((item for item in hits if isinstance(item, EraseMarkItem)), hits[0] if hits else None)
 
     def drawForeground(self, painter, rect):
         super().drawForeground(painter, rect)

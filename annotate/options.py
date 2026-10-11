@@ -19,9 +19,18 @@ class ToolOptions(QWidget):
         self._controls = {}
         self._choices = {}
         self._colors = {}
+        self._checks = {}
+        self._editors = {}
+        self._font = None
         self._tool_id = ""
-        canvas.styleChanged.connect(self._sync)
+        canvas.optionsChanged.connect(self.sync_tool)
         self.setVisible(False)
+
+    def sync_tool(self, tool_id):
+        if tool_id != self._tool_id:
+            self.set_tool(tool_id)
+        else:
+            self._sync(tool_id)
 
     def set_tool(self, tool_id):
         while self._layout.count():
@@ -30,6 +39,9 @@ class ToolOptions(QWidget):
         self._controls.clear()
         self._choices.clear()
         self._colors.clear()
+        self._checks.clear()
+        self._editors.clear()
+        self._font = None
         self._tool_id = tool_id
         self.setVisible(bool(tool_id))
         if not tool_id:
@@ -62,6 +74,8 @@ class ToolOptions(QWidget):
             font.setMaximumWidth(180)
             font.setCurrentFont(QFont(self._canvas.style.font_family, self._canvas.style.font_size))
             font.currentFontChanged.connect(lambda value: self._canvas.update_style("font_family", value.family()))
+            self._font = font
+            self._editors["font_family"] = font
             self._add("字体", font)
             self._number("font_size", "字号", 6, 96)
             self._choice("text_alignment", "对齐", [("左", "left"), ("中", "center"), ("右", "right")])
@@ -93,10 +107,12 @@ class ToolOptions(QWidget):
             self._number("opacity", "不透明度 %", 5, 100)
         elif tool_id == "eraser":
             self._number("eraser_size", "大小", 4, 120)
+            self._color("background_color", "背景色")
         elif tool_id == "magnifier":
             self._add("像素预览", QLabel("11 × 11 · 8 倍"))
         if tool_id != "magnifier":
             self._check("wheel_enabled", "滚轮调节")
+        self._sync(tool_id)
         self.adjustSize()
 
     def _add(self, title, widget):
@@ -122,6 +138,7 @@ class ToolOptions(QWidget):
         row.addWidget(slider)
         row.addWidget(spin)
         self._controls[key] = (spin, slider)
+        self._editors[key] = control
         self._add(title, control)
 
     def _choice(self, key, title, values):
@@ -131,12 +148,15 @@ class ToolOptions(QWidget):
         combo.setCurrentIndex(combo.findData(getattr(self._canvas.style, key)))
         combo.currentIndexChanged.connect(lambda _: self._canvas.update_style(key, combo.currentData()))
         self._choices[key] = combo
+        self._editors[key] = combo
         self._add(title, combo)
 
     def _check(self, key, title):
         box = QCheckBox()
         box.setChecked(getattr(self._canvas.style, key))
         box.toggled.connect(lambda value: self._canvas.update_style(key, value))
+        self._checks[key] = box
+        self._editors[key] = box
         self._add(title, box)
 
     def _color(self, key, title):
@@ -154,6 +174,7 @@ class ToolOptions(QWidget):
         row.addWidget(presets)
         row.addWidget(custom)
         self._colors[key] = presets
+        self._editors[key] = control
         self._add(title, control)
 
     def _choose_color(self, key):
@@ -164,13 +185,28 @@ class ToolOptions(QWidget):
     def _sync(self, tool_id):
         if tool_id != self._tool_id:
             return
+        for key, widget in self._editors.items():
+            widget.setEnabled(self._canvas.style_key_enabled(key))
+        if self._font is not None:
+            self._font.blockSignals(True)
+            self._font.setCurrentFont(QFont(self._canvas.style.font_family, self._canvas.style.font_size))
+            self._font.blockSignals(False)
+        for key, box in self._checks.items():
+            box.blockSignals(True)
+            box.setChecked(getattr(self._canvas.style, key))
+            box.blockSignals(False)
         for key, combo in self._choices.items():
             combo.blockSignals(True)
             combo.setCurrentIndex(combo.findData(getattr(self._canvas.style, key)))
             combo.blockSignals(False)
         for key, combo in self._colors.items():
             combo.blockSignals(True)
-            combo.setCurrentIndex(combo.findData(getattr(self._canvas.style, key).name()))
+            color = getattr(self._canvas.style, key).name()
+            index = combo.findData(color)
+            if index < 0:
+                combo.addItem(f"自定义 {color}", color)
+                index = combo.count() - 1
+            combo.setCurrentIndex(index)
             combo.blockSignals(False)
         for key, (spin, slider) in self._controls.items():
             value = getattr(self._canvas.style, key)

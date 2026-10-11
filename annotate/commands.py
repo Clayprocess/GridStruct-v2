@@ -3,6 +3,36 @@
 
 from PySide6.QtWidgets import QGraphicsScene
 from PySide6.QtGui import QUndoCommand
+from copy import copy
+from .items import ArrowMarkItem, TextMarkItem
+
+
+class StyleMarksCommand(QUndoCommand):
+    def __init__(self, changes):
+        super().__init__("修改标注属性")
+        self._before = {item: copy(item.style) for item in changes}
+        self._after = changes
+        self._text_before = {item: item.toHtml() for item in changes if isinstance(item, TextMarkItem)}
+        self._curve_before = {item: item.control_point for item in changes if isinstance(item, ArrowMarkItem)}
+        self._curve_after = None
+
+    def redo(self):
+        for item, style in self._after.items():
+            item.set_style(style)
+        if self._curve_after is None:
+            self._curve_after = {item: item.control_point for item in self._curve_before}
+        else:
+            for item, point in self._curve_after.items():
+                item.set_control_point(point)
+
+    def undo(self):
+        for item, style in self._before.items():
+            item.set_style(style)
+        # 属性编辑可以统一字体；撤销仍应保留此前逐字编辑产生的富文本。
+        for item, html in self._text_before.items():
+            item.setHtml(html)
+        for item, point in self._curve_before.items():
+            item.set_control_point(point)
 
 
 class AddMarkCommand(QUndoCommand):
@@ -25,9 +55,6 @@ class AddMarkCommand(QUndoCommand):
 
 
 class RemoveMarkCommand(QUndoCommand):
-    # redo/undo 幂等：橡皮擦在 push 前已把图元移出 scene（即时反馈），
-    # 而 Delete 键路径 push 时图元还在 scene 里。按 it.scene() 判断，
-    # 两种调用都正确，不打 Qt 警告。
     def __init__(self, scene: QGraphicsScene, items: list):
         super().__init__("删除标注")
         self._scene = scene

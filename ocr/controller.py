@@ -205,6 +205,10 @@ class OCRController(QObject):
         if progress is not None:
             progress.accept()
             progress.deleteLater()
+            # Tool 进度窗关闭时 Windows 可能把焦点还给底层截图遮罩。
+            if self._owner is not None and self._owner.isVisible():
+                self._owner.raise_()
+                self._owner.activateWindow()
 
     def _timed_out(self):
         self._request.cancelled.set()

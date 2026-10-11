@@ -129,6 +129,8 @@ class ScreenshotFlow(QObject):
         self._ann.cancelled.connect(self._cleanup)
         self._ann.longshotRequested.connect(self.start_longshot)
         self._ann.show()
+        self._ann.raise_()
+        self._ann.activateWindow()
 
     # ---------- 内部 ----------
 
@@ -157,6 +159,8 @@ class ScreenshotFlow(QObject):
         self._ann.cancelled.connect(self._cleanup)
         self._ann.longshotRequested.connect(self.start_longshot)
         self._ann.show()
+        self._ann.raise_()
+        self._ann.activateWindow()
 
     def _on_finished(self, pixmap):
         QApplication.clipboard().setPixmap(pixmap)
