@@ -199,9 +199,9 @@ class _PinBase(QWidget):
         if self.kind == "text" and self._content.textCursor().hasSelection():
             menu.addAction("复制选中文字", self._content.copy)
         if self.kind == "image":
-            menu.addAction(_fg_icon("scan-text"), "文本识别", self._recognize)
-            if self._text_layer is not None:
-                menu.addAction("查看识别全文", self._ocr_controller.show_results)
+            menu.addAction(_fg_icon("scan-text"), "复核识别结果" if self._document is not None else "文本识别", self._recognize)
+            if self._document is not None:
+                menu.addAction("重新识别（替换校正结果）", self._rerun_ocr)
         menu.addAction(_fg_icon("save"), "保存为文件", self._save)
         menu.addSeparator()
         top = menu.addAction(_fg_icon("pin"), "窗口置顶")
@@ -302,15 +302,19 @@ class _PinImageView(QGraphicsView):
 class PinWindow(_PinBase):
     kind = "image"
 
-    def __init__(self, pixmap: QPixmap):
+    def __init__(self, pixmap: QPixmap, document=None):
         super().__init__()
         self.setWindowTitle("图片贴图")
         self._base = QPixmap(pixmap)
         self._ocr_controller = None
+        self._document = None
         self._text_layer = None
         self._content = _PinImageView(self._base, self)
         self._content.setToolTip("拖动图片空白处或状态栏移动；识别后可滑选文字并复制")
         self._resize_content()
+        if document is not None:
+            self._ensure_ocr_controller()
+            self._ocr_controller.adopt_document(document, self._base)
 
     def _content_size(self):
         self._content.resetTransform()
@@ -330,29 +334,62 @@ class PinWindow(_PinBase):
             if not self._base.save(path):
                 show_message(self, "保存失败", f"无法写入图片：{path}")
 
-    def _recognize(self):
+    def _ensure_ocr_controller(self):
         from ocr import OCRController
         if self._ocr_controller is None:
             self._ocr_controller = OCRController(self, layer_first=True)
             self._ocr_controller.recognized.connect(self._show_text_layer)
             self._ocr_controller.statusChanged.connect(self._show_ocr_status)
+
+    def _recognize(self):
+        self._ensure_ocr_controller()
+        if self._document is not None:
+            self._ocr_controller.show_results()
+        else:
+            self._ocr_controller.start(self._base)
+
+    def _rerun_ocr(self):
+        dialog = _ConfirmDialog("重新识别", "重新识别将替换已有校正结果和导出草稿，确认继续？", self)
+        accepted = dialog.exec()
+        dialog.deleteLater()
+        if not accepted:
+            return
+        self._ensure_ocr_controller()
+        self._set_document(None)
+        scene = self._content.scene()
+        if self._text_layer is not None:
+            scene.removeItem(self._text_layer)
+            self._text_layer.deleteLater()
+            self._text_layer = None
         self._ocr_controller.start(self._base)
+        self.stateChanged.emit()
 
     def _show_ocr_status(self, message, has_results):
         self._ocr_status = message + ("；右键查看识别全文" if has_results else "")
         self._resize_content()
 
-    def _show_text_layer(self, results):
-        from ocr import add_text_layer
+    def _set_document(self, document):
+        if self._document is not None:
+            self._document.changed.disconnect(self.stateChanged.emit)
+        self._document = document
+        if document is not None:
+            document.changed.connect(self.stateChanged.emit)
+
+    def _show_text_layer(self, document):
+        from ocr import OCRDocument, add_text_layer
+        document = document if isinstance(document, OCRDocument) else None
+        self._set_document(document)
         scene = self._content.scene()
         if self._text_layer is not None:
             scene.removeItem(self._text_layer)
+            self._text_layer.deleteLater()
             self._text_layer = None
-        if results:
+        if document is not None and document.results:
             mode = QApplication.instance().property("theme_mode") or "light"
             self._text_layer = add_text_layer(
-                scene, results, mode, on_show_results=self._ocr_controller.show_results)
+                scene, document, mode, on_show_results=self._ocr_controller.show_results)
         self._content.setFocus()
+        self.stateChanged.emit()
 
     def closeEvent(self, event):
         was_closed = self._closed
@@ -361,7 +398,10 @@ class PinWindow(_PinBase):
             self._ocr_controller.cancel()
 
     def state(self):
-        return {**super().state(), "dpr": self._base.devicePixelRatio()}
+        state = {**super().state(), "dpr": self._base.devicePixelRatio()}
+        if self._document is not None:
+            state["ocr"] = self._document.to_payload()
+        return state
 
 
 class _PinTextEdit(QTextEdit):

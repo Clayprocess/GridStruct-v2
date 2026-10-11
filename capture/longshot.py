@@ -4,8 +4,7 @@
 # 全局鼠标钩子（Windows WH_MOUSE_LL）捕获滚轮 -> 截取选区 ->
 # 与已拼接图做重叠匹配 -> 完成/取消。
 #
-# 拼接：取已拼接图底部 strip，在新截图上半部搜索最佳垂直偏移（SAD），
-# 追加非重叠部分。
+# 拼接只接受唯一且通过像素确认的重叠；失配后回滚定位保留整个已确认结果。
 
 import sys
 from time import monotonic
@@ -13,11 +12,12 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QApplication,
     QComboBox, QProgressBar,
 )
-from PySide6.QtGui import QPixmap, QImage, QTransform, QPainter, QColor, QPen, QCursor, QRegion
+from PySide6.QtGui import QPixmap, QTransform, QPainter, QColor, QPen, QCursor, QRegion
 from PySide6.QtCore import Qt, QRect, QPointF, Signal, QObject, QTimer
 from styles import tokens as T
 from ui import floating_window_type, show_message
 from .screen import ScreenManager, capture_virtual_desktop
+from .longshot_matching import find_overlap, find_viewport_end as _find_viewport_end
 
 _IS_WIN = sys.platform == "win32"
 MAX_STITCH_LENGTH = 29000
@@ -124,7 +124,7 @@ class LongShotBar(QWidget):
         self._progress.show()
         self.setEnabled(False)
 
-    def set_preview(self, pixmap, viewport, horizontal=False):
+    def set_preview(self, pixmap, viewport, horizontal=False, viewport_start=None):
         # 预览只用于定位视口；快速缩放避免长图持续占用 GUI 线程，导出仍保留原像素。
         preview = pixmap.scaled(320, 180, Qt.KeepAspectRatio, Qt.FastTransformation)
         preview.setDevicePixelRatio(1)
@@ -132,124 +132,17 @@ class LongShotBar(QWidget):
             painter.setPen(QPen(QColor(T.ANNOTATION_COLORS[4]), 2))
             if horizontal:
                 span = viewport.width() / pixmap.width() * preview.width()
-                painter.drawRect(QRect(round(preview.width() - span), 1, max(1, round(span) - 2), preview.height() - 2))
+                start = (pixmap.width() - viewport.width()) if viewport_start is None else viewport_start
+                painter.drawRect(QRect(round(start / pixmap.width() * preview.width()), 1, max(1, round(span) - 2), preview.height() - 2))
             else:
                 span = viewport.height() / pixmap.height() * preview.height()
-                painter.drawRect(QRect(1, round(preview.height() - span), preview.width() - 2, max(1, round(span) - 2)))
+                start = (pixmap.height() - viewport.height()) if viewport_start is None else viewport_start
+                painter.drawRect(QRect(1, round(start / pixmap.height() * preview.height()), preview.width() - 2, max(1, round(span) - 2)))
         self._preview.setPixmap(preview)
 
     def closeEvent(self, event):
         self.cancelled.emit()
         super().closeEvent(event)
-
-
-def _to_gray_small(pm: QPixmap, width: int = 200):
-    """转灰度 numpy 小图，用于匹配。返回 (arr, scale)。"""
-    import numpy as np
-    img = pm.toImage().convertToFormat(QImage.Format_Grayscale8)
-    w, h = img.width(), img.height()
-    width = min(width, w)
-    scale = width / w
-    sw, sh = width, max(1, int(h * scale))
-    small = img.scaled(sw, sh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-    arr = np.frombuffer(small.constBits(), dtype=np.uint8).reshape(sh, small.bytesPerLine())[:, :sw]
-    return arr.copy(), scale
-
-
-def _gray_array(pm):
-    import numpy as np
-    image = pm.toImage().convertToFormat(QImage.Format_Grayscale8)
-    return np.frombuffer(image.constBits(), dtype=np.uint8).reshape(image.height(), image.bytesPerLine())[:, :image.width()].copy()
-
-
-def find_overlap(stitched: QPixmap, new: QPixmap,
-                 strip_h: int = 80) -> int:
-    """返回新图顶部应裁掉的物理像素数。0 表示无有效重叠。"""
-    import numpy as np
-    strip_h = min(strip_h, max(4, new.height() // 4))
-    if stitched.height() <= strip_h or new.height() <= strip_h:
-        return 0
-    height = min(stitched.height(), new.height())
-    tail = stitched.copy(0, stitched.height() - height, stitched.width(), height)
-    s_arr, scale = _to_gray_small(tail)
-    n_arr, _ = _to_gray_small(new)
-    s_arr, n_arr = s_arr.astype(np.int16), n_arr.astype(np.int16)
-    sh = max(1, int(strip_h * scale))
-    last = min(len(s_arr), len(n_arr))
-    coarse = [_overlap_score(s_arr[-cut:], n_arr[:cut], 40) for cut in range(sh, last + 1)]
-    candidates = [sh + off for off, score in enumerate(coarse)
-                  if np.isfinite(score) and (off == 0 or score <= coarse[off - 1])
-                  and (off == len(coarse) - 1 or score <= coarse[off + 1])]
-    if not candidates:
-        return 0
-    source = _gray_array(tail).astype(np.int16)
-    target = _gray_array(new).astype(np.int16)
-    # 保留原始纵向像素，仅抽稀列来细化；空白底条带和静态阴影不能决定接缝。
-    stride = max(1, new.width() // 200)
-    sparse_source, sparse_target = source[:, ::stride], target[:, ::stride]
-    radius = int(1 / scale) + 2
-    refined = set()
-    for off in candidates:
-        estimate = round(off / scale)
-        cuts = range(max(strip_h, estimate - radius), min(height, estimate + radius) + 1)
-        scores = [(_overlap_score(sparse_source[-cut:], sparse_target[:cut]), cut) for cut in cuts]
-        if scores:
-            best = min(score for score, _ in scores)
-            if np.isfinite(best):
-                refined.update(cut for score, cut in scores if score == best)
-    verified = sorted((_overlap_score(source[-cut:], target[:cut]), cut) for cut in refined)
-    if (not verified or not np.isfinite(verified[0][0])
-            or (len(verified) > 1 and np.isclose(verified[0][0], verified[1][0], rtol=.01, atol=.05))):
-        return 0
-    return verified[0][1]
-
-
-def _overlap_score(source, target, limit=5):
-    import numpy as np
-    difference = np.abs(source - target)
-    mean = difference.mean()
-    if mean > limit:
-        return float("inf")
-    edges = np.zeros(source.shape, dtype=bool)
-    edges[1:] |= (np.abs(np.diff(source, axis=0)) > 16) | (np.abs(np.diff(target, axis=0)) > 16)
-    edges[:, 1:] |= (np.abs(np.diff(source, axis=1)) > 16) | (np.abs(np.diff(target, axis=1)) > 16)
-    if not edges.any():
-        return float("inf")
-    edge_mean = difference[edges].mean()
-    return mean + edge_mean if edge_mean <= limit else float("inf")
-
-
-
-def _find_viewport_end(stitched, frame):
-    """反向滚动只裁到已拼接图中能唯一匹配的完整视口，找不到就保留结果。"""
-    import numpy as np
-    source, scale = _to_gray_small(stitched)
-    target, _ = _to_gray_small(frame)
-    rows = target.shape[0]
-    if rows > source.shape[0]:
-        return 0
-    band = min(rows, max(1, round(80 * scale)))
-    scores = [np.abs(source[end - band:end].astype(int) - target[-band:].astype(int)).mean()
-              for end in range(rows, source.shape[0] + 1)]
-    best = min(scores)
-    if best > 20 or scores.count(best) != 1:
-        return 0
-    end = rows + scores.index(best)
-    if np.abs(source[end - rows:end].astype(int) - target.astype(int)).mean() > 20:
-        return 0
-    estimate = round(end / scale)
-    radius = int(1 / scale) + 2
-    target_full = _gray_array(frame).astype(np.int16)
-    first = max(frame.height(), estimate - radius)
-    last = min(stitched.height(), estimate + radius)
-    origin = first - frame.height()
-    source_full = _gray_array(stitched.copy(0, origin, stitched.width(), last - origin)).astype(np.int16)
-    ends = range(first, last + 1)
-    scores = [(np.abs(source_full[position - frame.height() - origin:position - origin] - target_full).mean(), position)
-              for position in ends]
-    best = min(score for score, _ in scores)
-    matches = [position for score, position in scores if score == best]
-    return matches[0] if best <= 20 and len(matches) == 1 else 0
 
 
 class ImageStitcher:
@@ -259,6 +152,26 @@ class ImageStitcher:
         self._stitched: QPixmap | None = None
         self._last_input: QPixmap | None = None
         self._horizontal = horizontal
+        self._preserve_tail = False
+        self._viewport_end = 0
+
+    def relocate(self, pm: QPixmap) -> bool:
+        """恢复定位只移动视口，绝不执行普通反向滚动的裁尾。"""
+        if self._horizontal:
+            pm = pm.transformed(QTransform().rotate(90))
+        if pm.width() != self._stitched.width() or pm.devicePixelRatio() != self._stitched.devicePixelRatio():
+            return False
+        end = _find_viewport_end(self._stitched, pm)
+        if not end:
+            return False
+        self._viewport_end = end
+        self._last_input = QPixmap(pm)
+        self._preserve_tail = True
+        return True
+
+    @property
+    def viewport_start(self):
+        return max(0, self._viewport_end - self._last_input.height())
 
     def feed(self, pm: QPixmap, reverse=False) -> bool:
         if self._horizontal:
@@ -266,17 +179,27 @@ class ImageStitcher:
         if self._stitched is None:
             self._stitched = pm.copy(0, 0, pm.width(), min(pm.height(), MAX_STITCH_LENGTH))
             self._last_input = QPixmap(pm)
+            self._viewport_end = self._stitched.height()
             return True
         if pm.toImage() == self._last_input.toImage():
             return False
         if pm.width() != self._stitched.width() or pm.devicePixelRatio() != self._stitched.devicePixelRatio():
             return False
-        if reverse:
+        if self._preserve_tail:
+            end = _find_viewport_end(self._stitched, pm)
+            if end:
+                self._viewport_end = end
+                self._last_input = QPixmap(pm)
+                return True
+            if reverse:
+                return False
+        elif reverse:
             end = _find_viewport_end(self._stitched, pm)
             if not end or end >= self._stitched.height():
                 return False
             self._stitched = self._stitched.copy(0, 0, pm.width(), end)
             self._last_input = QPixmap(pm)
+            self._viewport_end = end
             return True
         cut = find_overlap(self._stitched, pm)
         if cut <= 0 or cut >= pm.height():
@@ -294,12 +217,13 @@ class ImageStitcher:
         if out.isNull():
             return False
         out.setDevicePixelRatio(dpr)
-        from PySide6.QtGui import QPainter
         with QPainter(out) as p:
             p.drawPixmap(0, 0, self._stitched)
             p.drawPixmap(QPointF(0, self._stitched.deviceIndependentSize().height()), bottom)
         self._stitched = out
         self._last_input = QPixmap(pm)
+        self._viewport_end = h
+        self._preserve_tail = False
         return True
 
     @property
@@ -333,6 +257,7 @@ class LongShotFlow(QObject):
         self._shot = None
         self._last_frame = None
         self._running = False
+        self._recovering = False
         self._started = False
         self._horizontal = False
         self._reverse = False
@@ -396,6 +321,7 @@ class LongShotFlow(QObject):
         self._accum = 0
         self._started = False
         self._running = False
+        self._recovering = False
         self._long_warning_shown = False
         self._scroll_target = 0
         self._auto_multiplier = 1
@@ -460,6 +386,13 @@ class LongShotFlow(QObject):
         if self._stitcher.height >= MAX_STITCH_LENGTH:
             self._stop_at_limit()
             return
+        if self._recovering:
+            self._candidate = None
+            self._attempted_frame = None
+            self._sample_deadline = monotonic() + 1.0
+            self._bar.set_status("暂时未匹配，请向回滚动到已采集内容；结果已保留。")
+            self._sample_timer.start()
+            return
         if self._bar.mode.currentData() == "auto":
             # 只把鼠标移入选区一次；用户移出选区即暂停，避免滚动其他窗口。
             candidates = [self._screen_region.center(), self._screen_region.bottomLeft() + QPointF(12, -12).toPoint(),
@@ -510,7 +443,40 @@ class LongShotFlow(QObject):
         self._bar.set_status(message)
 
     def _grab(self):
-        return capture_virtual_desktop().crop(self._region)
+        return self._manager.capture_region(self._region)
+
+    def _enter_recovery(self):
+        self._recovering = True
+        self._auto_pending = False
+        self._hook.cancel_scroll()
+        self._ack_timer.stop()
+        self._auto_timer.stop()
+        # 滚动条拖动不会触发滚轮钩子；恢复期间仍采样，回到历史位置即可自动定位。
+        self._sample_timer.start()
+        self._bar.set_status("暂时未匹配，请向回滚动到已采集内容；结果已保留。")
+
+    def _recover_frame(self, frame):
+        if not self._stitcher.relocate(frame):
+            return False
+        self._recovering = False
+        self._last_frame = frame
+        self._matched = True
+        self._sample_timer.stop()
+        self._bar.set_preview(self._stitcher.result, frame, self._horizontal,
+                              self._stitcher.viewport_start)
+        self._bar.set_status("已恢复定位；已有结果保留，继续向前滚动即可采集新内容。")
+        if self._bar.mode.currentData() == "auto":
+            point = self._manager.cursor_position()
+            if not self._screen_region.contains(point) or self._bar.geometry().contains(point):
+                self._pause("已恢复定位；鼠标已离开采集区域，点击继续后恢复自动滚动。")
+                return True
+            try:
+                _check_scroll_target(self._scroll_target, self._mask_hwnd())
+            except OSError:
+                self._pause("已恢复定位；目标窗口已变化，返回原窗口后点击继续。")
+                return True
+            self._auto_timer.start()
+        return True
 
     def _mask_hwnd(self):
         point = self._manager.cursor_position()
@@ -547,6 +513,16 @@ class LongShotFlow(QObject):
         point = self._manager.cursor_position()
         if not self._screen_region.contains(point) or self._bar.geometry().contains(point):
             return
+        if _IS_WIN and QApplication.platformName() == "windows":
+            try:
+                if self._scroll_target:
+                    controls = int(self._bar.winId()) if self._bar.mode.currentData() == "manual" else 0
+                    _check_scroll_target(self._scroll_target, self._mask_hwnd(), controls)
+                else:
+                    _, self._scroll_target = _scroll_window(self._mask_hwnd())
+            except OSError:
+                self._pause("滚动目标窗口已变化；当前结果已保留，请返回原窗口后继续。")
+                return
         self._accum += delta
         if abs(self._accum) < 120:
             return
@@ -562,7 +538,7 @@ class LongShotFlow(QObject):
             self._sample_timer.start()
 
     def _auto_tick(self):
-        if not self._running or self._sample_timer.isActive():
+        if not self._running or self._recovering or self._sample_timer.isActive():
             return
         if self._auto_pending:
             return
@@ -602,6 +578,15 @@ class LongShotFlow(QObject):
             self._pause("未收到自动滚轮确认，请改用手动模式。")
 
     def _sample_frame(self):
+        if not self._running:
+            return
+        if self._scroll_target and _IS_WIN and QApplication.platformName() == "windows":
+            controls = int(self._bar.winId()) if self._bar.mode.currentData() == "manual" else 0
+            try:
+                _check_capture_target(self._scroll_target, controls)
+            except OSError:
+                self._pause("滚动目标窗口已变化；当前结果已保留，请返回原窗口后继续。")
+                return
         try:
             frame = self._grab()
         except (OSError, RuntimeError) as exc:
@@ -634,6 +619,15 @@ class LongShotFlow(QObject):
         self._saw_change |= changed
         # 手动滚动连续采样；自动模式一格一格前进并等待相邻两帧稳定。
         attempted = self._attempted_frame is not None and frame.toImage() == self._attempted_frame.toImage()
+        if self._recovering:
+            if not attempted and (not automatic or stable):
+                self._attempted_frame = frame
+                if self._recover_frame(frame):
+                    return
+            return
+        if not changed and self._saw_change and not self._matched:
+            # 动画或弹性滚动回到原视口后，不再用中途失败的帧判定重叠丢失。
+            self._saw_change = False
         if changed and not attempted and (not automatic or stable):
             self._attempted_frame = frame
             self._matched = self._append_frame(frame)
@@ -645,8 +639,7 @@ class LongShotFlow(QObject):
         if monotonic() >= self._sample_deadline:
             self._sample_timer.stop()
             if self._saw_change and not self._matched:
-                self._pause("匹配超时：请回滚一小段到预览绿框位置，再点击继续。")
-                show_message(self._bar, "图像匹配失败", "可能滚动过快、切换了窗口或页面仍在动画中。\n当前结果已保留；请回滚至已采集内容后继续。")
+                self._enter_recovery()
             elif automatic and not self._saw_change:
                 self._pause("一秒内没有内容变化：可能已经到底，或目标窗口不接受自动滚动。")
             elif not self._saw_change:
@@ -659,7 +652,7 @@ class LongShotFlow(QObject):
         self._last_frame = frame
         self._has_increment = True
         result = self._stitcher.result
-        self._bar.set_preview(result, frame, self._horizontal)
+        self._bar.set_preview(result, frame, self._horizontal, self._stitcher.viewport_start)
         self._bar.set_status(f"已采集 {self._stitcher.height} 像素；绿框为当前视口。")
         if self._stitcher.height >= MAX_STITCH_LENGTH and not self._long_warning_shown:
             self._stop_at_limit()
@@ -700,6 +693,7 @@ class LongShotFlow(QObject):
         self._ack_timer.stop()
         self._running = False
         self._auto_pending = False
+        self._recovering = False
         self._preparing_base = False
         self._sample_timer.stop()
         self._auto_timer.stop()
@@ -753,10 +747,21 @@ def _focus_scroll_target(ignored_hwnd, expected=0):
     return target
 
 
-def _check_scroll_target(expected, ignored_hwnd):
+def _check_capture_target(expected, controls_hwnd=0):
+    """采样时检查前台，不依赖已离开选区的鼠标位置。"""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    if user32.GetForegroundWindow() not in (expected, controls_hwnd):
+        raise OSError("滚动目标窗口已变化")
+
+
+def _check_scroll_target(expected, ignored_hwnd, controls_hwnd=0):
     user32, target = _scroll_window(ignored_hwnd)
     foreground = user32.GetForegroundWindow()
-    if target != expected or foreground != expected:
+    if target != expected or foreground not in (expected, controls_hwnd):
         raise OSError("滚动目标或前台窗口已改变，自动滚动已停止；请返回原窗口后继续")
 
 

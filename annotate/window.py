@@ -11,7 +11,7 @@ from .color_dialog import ColorDialog
 from ui import floating_window_type, ask_confirmation
 from styles import tokens as T
 from export import save_image
-from ocr import OCRController, add_text_layer
+from ocr import OCRController, OCRDocument, add_text_layer
 
 
 class AnnotationWindow(QWidget):
@@ -57,6 +57,7 @@ class AnnotationWindow(QWidget):
         self._ocr = OCRController(self, layer_first=True)
         self._ocr.recognized.connect(self._show_text_layer)
         self._ocr.statusChanged.connect(self._show_ocr_status)
+        self._canvas._undo.indexChanged.connect(self._image_changed)
         self._options.set_tool("")
         self._position_toolbar()
         self._toolbar.show()
@@ -135,9 +136,18 @@ class AnnotationWindow(QWidget):
     def _remove_text_layer(self):
         if self._text_layer is not None:
             self._canvas.scene().removeItem(self._text_layer)
+            self._text_layer.deleteLater()
             self._text_layer = None
 
+    def _image_changed(self):
+        if self._ocr.running or self._ocr.document is not None:
+            self._ocr.invalidate("图像内容已变化，原识别结果已失效；请重新识别。")
+
     def _show_text_layer(self, results):
+        # 拖动/文字编辑尚未写入撤销栈时，像素也可能已经改变。
+        if isinstance(results, OCRDocument) and not results.matches(self._render()):
+            self._ocr.invalidate("图像内容已变化，本次识别结果已失效；请重新识别。")
+            return
         self._toggle_pipette(False)
         self._remove_text_layer()
         self._canvas.clear_tool()
@@ -178,7 +188,12 @@ class AnnotationWindow(QWidget):
             self.longshotRequested.emit(QRect(self._capture_region))
         elif action == "pin":
             from pin import show_pin
-            show_pin(self._render(), self._capture_position)
+            pixmap = self._render()
+            document = self._ocr.document
+            if document is not None and not document.matches(pixmap):
+                self._ocr.invalidate("图像内容已变化，贴图需要重新识别。")
+                document = None
+            show_pin(pixmap, self._capture_position, document=document)
             self.close()
         elif action == "cancel":
             self._request_cancel()

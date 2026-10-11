@@ -150,6 +150,55 @@ class ScreenManager(QObject):
             result = result.united(logical)
         return result
 
+    def capture_region(self, rect: QRect) -> QPixmap:
+        for attempt in range(3):
+            self.refresh()
+            if not self.screens:
+                raise RuntimeError("没有可用显示器，请连接显示器后重试截图")
+            signature = self._signature
+            frames = []
+            for screen in self.screens:
+                logical, physical, dpr = self._records[screen]
+                intersection = rect.intersected(logical)
+                if intersection.isEmpty():
+                    continue
+                local = intersection.translated(-logical.topLeft())
+                start = QPoint(round(local.x() * dpr), round(local.y() * dpr))
+                end = QPoint(round((local.x() + local.width()) * dpr),
+                             round((local.y() + local.height()) * dpr))
+                if intersection.right() == logical.right():
+                    end.setX(physical.width())
+                if intersection.bottom() == logical.bottom():
+                    end.setY(physical.height())
+                # Qt 对采集起点四舍五入，旧裁剪用 Python round；多取一圈以保留相同像素。
+                x, y = max(0, local.x() - 1), max(0, local.y() - 1)
+                origin = QPoint(math.floor(x * dpr + .5), math.floor(y * dpr + .5))
+                width = math.ceil((end.x() - origin.x()) / dpr)
+                height = math.ceil((end.y() - origin.y()) / dpr)
+                native_width = math.floor(width * dpr + .5)
+                native_height = math.floor(height * dpr + .5)
+                # Qt 6 在任一尺寸为 -1 时不缩放 QSize；另一维须传物理尺寸。
+                # 到屏幕边缘用 -1，避免 225% 等比例丢末列或越过原生屏幕边界。
+                right_edge = origin.x() + native_width > physical.width()
+                bottom_edge = origin.y() + native_height > physical.height()
+                if right_edge or bottom_edge:
+                    width = -1 if right_edge else native_width
+                    height = -1 if bottom_edge else native_height
+                    native_width = physical.width() - origin.x() if right_edge else native_width
+                    native_height = physical.height() - origin.y() if bottom_edge else native_height
+                pixmap = screen.grabWindow(0, x, y, width, height)
+                if (pixmap.isNull() or pixmap.size() != QSize(native_width, native_height)
+                        or screen.geometry() != logical or screen.devicePixelRatio() != dpr):
+                    break
+                pixels = QRect(start - origin, QSize(end.x() - start.x(), end.y() - start.y()))
+                frames.append(ScreenFrame(screen, intersection, pixmap.copy(pixels),
+                                          physical.topLeft() + start))
+            else:
+                self.refresh()
+                if self._signature == signature:
+                    return frames[0].pixmap if len(frames) == 1 else DesktopCapture(frames).crop(rect)
+        raise RuntimeError("屏幕捕获尺寸或显示器布局持续变化，请重试截图")
+
     def screen_at(self, point):
         return next((screen for screen, (logical, physical, dpr) in self._records.items()
                      if logical.contains(point)), None)

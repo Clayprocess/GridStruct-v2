@@ -56,12 +56,12 @@ def _register(window, pos=None):
     return window
 
 
-def show_pin(pixmap, pos=None):
-    """创建图片贴图；保持原始图片供复制、保存和 OCR 使用。"""
+def show_pin(pixmap, pos=None, document=None):
+    """创建图片贴图；同图 OCR 文档随贴图共享，保持人工校正。"""
     if pixmap.isNull():
         show_message(None, "贴图", "无法创建空图片贴图")
         return None
-    return _register(PinWindow(pixmap), pos)
+    return _register(PinWindow(pixmap, document=document), pos)
 
 
 def show_text_pin(text: str, pos=None):
@@ -201,13 +201,28 @@ def restore_pins() -> bool:
             + (f"请修复或移走该文件后重启：\n{path}" if path is not None else "请检查应用目录的写入权限后重启。"))
         return False
     _restoring = True
+    ocr_errors = []
     for state, pixmap in prepared:
-        window = PinWindow(pixmap) if state["kind"] == "image" else PinTextWindow(state["text"])
+        document = None
+        if state["kind"] == "image" and "ocr" in state:
+            from ocr import OCRDocument
+            try:
+                document = OCRDocument.from_payload(state["ocr"], pixmap.toImage())
+            except (ValueError, TypeError, KeyError) as error:
+                ocr_errors.append(f"{state['id']}：{error}")
+        window = PinWindow(pixmap, document=document) if state["kind"] == "image" else PinTextWindow(state["text"])
         window.restore_state(state)
         _register(window)
+        if state["kind"] == "image" and "ocr" in state and document is None:
+            window._show_ocr_status("OCR 数据未恢复，原会话已保留，自动保存暂停", False)
     _restoring = False
-    _restore_failed = False
-    return True
+    # OCR 校正损坏时仍恢复图片，但不能用空结果自动覆盖原始人工编辑。
+    _restore_failed = bool(ocr_errors)
+    if ocr_errors:
+        show_message(None, "贴图 OCR 未恢复", "\n".join(ocr_errors)
+                     + f"\n贴图图片已恢复，原会话和 OCR 校正已保留，自动保存暂停。"
+                     + f"\n请修复或移走该文件后重启：\n{path}")
+    return not ocr_errors
 
 
 def shutdown_pins() -> bool:

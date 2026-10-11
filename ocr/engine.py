@@ -3,9 +3,9 @@
 
 import os
 from threading import Lock
-from dataclasses import dataclass
 from PySide6.QtGui import QPixmap, QImage
-from PySide6.QtCore import QRect, QRectF
+from PySide6.QtCore import QRectF
+from .model import OCRResult
 
 _MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "assets", "models")
 _MODEL_DIR = os.path.abspath(_MODEL_DIR)
@@ -15,15 +15,6 @@ _MODELS = {
     "rec": "PP-OCRv6_rec_small.onnx",
     "cls": "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
 }
-
-
-@dataclass
-class OCRResult:
-    box: QRect      # 逻辑坐标
-    text: str
-    score: float
-    paragraph: int = -1
-    line: int = -1
 
 
 class OCREngine:
@@ -53,15 +44,19 @@ class OCREngine:
     def recognize(self, pixmap: QPixmap) -> list[OCRResult]:
         return self.recognize_image(pixmap.toImage())
 
-    def recognize_image(self, image: QImage) -> list[OCRResult]:
+    def recognize_image(self, image: QImage, on_stage=None) -> list[OCRResult]:
         """后台任务使用独立 QImage，串行复用 ONNX 会话。"""
         if image.isNull():
             raise ValueError("没有可识别的图片")
         with self._lock:
+            if on_stage is not None and self._engine is None:
+                on_stage("loading")
+            self._ensure()
+            if on_stage is not None:
+                on_stage("recognizing")
             return self._recognize_image(image)
 
     def _recognize_image(self, image: QImage) -> list[OCRResult]:
-        self._ensure()
         from capture import ScreenManager
         img = image.convertToFormat(QImage.Format_BGR888)
         w, h = img.width(), img.height()
@@ -72,12 +67,12 @@ class OCREngine:
         res = self._engine(arr)
         out = []
         if res.boxes is not None:
-            for box, txt, score in zip(res.boxes, res.txts, res.scores):
+            for index, (box, txt, score) in enumerate(zip(res.boxes, res.txts, res.scores)):
                 xs = [p[0] for p in box]
                 ys = [p[1] for p in box]
                 physical = QRectF(float(min(xs)), float(min(ys)),
                                   float(max(xs) - min(xs)), float(max(ys) - min(ys)))
                 r = ScreenManager.image_rect_to_logical(physical, image).toAlignedRect()
-                out.append(OCRResult(r, txt or "", float(score or 0)))
-        from .layout import arrange_results
-        return arrange_results(out)
+                polygon = tuple((float(point[0]), float(point[1])) for point in box)
+                out.append(OCRResult(r, txt or "", float(score or 0), polygon=polygon, raw_index=index))
+        return out

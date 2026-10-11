@@ -1,21 +1,40 @@
-"""识别文字覆盖层，坐标与截图的逻辑坐标一致。"""
+"""共享校正文字的原图覆盖层；四点几何映射至截图逻辑坐标。"""
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QTransform
-from PySide6.QtWidgets import QApplication, QGraphicsItemGroup, QGraphicsTextItem, QMenu
+from PySide6.QtCore import QPointF, Qt, Signal, Slot
+from PySide6.QtGui import QColor, QFont, QPen, QPolygonF, QTransform
+from PySide6.QtWidgets import QApplication, QGraphicsObject, QGraphicsTextItem, QMenu
 from styles import tokens as T
+from .model import OCRDocument
 
 
 class _SelectableTextItem(QGraphicsTextItem):
-    selectionChanged = Signal()
+    selectionChanged = Signal(object, str)
 
-    def __init__(self, text, mode, on_show_results=None):
-        super().__init__(text)
-        self._on_show_results = on_show_results
+    def __init__(self, result, layer):
+        super().__init__(result.text, layer)
+        self._ids = result.source_ids or (result.item_id,)
+        self._layer = layer
         self._hovered = False
-        self._hover_color = QColor(T.THEMES[mode]["accent"])
-        self._hover_color.setAlpha(160)
+        self._focused = False
         self.setAcceptHoverEvents(True)
+        self.document().setDocumentMargin(0)
+        font = QFont()
+        font.setPixelSize(max(1, result.box.height()))
+        self.setFont(font)
+        self.setDefaultTextColor(QColor(Qt.transparent))
+        self.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        bounds = self.boundingRect()
+        source = QPolygonF([bounds.topLeft(), bounds.topRight(), bounds.bottomRight(), bounds.bottomLeft()])
+        if result.polygon:
+            dpr = layer.document.image.devicePixelRatio()
+            target = QPolygonF([QPointF(x / dpr, y / dpr) for x, y in result.polygon])
+        else:
+            box = result.box
+            target = QPolygonF([QPointF(box.left(), box.top()), QPointF(box.left() + box.width(), box.top()),
+                                QPointF(box.left() + box.width(), box.top() + box.height()),
+                                QPointF(box.left(), box.top() + box.height())])
+        self.setTransform(QTransform.quadToQuad(source, target))
+        self.selectionChanged.connect(layer.selectionChanged)
 
     def hoverEnterEvent(self, event):
         self._hovered = True
@@ -28,69 +47,108 @@ class _SelectableTextItem(QGraphicsTextItem):
         super().hoverLeaveEvent(event)
 
     def paint(self, painter, option, widget=None):
-        # 悬停反馈只属于视图，scene.render 导出原图时不写入底色。
-        if self._hovered and widget is not None:
+        # 视图定位和选字反馈不写入 scene.render 的图片导出。
+        if widget is None:
+            return
+        if self._hovered or self._focused:
             painter.save()
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(self._hover_color)
+            color = QColor(T.THEMES[self._layer.mode]["accent"])
+            color.setAlpha(160)
+            painter.setBrush(color)
+            painter.setPen(QPen(QColor(T.THEMES[self._layer.mode]["ring"]), 1) if self._focused else Qt.NoPen)
             painter.drawRect(self.boundingRect())
             painter.restore()
         super().paint(painter, option, widget)
 
+    def _emit_selection(self):
+        self.selectionChanged.emit(self, self.textCursor().selectedText().replace("\u2029", "\n"))
+
     def mousePressEvent(self, event):
+        self._layer.document.focus(self._ids)
         super().mousePressEvent(event)
-        self.selectionChanged.emit()
+        self._emit_selection()
 
     def mouseMoveEvent(self, event):
         super().mouseMoveEvent(event)
-        self.selectionChanged.emit()
+        self._emit_selection()
 
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
-        self.selectionChanged.emit()
+        self._emit_selection()
 
     def mouseDoubleClickEvent(self, event):
         super().mouseDoubleClickEvent(event)
-        self.selectionChanged.emit()
+        self._emit_selection()
 
     def keyPressEvent(self, event):
         super().keyPressEvent(event)
-        self.selectionChanged.emit()
+        self._emit_selection()
 
     def contextMenuEvent(self, event):
-        if self._on_show_results is None:
+        if self._layer.on_show_results is None:
             super().contextMenuEvent(event)
         else:
+            self._layer.document.focus(self._ids)
             menu = QMenu(event.widget())
             selected = self.textCursor().selectedText().replace("\u2029", "\n")
             copy = menu.addAction("复制选中文字", lambda: QApplication.clipboard().setText(selected))
             copy.setEnabled(bool(selected))
-            menu.addAction("查看识别全文…", self._on_show_results)
+            menu.addAction("复制此条校正文字", lambda: QApplication.clipboard().setText(self.toPlainText()))
+            menu.addAction("查看与校正文字…", self._layer.on_show_results)
             menu.exec(event.screenPos())
             menu.deleteLater()
             event.accept()
-        self.selectionChanged.emit()
+        self._emit_selection()
 
 
-def add_text_layer(scene, results, mode="light", on_show_results=None) -> QGraphicsItemGroup:
-    """添加可选中文字层；调用方负责隐藏、移除以及避免把它写入原始图片。"""
-    layer = QGraphicsItemGroup()
-    layer.setHandlesChildEvents(False)
-    layer.setZValue(1000)
+class _TextLayer(QGraphicsObject):
+    selectionChanged = Signal(object, str)
+
+    def __init__(self, document, mode, on_show_results):
+        super().__init__()
+        self.document = document
+        self.mode = mode
+        self.on_show_results = on_show_results
+        self._focused_ids = document.focused_ids
+        self._items = []
+        self.setZValue(1000)
+        self.document.changed.connect(self._rebuild)
+        self.document.focused.connect(self._focus)
+        self._rebuild()
+
+    def boundingRect(self):
+        return self.childrenBoundingRect()
+
+    def paint(self, painter, option, widget=None):
+        pass
+
+    @Slot()
+    def _rebuild(self):
+        self.prepareGeometryChange()
+        # Qt 对象销毁自动断开文档信号，层释放后文档仍能供别的窗口使用。
+        for item in self.childItems():
+            item.setVisible(False)
+            item.setParentItem(None)
+            if item.scene() is not None:
+                item.scene().removeItem(item)
+            item.deleteLater()
+        self.selectionChanged.emit(self, "")
+        self._items = [_SelectableTextItem(result, self) for result in self.document.results
+                       if result.text and not result.box.isEmpty()]
+        self._focus(self._focused_ids)
+
+    @Slot(object)
+    def _focus(self, ids):
+        self._focused_ids = tuple(ids)
+        selected = set(ids)
+        for item in self.childItems():
+            item._focused = bool(selected.intersection(item._ids))
+            item.update()
+
+
+def add_text_layer(scene, results, mode="light", on_show_results=None):
+    """添加共享文字层；旧列表调用沿用原有语义，原图导出不含选字反馈。"""
+    document = results if isinstance(results, OCRDocument) else OCRDocument(results)
+    layer = _TextLayer(document, mode, on_show_results)
     scene.addItem(layer)
-    for result in results:
-        if result.box.isEmpty() or not result.text:
-            continue
-        item = _SelectableTextItem(result.text, mode, on_show_results)
-        item.document().setDocumentMargin(0)
-        font = QFont()
-        font.setPixelSize(max(1, result.box.height()))
-        item.setFont(font)
-        # 只隐藏未选中文字，保留 QTextControl 的选区高亮与复制；不能降低整个图元的不透明度。
-        item.setDefaultTextColor(QColor(Qt.transparent))
-        item.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-        bounds = item.boundingRect()
-        item.setTransform(QTransform().scale(result.box.width() / bounds.width(), result.box.height() / bounds.height()))
-        item.setPos(result.box.topLeft())
-        layer.addToGroup(item)
     return layer

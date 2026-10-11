@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import sys
+from time import monotonic
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -19,6 +20,8 @@ from styles import apply_theme, tokens as T
 class _Service(QObject):
     requested = Signal(object)
     finished = Signal(object, object, str)
+    stage = Signal(object, str)
+    active = None
 
 
 def _visible_text(window):
@@ -51,8 +54,10 @@ def main():
                 else:
                     window._recognize()
                     controller = window._ocr_controller
+                controller._request.started_at = monotonic()
+                service.stage.emit(controller._request, "recognizing")
                 app.processEvents()
-                if "正在识别" not in _visible_text(window):
+                if "正在本地识别" not in _visible_text(window):
                     errors.append(f"{mode}/{type(window).__name__}: 无运行状态")
                 controller.cancel()
                 app.processEvents()
