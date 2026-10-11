@@ -1,6 +1,6 @@
 # 智能吸附：鼠标悬停时自动识别窗口/控件矩形。
 #
-# 逆向依据（PixPin 3.5.5.1, UiRegionDetector.dll）：
+# 参考（PixPin 3.5.5.1, UiRegionDetector.dll）：
 #   三级检测：Win32（WindowFromPoint/ChildWindowFromPoint + GetWindowRect）
 #   -> UIA（CUIAutomation::ElementFromPoint + BoundingRectangle），
 #   后台线程异步，结果经信号回传，带矩形缓存。

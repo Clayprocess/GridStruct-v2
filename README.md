@@ -28,7 +28,7 @@
 
 ## UI 规格
 
-见 `../pixpin/pixpin-ui-spec.md`（PixPin 逆向规格书：窗口清单、工具条按钮、菜单项）
+见 `../pixpin/pixpin-ui-spec.md`（PixPin UI 规格书：窗口清单、工具条按钮、菜单项）
 
 ## 运行
 
