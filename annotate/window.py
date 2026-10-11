@@ -148,7 +148,7 @@ class AnnotationWindow(QWidget):
         s = QSettings("GridStruct", "GridStruct")
         default_dir = s.value("screenshot_dir", "") or \
             QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
-        start = os.path.join(default_dir, "PixShot.png")
+        start = os.path.join(default_dir, "GridStruct-V2.png")
         path, _ = QFileDialog.getSaveFileName(
             self, "保存截图", start, "PNG (*.png);;JPG (*.jpg);;BMP (*.bmp)")
         if path:

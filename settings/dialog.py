@@ -26,7 +26,7 @@ def _read_autostart() -> bool:
     import winreg
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
-            winreg.QueryValueEx(k, "PixShot")
+            winreg.QueryValueEx(k, "GridStruct-V2")
         return True
     except OSError:
         return False
@@ -39,10 +39,10 @@ def _write_autostart(enabled: bool):
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY,
                              0, winreg.KEY_SET_VALUE) as k:
             if enabled:
-                winreg.SetValueEx(k, "PixShot", 0, winreg.REG_SZ,
+                winreg.SetValueEx(k, "GridStruct-V2", 0, winreg.REG_SZ,
                                   sys.executable)
             else:
-                winreg.DeleteValue(k, "PixShot")
+                winreg.DeleteValue(k, "GridStruct-V2")
     except OSError:
         pass
 
@@ -142,7 +142,7 @@ class SettingsDialog(BaseDialog):
     def _about_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.addWidget(QLabel("PixShot（GridStruct v2）"))
+        layout.addWidget(QLabel("GridStruct-V2"))
         layout.addWidget(QLabel(f"版本 {_VERSION}"))
         layout.addStretch()
         return w

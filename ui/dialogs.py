@@ -7,4 +7,4 @@ from PySide6.QtWidgets import QDialog
 class BaseDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("PixShot")
+        self.setWindowTitle("GridStruct-V2")

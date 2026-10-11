@@ -1,4 +1,4 @@
-# PixShot（暂定名）
+# GridStruct-V2
 
 对标 PixPin 的截图/贴图/标注工具，自研实现。
 

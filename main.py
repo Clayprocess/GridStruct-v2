@@ -1,4 +1,4 @@
-# PixShot 应用入口（P0-A）。
+# GridStruct-V2 应用入口（P0-A）。
 # 用法：python main.py
 #
 # 启动流程：单实例检查 -> 跟随系统主题 -> 托盘 -> 全局热键 -> 事件循环。
@@ -28,8 +28,8 @@ try:
 except ImportError:
     SettingsDialog = None
 
-APP_NAME = "PixShot"
-_SINGLE_INSTANCE_KEY = "PixShot_SingleInstance_v1"
+APP_NAME = "GridStruct-V2"
+_SINGLE_INSTANCE_KEY = "GridStruct-V2_SingleInstance_v1"
 
 
 def _ensure_single_instance() -> QSharedMemory | None:
@@ -37,7 +37,7 @@ def _ensure_single_instance() -> QSharedMemory | None:
     mem = QSharedMemory(_SINGLE_INSTANCE_KEY)
     if mem.create(1):
         return mem
-    print("[PixShot] 已有实例在运行，退出。")
+    print("[GridStruct-V2] 已有实例在运行，退出。")
     return None
 
 
@@ -58,7 +58,7 @@ def main() -> int:
     # mem 必须活到进程结束，故意不释放
 
     mode = apply_theme(app, "system")
-    print(f"[PixShot] 启动，主题：{mode}")
+    print(f"[GridStruct-V2] 启动，主题：{mode}")
 
     flow = ScreenshotFlow(app, theme_mode=mode)
 
@@ -104,15 +104,15 @@ def main() -> int:
 
     tray_icon = create_tray(app, callbacks)
     if not QSystemTrayIcon.isSystemTrayAvailable():
-        print("[PixShot] 警告：系统托盘不可用")
+        print("[GridStruct-V2] 警告：系统托盘不可用")
     tray_icon.show()
-    print("[PixShot] 托盘已创建")
+    print("[GridStruct-V2] 托盘已创建")
 
     hotkey = GlobalHotkey(app)
     if hotkey.register(callbacks["screenshot"]):
-        print(f"[PixShot] 全局热键已注册：{GlobalHotkey.hotkey_name()}")
+        print(f"[GridStruct-V2] 全局热键已注册：{GlobalHotkey.hotkey_name()}")
     else:
-        print("[PixShot] 全局热键注册失败（见上方日志）")
+        print("[GridStruct-V2] 全局热键注册失败（见上方日志）")
 
     ret = app.exec()
     hotkey.unregister()
@@ -131,7 +131,7 @@ def themed_icon(name, mode):
 
 def build_demo(mode: str) -> QMainWindow:
     w = QMainWindow()
-    w.setWindowTitle(f"PixShot 主题演示（{mode}）")
+    w.setWindowTitle(f"GridStruct-V2 主题演示（{mode}）")
     w.resize(560, 640)
     central = QWidget()
     w.setCentralWidget(central)

@@ -10,7 +10,7 @@ from styles import tokens as T
 from ui.icons import tinted_icon
 
 TRAY_ICON_NAME = "pin"
-TRAY_TOOLTIP = "PixShot"
+TRAY_TOOLTIP = "GridStruct-V2"
 
 # 右键菜单项：(callbacks key, 显示文本)，按显示顺序
 MENU_ITEMS: list[tuple[str, str]] = [

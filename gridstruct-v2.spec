@@ -1,6 +1,6 @@
 # PyInstaller 打包规格（在 Windows 上运行）。
-# 用法：pyinstaller pixshot.spec
-# 产物：dist/PixShot/ 目录，打 zip 经 OneDrive 分发。
+# 用法：pyinstaller gridstruct-v2.spec
+# 产物：dist/GridStruct-V2/ 目录，打 zip 经 OneDrive 分发。
 #
 # 注意：
 #   - 必须在 Windows 上执行（不支持交叉编译）
@@ -39,7 +39,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="PixShot",
+    name="GridStruct-V2",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -55,5 +55,5 @@ coll = COLLECT(
     a.data,
     strip=False,
     upx=True,
-    name="PixShot",
+    name="GridStruct-V2",
 )
