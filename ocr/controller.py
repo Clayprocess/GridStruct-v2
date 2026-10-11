@@ -3,8 +3,8 @@
 from dataclasses import dataclass
 from threading import Event
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
-from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QMessageBox, QProgressBar, QPushButton, QVBoxLayout
-from ui import BaseDialog
+from PySide6.QtWidgets import QApplication, QLabel, QProgressBar, QPushButton, QVBoxLayout
+from ui import BaseDialog, MessageDialog, show_message
 from .engine import OCREngine
 from .dialog import OCRResultDialog
 from .layout import format_text
@@ -108,7 +108,7 @@ class OCRController(QObject):
     def start(self, pixmap):
         if pixmap.isNull():
             self.statusChanged.emit("识别失败：没有可识别的图片", False)
-            QMessageBox.warning(self._owner, "文字识别失败", "没有可识别的图片。")
+            show_message(self._owner, "文字识别失败", "没有可识别的图片。")
             return
         if self.running:
             self.cancel()
@@ -147,7 +147,7 @@ class OCRController(QObject):
         message = "识别超过 60 秒，本次结果已取消。后台推理结束后可重新识别，原图仍然保留。"
         self.statusChanged.emit("识别超时，可重新识别", False)
         self.failed.emit(message)
-        QMessageBox.warning(self._owner, "识别超时", message)
+        show_message(self._owner, "识别超时", message)
 
     @Slot(object, object, str)
     def _finished(self, request, results, error):
@@ -157,7 +157,7 @@ class OCRController(QObject):
         if error:
             self.statusChanged.emit("识别失败，请查看错误提示后重试", False)
             self.failed.emit(error)
-            QMessageBox.warning(self._owner, "文字识别失败", error)
+            show_message(self._owner, "文字识别失败", error)
             return
         self._results = results
         self.recognized.emit(results)
@@ -169,11 +169,10 @@ class OCRController(QObject):
         settings = get_settings()
         if not results:
             if not settings.value("ocr/hide_empty_notice", False, type=bool):
-                notice = QMessageBox(QMessageBox.Information, "未检测到文字", "此图片中没有检测到文字区域。", parent=self._owner)
-                checkbox = QCheckBox("以后不再提示")
-                notice.setCheckBox(checkbox)
+                notice = MessageDialog(self._owner, "未检测到文字", "此图片中没有检测到文字区域。",
+                                       checkbox_text="以后不再提示")
                 notice.exec()
-                settings.setValue("ocr/hide_empty_notice", checkbox.isChecked())
+                settings.setValue("ocr/hide_empty_notice", notice.checkbox.isChecked())
             return
         if settings.value("ocr/direct_copy", False, type=bool):
             QApplication.clipboard().setText(format_text(results))

@@ -17,6 +17,7 @@ class ToolOptions(QWidget):
         self._layout = QGridLayout(self)
         self._layout.setContentsMargins(6, 4, 6, 4)
         self._controls = {}
+        self._choices = {}
         self._colors = {}
         self._tool_id = ""
         canvas.styleChanged.connect(self._sync)
@@ -27,6 +28,7 @@ class ToolOptions(QWidget):
             item = self._layout.takeAt(0)
             item.widget().deleteLater()
         self._controls.clear()
+        self._choices.clear()
         self._colors.clear()
         self._tool_id = tool_id
         self.setVisible(bool(tool_id))
@@ -43,8 +45,15 @@ class ToolOptions(QWidget):
         elif tool_id == "arrow":
             self._choice("arrow_type", "箭头", [("直线箭头", "straight"), ("直线双向", "straight_both"),
                          ("线形箭头", "line"), ("线形双向", "line_both"), ("实心箭头", "solid"),
-                         ("实心双向", "solid_both"), ("尺寸箭头", "dimension")])
+                         ("实心双向", "solid_both"), ("尺寸箭头", "dimension"), ("曲线箭头", "curve")])
             self._number("arrow_size", "箭头大小", 6, 60)
+            heads = [("无", "none"), ("开放", "open"), ("实心", "filled")]
+            self._choice("arrow_start", "起点", heads)
+            self._choice("arrow_end", "终点", heads)
+            self._add("调整", QLabel("选中曲线后拖圆点；双击箭头添加/关闭注释"))
+        elif tool_id == "polyline":
+            self._choice("polyline_cap", "端点", [("圆头", "round"), ("方头", "square")])
+            self._choice("polyline_join", "连接", [("圆角", "round"), ("尖角", "miter")])
         elif tool_id == "line":
             self._choice("line_style", "线型", [("实线", "solid"), ("虚线", "dash"), ("点线", "dot"),
                                                    ("双线", "double"), ("波浪线", "wavy")])
@@ -55,6 +64,7 @@ class ToolOptions(QWidget):
             font.currentFontChanged.connect(lambda value: self._canvas.update_style("font_family", value.family()))
             self._add("字体", font)
             self._number("font_size", "字号", 6, 96)
+            self._choice("text_alignment", "对齐", [("左", "left"), ("中", "center"), ("右", "right")])
             self._check("text_background", "背景")
             self._color("background_color", "背景色")
             self._check("text_outline", "描边")
@@ -120,6 +130,7 @@ class ToolOptions(QWidget):
             combo.addItem(label, value)
         combo.setCurrentIndex(combo.findData(getattr(self._canvas.style, key)))
         combo.currentIndexChanged.connect(lambda _: self._canvas.update_style(key, combo.currentData()))
+        self._choices[key] = combo
         self._add(title, combo)
 
     def _check(self, key, title):
@@ -153,6 +164,10 @@ class ToolOptions(QWidget):
     def _sync(self, tool_id):
         if tool_id != self._tool_id:
             return
+        for key, combo in self._choices.items():
+            combo.blockSignals(True)
+            combo.setCurrentIndex(combo.findData(getattr(self._canvas.style, key)))
+            combo.blockSignals(False)
         for key, combo in self._colors.items():
             combo.blockSignals(True)
             combo.setCurrentIndex(combo.findData(getattr(self._canvas.style, key).name()))

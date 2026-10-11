@@ -1,14 +1,14 @@
 """截图画布与浮动工具配置，输出与识别通过模块公开接口调用。"""
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolButton, QApplication, QMessageBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication
 from PySide6.QtGui import QPixmap, QColor
-from PySide6.QtCore import Qt, QPoint, Signal, QTimer
+from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QPropertyAnimation, QEasingCurve
 
 from .canvas import AnnotationCanvas
-from .toolbar import FloatPanel
+from .toolbar import FloatPanel, TOOL_SHORTCUTS
 from .options import ToolOptions
 from .color_dialog import ColorDialog
-from ui import floating_window_type, tinted_icon
+from ui import floating_window_type, ask_confirmation
 from styles import tokens as T
 from export import save_image
 from ocr import OCRController, add_text_layer
@@ -17,11 +17,18 @@ from ocr import OCRController, add_text_layer
 class AnnotationWindow(QWidget):
     finished = Signal(QPixmap)
     cancelled = Signal()
+    longshotRequested = Signal(QRect)
 
     def __init__(self, pixmap: QPixmap, pos: QPoint, theme_mode: str = "light", *,
-                 scrollable: bool = False):
+                 scrollable: bool = False, capture_region: QRect | None = None):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | floating_window_type())
         self._mode = theme_mode
+        self._capture_position = QPoint(pos)
+        # 长图和跨屏原生拼图的像素尺寸不代表原桌面采集视口，必须保留确认时的逻辑矩形。
+        self._capture_region = QRect(capture_region) if capture_region is not None else QRect(pos, pixmap.deviceIndependentSize().toSize())
+        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade.setDuration(120)
+        self._fade.setEasingCurve(QEasingCurve.OutCubic)
         self._scrollable = scrollable
         self.setWindowTitle("GridStruct-V2 截图标注")
         self._ended = False
@@ -43,14 +50,6 @@ class AnnotationWindow(QWidget):
         self._toolbar = FloatPanel(mode=theme_mode, parent=self)
         self._options = ToolOptions(self._canvas)
         self._toolbar.set_options_widget(self._options)
-        self._pip_btn = QToolButton()
-        self._pip_btn.setIcon(tinted_icon("pipette", T.THEMES[theme_mode]["foreground"], 16))
-        self._pip_btn.setProperty("class", "ghost")
-        self._pip_btn.setToolTip("取色：点击截图，选择 Hex / RGB / HSV")
-        self._pip_btn.setAccessibleName("取色")
-        self._pip_btn.setCheckable(True)
-        self._pip_btn.toggled.connect(self._toggle_pipette)
-        self._toolbar.layout().addWidget(self._pip_btn, 0, Qt.AlignRight)
         self._toolbar.toolSelected.connect(self._on_tool)
         self._toolbar.actionTriggered.connect(self._on_action)
         self._canvas.toolChanged.connect(self._tool_changed)
@@ -70,6 +69,14 @@ class AnnotationWindow(QWidget):
         if not tool_id:
             self._toolbar.clear_selection()
         QTimer.singleShot(0, self, self._position_toolbar)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fade.stop()
+        self.setWindowOpacity(0)
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.start()
 
     def _position_toolbar(self):
         if self._scrollable:
@@ -97,7 +104,7 @@ class AnnotationWindow(QWidget):
         self._on_action(action)
 
     def _on_tool(self, tool_id):
-        self._pip_btn.setChecked(False)
+        self._toggle_pipette(False)
         if self._text_layer is not None:
             self._show_ocr_status("已切换到标注，识别结果仍可查看全文", True)
         self._remove_text_layer()
@@ -117,12 +124,13 @@ class AnnotationWindow(QWidget):
             self._pipette_tool = ""
 
     def _on_pipette_picked(self, color):
-        self._pip_btn.setChecked(False)
+        self._toggle_pipette(False)
         dialog = ColorDialog(color, self)
         if dialog.exec() == ColorDialog.Accepted:
             QApplication.clipboard().setText(dialog.value.text())
             if dialog.apply_color.isChecked():
                 self._canvas.update_style("color", QColor(color))
+        dialog.deleteLater()
 
     def _remove_text_layer(self):
         if self._text_layer is not None:
@@ -130,7 +138,7 @@ class AnnotationWindow(QWidget):
             self._text_layer = None
 
     def _show_text_layer(self, results):
-        self._pip_btn.setChecked(False)
+        self._toggle_pipette(False)
         self._remove_text_layer()
         self._canvas.clear_tool()
         if results:
@@ -160,13 +168,17 @@ class AnnotationWindow(QWidget):
         elif action == "save":
             save_image(self._render(), self)
         elif action == "ocr":
-            self._pip_btn.setChecked(False)
+            self._toggle_pipette(False)
             self._ocr.start(self._render())
         elif action == "ocr_results":
             self._ocr.show_results()
+        elif action == "pipette":
+            self._toggle_pipette(not self._canvas.pipette_active)
+        elif action == "longshot":
+            self.longshotRequested.emit(QRect(self._capture_region))
         elif action == "pin":
             from pin import show_pin
-            show_pin(self._render(), self.pos())
+            show_pin(self._render(), self._capture_position)
             self.close()
         elif action == "cancel":
             self._request_cancel()
@@ -178,21 +190,22 @@ class AnnotationWindow(QWidget):
         self.close()
 
     def _request_cancel(self):
-        if QMessageBox.question(self, "退出截图", "确认退出截图？未复制或保存的标注将丢失。",
-                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+        if ask_confirmation(self, "退出截图", "确认退出截图？未复制或保存的标注将丢失。"):
             self.close()
 
     def keyPressEvent(self, event):
         key, modifiers = event.key(), event.modifiers()
         if key == Qt.Key_Escape:
             if self._canvas.pipette_active:
-                self._pip_btn.setChecked(False)
+                self._toggle_pipette(False)
             elif not self._canvas.finish_editing():
                 self._request_cancel()
         elif modifiers & Qt.ControlModifier and key in (Qt.Key_S, Qt.Key_C):
             self._on_action("save" if key == Qt.Key_S else "copy")
         elif modifiers & Qt.ShiftModifier and key == Qt.Key_O:
             self._on_action("ocr")
+        elif modifiers == Qt.ShiftModifier and key < 0x110000 and chr(key) in TOOL_SHORTCUTS:
+            self.select_tool(TOOL_SHORTCUTS[chr(key)])
         elif key in (Qt.Key_Return, Qt.Key_Enter):
             self._finish()
         else:

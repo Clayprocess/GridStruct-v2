@@ -16,7 +16,7 @@ import sys as _sys
 # 作为模块导入时此操作无害（路径已存在则重复）。
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QToolButton, QWidget, QLabel
 
@@ -39,6 +39,9 @@ TOOLS: list[tuple[str, str, str]] = [
     ("magnifier", "放大镜", "zoom-in"),
 ]
 
+# 逆向材料未确认逐工具映射，采用不占用 O/Q/F 识别快捷键的本地键位。
+TOOL_SHORTCUTS = dict(zip("REAPLBTNMHZC", [tool[0] for tool in TOOLS]))
+
 # 操作 id -> (中文名, Lucide 图标名)
 ACTIONS: list[tuple[str, str, str]] = [
     ("undo", "撤销", "undo-2"),
@@ -47,6 +50,8 @@ ACTIONS: list[tuple[str, str, str]] = [
     ("copy", "复制", "copy"),
     ("pin", "贴图", "pin"),
     ("ocr", "文字识别", "scan-text"),
+    ("pipette", "取色", "pipette"),
+    ("longshot", "长截图", "scan-text"),
 ]
 
 CONFIRM_ID = "confirm"
@@ -77,12 +82,17 @@ class FloatPanel(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         self._mode = "light"
+        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self._slide = QPropertyAnimation(self, b"pos", self)
+        for animation in (self._fade, self._slide):
+            animation.setDuration(150)
+            animation.setEasingCurve(QEasingCurve.OutCubic)
         self._buttons: dict[str, QToolButton] = {}
         # 按钮 id -> 图标颜色在 tokens 中的键（确认/取消用前景色变体）
         self._icon_color_key: dict[str, str] = {}
 
         self._root_layout = QVBoxLayout(self)
-        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setContentsMargins(8, 6, 8, 10)
         self._root_layout.setSpacing(0)
         self._options = None
         buttons = QWidget(self)
@@ -114,7 +124,7 @@ class FloatPanel(QWidget):
 
         layout.addWidget(self._make_separator())
 
-        # 确认 / 取消：放右侧，用 primary / destructive 区分
+        # 取消不属于破坏数据的操作，保持描边按钮的层级。
         confirm = self._make_button(CONFIRM_ID, *_END_BUTTONS[CONFIRM_ID])
         confirm.setProperty("class", "primary")
         self._icon_color_key[CONFIRM_ID] = "primary_foreground"
@@ -122,8 +132,8 @@ class FloatPanel(QWidget):
         layout.addWidget(confirm)
 
         cancel = self._make_button(CANCEL_ID, *_END_BUTTONS[CANCEL_ID])
-        cancel.setProperty("class", "destructive")
-        self._icon_color_key[CANCEL_ID] = "destructive_foreground"
+        cancel.setProperty("class", "outline")
+        self._icon_color_key[CANCEL_ID] = "foreground"
         cancel.clicked.connect(lambda: self.actionTriggered.emit(CANCEL_ID))
         layout.addWidget(cancel)
 
@@ -150,10 +160,27 @@ class FloatPanel(QWidget):
         t = T.THEMES[self._mode]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(6.5, 4.5, -6.5, -8.5)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(*T.FLOAT_PANEL_SHADOW))
+        painter.drawRoundedRect(rect.translated(0, 3).adjusted(-1, -1, 1, 1), T.RADIUS_LG + 1, T.RADIUS_LG + 1)
         painter.setBrush(QColor(t["popover"]))
         painter.setPen(QPen(QColor(t["border"]), 1))
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         painter.drawRoundedRect(rect, T.RADIUS_LG, T.RADIUS_LG)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        target = self.pos()
+        self._fade.stop()
+        self._slide.stop()
+        self.setWindowOpacity(0)
+        self.move(target + QPoint(0, 6))
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._slide.setStartValue(self.pos())
+        self._slide.setEndValue(target)
+        self._fade.start()
+        self._slide.start()
 
     # ---- 内部构造 ----
 
@@ -161,7 +188,11 @@ class FloatPanel(QWidget):
         self, btn_id: str, label: str, icon_name: str, checkable: bool = False
     ) -> QToolButton:
         btn = QToolButton(self)
-        btn.setToolTip(label)
+        shortcut = next((f"Shift+{key}" for key, tool in TOOL_SHORTCUTS.items() if tool == btn_id),
+                        {"undo": "Ctrl+Z", "redo": "Ctrl+Y", "save": "Ctrl+S",
+                         "copy": "Ctrl+C", "ocr": "Shift+O", "pipette": "Tab 切换颜色格式",
+                         "longshot": "Ctrl+Alt+L", "confirm": "Enter", "cancel": "Esc"}.get(btn_id, ""))
+        btn.setToolTip(f"{label} ({shortcut})" if shortcut else label)
         btn.setAccessibleName(label)
         btn.setCheckable(checkable)
         btn.setAutoRaise(True)
@@ -232,14 +263,19 @@ class FloatPanel(QWidget):
         for button in self._tool_group.buttons():
             button.setChecked(False)
         self._tool_group.setExclusive(True)
+        if self._options is not None:
+            self._options.hide()
+            self.adjustSize()
 
     def set_options_widget(self, widget):
         """工具配置跟随浮动面板，避免挤占截图画布。"""
         self._options = widget
         self._root_layout.addWidget(widget)
+        widget.setVisible(bool(self.selected_tool()))
 
     def set_position_near(self, rect: QRect) -> None:
         """把工具条放到选区附近：下方优先，放不下放上方；始终不超出屏幕。"""
+        self._slide.stop()
         size = self.sizeHint()
         screen = QGuiApplication.screenAt(rect.center()) or QGuiApplication.primaryScreen()
         geo = screen.availableGeometry()

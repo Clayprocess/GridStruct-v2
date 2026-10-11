@@ -4,11 +4,12 @@ import json
 import math
 import re
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import QTimer, QSaveFile, QIODevice
 
 from settings import data_directory
+from ui import show_message
 from .window import PinWindow, PinTextWindow, _ConfirmDialog
 
 __all__ = [
@@ -58,7 +59,7 @@ def _register(window, pos=None):
 def show_pin(pixmap, pos=None):
     """创建图片贴图；保持原始图片供复制、保存和 OCR 使用。"""
     if pixmap.isNull():
-        QMessageBox.warning(None, "贴图", "无法创建空图片贴图")
+        show_message(None, "贴图", "无法创建空图片贴图")
         return None
     return _register(PinWindow(pixmap), pos)
 
@@ -66,7 +67,7 @@ def show_pin(pixmap, pos=None):
 def show_text_pin(text: str, pos=None):
     """创建可滑选、双击编辑的文字贴图。"""
     if not text:
-        QMessageBox.information(None, "贴图", "没有可贴出的文字")
+        show_message(None, "贴图", "没有可贴出的文字")
         return None
     if len(text) > 10000:
         dialog = _ConfirmDialog("文字贴图", f"文字较长（{len(text)} 字），确认创建文字贴图？")
@@ -83,7 +84,7 @@ def show_pin_from_clipboard():
         return show_pin(clipboard.pixmap())
     if mime is not None and mime.hasText() and clipboard.text():
         return show_text_pin(clipboard.text())
-    QMessageBox.information(None, "贴图", "剪贴板没有图片或文字")
+    show_message(None, "贴图", "剪贴板没有图片或文字")
     return None
 
 
@@ -134,7 +135,7 @@ def save_pins() -> bool:
         message = str(error)
         if message != _save_error:
             _save_error = message
-            QMessageBox.warning(None, "贴图自动保存失败", message)
+            show_message(None, "贴图自动保存失败", message)
         return False
     _save_error = None
     return True
@@ -194,7 +195,7 @@ def restore_pins() -> bool:
             prepared.append((state, pixmap))
     except (OSError, ValueError, KeyError, TypeError) as error:
         _restore_failed = True
-        QMessageBox.warning(
+        show_message(
             None, "贴图恢复失败",
             f"{error}\n原会话已保留，自动保存暂停。"
             + (f"请修复或移走该文件后重启：\n{path}" if path is not None else "请检查应用目录的写入权限后重启。"))

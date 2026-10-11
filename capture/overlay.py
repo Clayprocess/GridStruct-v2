@@ -1,9 +1,9 @@
 # 每屏保留原生截图，控制器共享全局逻辑选区，避免混合 DPI 跨窗重采样。
-from PySide6.QtWidgets import QApplication, QWidget, QMessageBox
+from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor, QRegion
-from PySide6.QtCore import Qt, QRect, QPoint, Signal, QObject, QTimer
+from PySide6.QtCore import Qt, QRect, QPoint, Signal, QObject, QTimer, QEvent
 from styles import tokens as T
-from ui import floating_window_type
+from ui import floating_window_type, ask_confirmation
 from settings import get_settings
 from .screen import ScreenManager, capture_virtual_desktop
 from .snap import RegionDetector
@@ -18,6 +18,7 @@ class ScreenShotWindow(QObject):
     selectionChanged = Signal(QRect)
     actionRequested = Signal(str)
     cancelled = Signal()
+    pipettePicked = Signal(str)
 
     def __init__(self, screenshot, virtual_geo=None, keep_open=False):
         super().__init__()
@@ -37,7 +38,10 @@ class ScreenShotWindow(QObject):
         self._sel_start = QRect()
         self._pointer_pos = self._manager.cursor_position()
         self._windows = []
+        self._keyboard_windows = []
+        self._pipette_mode = False
         self._build_windows()
+        QApplication.instance().installEventFilter(self)
         self._manager.changed.connect(self._screens_changed)
 
     @property
@@ -63,6 +67,7 @@ class ScreenShotWindow(QObject):
         if self._closed:
             return
         self._closed = True
+        QApplication.instance().removeEventFilter(self)
         self._manager.changed.disconnect(self._screens_changed)
         self._snap.shutdown()
         for window in self._windows:
@@ -122,6 +127,27 @@ class ScreenShotWindow(QObject):
                 local = region.translated(-window.frame.geometry.topLeft())
                 window.update(local.intersected(QRegion(window.rect())))
 
+    def route_keyboard(self, window):
+        self._keyboard_windows.append(window)
+
+    def eventFilter(self, watched, event):
+        if (not self._frozen and not self._closed and isinstance(watched, QWidget)
+                and watched.window() in self._windows + self._keyboard_windows):
+            if event.type() == QEvent.KeyPress:
+                # Tab 在 QWidget.event 中先于 keyPressEvent 遍历焦点，必须在这里拦截。
+                if event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
+                    if self._pipette_mode:
+                        color_format = self._windows[0].loupe.cycle_color_format()
+                        for window in self._windows[1:]:
+                            window.loupe.set_color_format(color_format)
+                    return True
+                if event.key() in (Qt.Key_Escape, Qt.Key_Return, Qt.Key_Enter,
+                                   Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down,
+                                   Qt.Key_C, Qt.Key_S, Qt.Key_O) or event.modifiers() == Qt.ShiftModifier:
+                    self.key_press(event, watched.window())
+                    return True
+        return super().eventFilter(watched, event)
+
     def _on_snap(self, rect):
         new_rect = QRect() if not self._sel.isNull() or self._drag_mode is not None else rect
         if new_rect != self._snap_rect:
@@ -133,7 +159,12 @@ class ScreenShotWindow(QObject):
     def _border_region(rect):
         if rect.isNull():
             return QRegion()
-        return QRegion(rect.adjusted(-2, -2, 2, 2)) - QRegion(rect.adjusted(3, 3, -3, -3))
+        return QRegion(rect.adjusted(-5, -5, 5, 5)) - QRegion(rect.adjusted(5, 5, -5, -5))
+
+    def _selection_region(self, previous):
+        # 内外遮罩随选区变化，异或区域也必须刷新，否则拖拽后会残留旧遮罩。
+        changed = QRegion(previous).xored(QRegion(self._sel))
+        return changed | self._border_region(previous) | self._border_region(self._sel)
 
     def _hover_region(self):
         region = QRegion()
@@ -148,7 +179,15 @@ class ScreenShotWindow(QObject):
     def mouse_press(self, event):
         if self._frozen or self._refreshing or event.button() != Qt.LeftButton:
             return
-        pos = self._manager.cursor_position()
+        # 按下尚未跨屏抓取鼠标，事件坐标可保留队列中的起点而不会被最新光标覆盖。
+        pos = event.globalPosition().toPoint()
+        if self._pipette_mode:
+            window = next(window for window in self._windows if window.frame.geometry.contains(pos))
+            color = window.loupe.pick(pos - window.frame.geometry.topLeft(), pos)
+            self._pipette_mode = False
+            self.pipettePicked.emit(color.name())
+            return
+        previous, dirty = QRect(self._sel), self._hover_region() | self._border_region(self._snap_rect)
         self._pointer_pos = pos
         handle = self._hit_handle(pos)
         if handle is not None:
@@ -164,12 +203,14 @@ class ScreenShotWindow(QObject):
             self._sel = QRect(pos, pos)
         self._drag_start = pos
         self._sel_start = QRect(self._sel)
-        self.update()
+        self.update(dirty | self._selection_region(previous) | self._hover_region())
 
     def mouse_move(self, event):
         if self._frozen or self._refreshing:
             return
-        pos = self._manager.cursor_position()
+        # Qt 跨屏 grab 仍可能沿用源屏 DPR；单屏优先保留每个事件的历史位置。
+        pos = event.globalPosition().toPoint() if len(self._windows) == 1 else self._manager.cursor_position()
+        previous = QRect(self._sel)
         dirty = self._hover_region()
         self._pointer_pos = pos
         for window in self._windows:
@@ -177,6 +218,8 @@ class ScreenShotWindow(QObject):
                 window.loupe.pick(pos - window.frame.geometry.topLeft(), pos)
             else:
                 window.loupe.hide()
+        if self._pipette_mode:
+            return
         if self._drag_mode is None:
             handle = self._hit_handle(pos)
             if handle is not None:
@@ -204,16 +247,20 @@ class ScreenShotWindow(QObject):
         else:
             self._resize_by_handle(self._sel_start, self._drag_mode, dx, dy)
         self._sel = self._sel.intersected(self._vg)
-        self.update()
+        self.update(dirty | self._selection_region(previous) | self._hover_region())
         self.selectionChanged.emit(QRect(self._sel))
 
     def mouse_release(self, event):
         if self._frozen or self._refreshing or event.button() != Qt.LeftButton:
             return
+        if self._drag_mode is None:
+            return
+        self.mouse_move(event)
+        previous, dirty = QRect(self._sel), self._hover_region()
         self._drag_mode = None
         if self._sel.width() < _MIN_SIZE or self._sel.height() < _MIN_SIZE:
             self._sel = QRect()
-        self.update()
+        self.update(dirty | self._selection_region(previous) | self._hover_region())
         self.selectionChanged.emit(QRect(self._sel))
 
     def mouse_double_click(self, event):
@@ -245,7 +292,10 @@ class ScreenShotWindow(QObject):
             return
         key, modifiers = event.key(), event.modifiers()
         if key == Qt.Key_Escape:
-            if QMessageBox.question(window, "退出截图", "确认退出截图？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+            if self._pipette_mode:
+                self._pipette_mode = False
+                return
+            if ask_confirmation(window, "退出截图", "确认退出截图？"):
                 self.close()
         elif key in (Qt.Key_Return, Qt.Key_Enter) and not self._sel.isNull():
             self._accept_selection()
@@ -253,13 +303,25 @@ class ScreenShotWindow(QObject):
             self.actionRequested.emit("copy" if key == Qt.Key_C else "save")
         elif self._keep_open and not self._sel.isNull() and modifiers & Qt.ShiftModifier and key == Qt.Key_O:
             self.actionRequested.emit("ocr")
+        elif (self._keep_open and not self._sel.isNull() and modifiers == Qt.ShiftModifier
+              and Qt.Key_A <= key <= Qt.Key_Z):
+            from annotate import TOOL_SHORTCUTS
+            tool = TOOL_SHORTCUTS.get(chr(key)) if key < 0x110000 else None
+            if tool:
+                self.actionRequested.emit(f"tool:{tool}")
         elif not self._sel.isNull() and key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            previous, dirty = QRect(self._sel), self._hover_region()
             step = 10 if modifiers & Qt.ShiftModifier else 1
             delta = {Qt.Key_Left: (-step, 0), Qt.Key_Right: (step, 0), Qt.Key_Up: (0, -step), Qt.Key_Down: (0, step)}[key]
             self._sel.translate(*delta)
             self._clamp_position()
             self.selectionChanged.emit(QRect(self._sel))
-            self.update()
+            self.update(dirty | self._selection_region(previous) | self._hover_region())
+
+    def start_pipette(self):
+        self._pipette_mode = True
+        for window in self._windows:
+            window.setCursor(Qt.CrossCursor)
     def _handles(self):
         """8 手柄：返回 [(index, QRect)]，index 0..7 从左上顺时针。"""
         s = self._sel
@@ -309,6 +371,7 @@ class _ScreenOverlay(QWidget):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | floating_window_type())
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setCursor(QCursor(Qt.CrossCursor))
         self.setScreen(frame.screen)
         self.setGeometry(frame.geometry)
@@ -317,15 +380,16 @@ class _ScreenOverlay(QWidget):
 
     def hover_region(self):
         c = self.controller
+        region = QRegion()
         if not c._sel.isNull():
             if self.frame.geometry.contains(c._pointer_pos):
-                return QRegion(self._size_tip()[0].translated(self.frame.geometry.topLeft()).adjusted(-1, -1, 1, 1))
-            return QRegion()
+                region |= QRegion(self._size_tip()[0].translated(self.frame.geometry.topLeft()).adjusted(-1, -1, 1, 1))
         if not c._guides:
-            return QRegion()
+            return region
         geo = self.frame.geometry
-        x, y = c._pointer_pos.x(), c._pointer_pos.y()
-        return (QRegion(QRect(x - 1, geo.top(), 3, geo.height())) | QRegion(QRect(geo.left(), y - 1, geo.width(), 3))).intersected(QRegion(geo))
+        center = c._sel.center() if not c._sel.isNull() else c._pointer_pos
+        x, y = center.x(), center.y()
+        return region | (QRegion(QRect(x - 1, geo.top(), 3, geo.height())) | QRegion(QRect(geo.left(), y - 1, geo.width(), 3))).intersected(QRegion(geo))
 
     def _size_tip(self):
         c = self.controller

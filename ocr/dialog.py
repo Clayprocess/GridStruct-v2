@@ -42,6 +42,11 @@ class OCRResultDialog(BaseDialog):
         language = QComboBox()
         language.addItem("中文 / English（本地自动识别）")
         row.addWidget(language)
+        row.addWidget(QLabel("排版方向"))
+        self._direction = QComboBox()
+        self._direction.addItem("从左到右（LTR）", "ltr")
+        self._direction.setToolTip("按从上到下、从左到右的顺序复核；保留手工编辑内容。")
+        row.addWidget(self._direction)
         row.addStretch()
         self._show_image = QCheckBox("显示原图与文字层")
         self._show_image.setChecked(pixmap is not None)
@@ -65,6 +70,10 @@ class OCRResultDialog(BaseDialog):
         self._show_image.toggled.connect(self._preview.setVisible)
         self._splitter.addWidget(self._preview)
         self._text = QPlainTextEdit(format_text(results))
+        self._text.setLayoutDirection(Qt.LeftToRight)
+        text_option = self._text.document().defaultTextOption()
+        text_option.setTextDirection(Qt.LeftToRight)
+        self._text.document().setDefaultTextOption(text_option)
         self._text.setMinimumWidth(160)
         self._text.setPlaceholderText("未检测到文字")
         self._splitter.addWidget(self._text)
@@ -96,7 +105,7 @@ class OCRResultDialog(BaseDialog):
         close = QPushButton("关闭")
         close.setProperty("class", "secondary")
         close.clicked.connect(self.accept)
-        for widget in (self._copy_selection, all_text, close):
+        for widget in (self._copy_selection, close, all_text):
             buttons.addWidget(widget)
         layout.addLayout(buttons)
 

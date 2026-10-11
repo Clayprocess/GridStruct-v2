@@ -10,6 +10,7 @@ from ctypes import wintypes
 
 from PySide6.QtCore import QObject, QAbstractNativeEventFilter
 from PySide6.QtWidgets import QApplication
+from ui import show_message
 
 if sys.platform == "win32":
     _user32 = ctypes.windll.user32
@@ -118,7 +119,12 @@ class GlobalHotkey(QObject):
         self._next_id += 1
         ok = bool(_user32.RegisterHotKey(None, hid, self._modifiers, self._vk))
         if not ok:
-            print(f"[热键] 注册失败（可能被其他程序占用）：{self.hotkey_name(self._modifiers, self._vk)}")
+            name = self.hotkey_name(self._modifiers, self._vk)
+            print(f"[热键] 注册失败：{name}")
+            show_message(None, "快捷键冲突",
+                         f"快捷键 [{name}] 无法注册。\n\n"
+                         "可能已被其他程序使用，或系统拒绝注册；Windows 不提供占用程序名称，无法直接清除外部冲突。\n\n"
+                         "请关闭使用该组合键的程序后重启 GridStruct-V2；当前仍可通过托盘使用对应功能。")
             return False
         self._callbacks[hid] = callback
         print(f"[热键] 已注册：{self.hotkey_name(self._modifiers, self._vk)}（id={hid}）")

@@ -8,7 +8,7 @@
 
 from PySide6.QtCore import QRect, QRectF, QPointF, Qt
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QApplication
-from PySide6.QtGui import QUndoStack, QImage, QPixmap, QGuiApplication
+from PySide6.QtGui import QUndoStack, QImage, QPixmap, QGuiApplication, QPainterPath
 
 from .items import (
     ArrowMarkItem, EllipseMarkItem, HighlightMarkItem, LineMarkItem,
@@ -297,7 +297,12 @@ class EraserTool(MarkTool):
 
     def _erase(self, pos):
         radius = self._style.eraser_size / 2
-        for item in self._scene.items(QRectF(pos.x() - radius, pos.y() - radius, radius * 2, radius * 2)):
+        # 圆形命中区域必须与预览一致，避免圆外四角意外擦除。
+        area = QPainterPath()
+        area.addEllipse(pos, radius, radius)
+        for item in self._scene.items(area):
+            if isinstance(item.parentItem(), ArrowMarkItem):
+                item = item.parentItem()
             item_id = id(item)
             if isinstance(item, QGraphicsPixmapItem) or item_id in self._erased_ids:
                 continue

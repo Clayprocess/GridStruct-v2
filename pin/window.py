@@ -4,15 +4,15 @@ from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtWidgets import (
-    QWidget, QLabel, QTextEdit, QMenu, QFileDialog, QMessageBox,
-    QApplication, QVBoxLayout, QDialogButtonBox, QGraphicsView, QGraphicsScene,
+    QWidget, QLabel, QTextEdit, QMenu, QFileDialog,
+    QApplication, QGraphicsView, QGraphicsScene,
     QGraphicsTextItem, QFrame,
 )
 from PySide6.QtGui import QPixmap, QGuiApplication, QFont, QPainter
-from PySide6.QtCore import Qt, QPoint, QSize, Signal
+from PySide6.QtCore import Qt, QPoint, QSize, Signal, QPropertyAnimation, QEasingCurve
 
 from styles import tokens as T
-from ui import floating_window_type, BaseDialog, tinted_icon
+from ui import floating_window_type, MessageDialog, tinted_icon, show_message
 
 _MIN_SCALE = 0.2
 _MAX_SCALE = 5.0
@@ -24,21 +24,9 @@ def _fg_icon(name):
     return tinted_icon(name, T.THEMES[mode]["foreground"], 16)
 
 
-class _ConfirmDialog(BaseDialog):
+class _ConfirmDialog(MessageDialog):
     def __init__(self, title, message, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        layout = QVBoxLayout(self)
-        label = QLabel(message)
-        label.setWordWrap(True)
-        layout.addWidget(label)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("确认")
-        buttons.button(QDialogButtonBox.Cancel).setText("取消")
-        buttons.button(QDialogButtonBox.Cancel).setProperty("class", "outline")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        super().__init__(parent, title, message, confirm_text="确认", cancel_text="取消")
 
 
 class _PinBase(QWidget):
@@ -56,6 +44,13 @@ class _PinBase(QWidget):
         self._click_through = False
         self._allow_close = False
         self._closed = False
+        self._closing = False
+        self._close_ready = False
+        self._entered = False
+        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade.setDuration(150)
+        self._fade.setEasingCurve(QEasingCurve.OutCubic)
+        self._fade.finished.connect(self._fade_finished)
         self._drag_off = None
         self._ocr_status = ""
         self._status = QLabel(self)
@@ -99,24 +94,60 @@ class _PinBase(QWidget):
         event.accept()
 
     def set_opacity(self, opacity: float):
+        if self._closing:
+            return
         self._opacity = min(1.0, max(0.1, opacity))
-        self.setWindowOpacity(self._opacity * (0.5 if self._click_through else 1.0))
+        self._animate_opacity(self._opacity * (0.5 if self._click_through else 1.0))
         self._update_status()
         self.stateChanged.emit()
 
     def set_topmost(self, enabled: bool):
+        if self._closing:
+            return
+        visible = self.isVisible()
         self._topmost = enabled
         self.setWindowFlag(Qt.WindowStaysOnTopHint, enabled)
-        self.show()
+        if visible:
+            self.show()
         self.stateChanged.emit()
 
     def set_click_through(self, enabled: bool):
+        if self._closing:
+            return
+        visible = self.isVisible()
+        current = self.windowOpacity()
         self._click_through = enabled
         self.setWindowFlag(Qt.WindowTransparentForInput, enabled)
-        self.setWindowOpacity(self._opacity * (0.5 if enabled else 1.0))
-        self.show()
+        if visible:
+            self.show()
+        self.setWindowOpacity(current)
+        self._animate_opacity(self._opacity * (0.5 if enabled else 1.0))
         self._update_status()
         self.stateChanged.emit()
+
+    def _animate_opacity(self, target):
+        self._fade.stop()
+        if not self.isVisible():
+            self.setWindowOpacity(target)
+            return
+        self._fade.setStartValue(self.windowOpacity())
+        self._fade.setEndValue(target)
+        self._fade.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 改窗口 flag 会重新发送 showEvent，只在首次显示时做入场动画。
+        if not self._entered:
+            self._entered = True
+            self.setWindowOpacity(0)
+            self._animate_opacity(self._opacity * (0.5 if self._click_through else 1.0))
+
+    def _fade_finished(self):
+        if self._closing:
+            self._close_ready = True
+            self.close()
+        else:
+            self._update_status()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -139,6 +170,9 @@ class _PinBase(QWidget):
         if self._closed:
             event.accept()
             return
+        if self._closing and not self._close_ready:
+            event.ignore()
+            return
         if not self._allow_close:
             dialog = _ConfirmDialog("关闭贴图", "确认关闭贴图？关闭后下次启动不会恢复此贴图。", self)
             accepted = dialog.exec()
@@ -146,6 +180,12 @@ class _PinBase(QWidget):
             if not accepted:
                 event.ignore()
                 return
+            self._allow_close = True
+        if not self._close_ready and self.isVisible():
+            self._closing = True
+            event.ignore()
+            self._animate_opacity(0)
+            return
         self._closed = True
         self.closed.emit(self)
         event.accept()
@@ -201,9 +241,14 @@ class _PinBase(QWidget):
         self.move(state["x"], state["y"])
         if not any(screen.geometry().intersects(self.geometry()) for screen in QGuiApplication.screens()):
             self.move(QGuiApplication.primaryScreen().availableGeometry().topLeft())
-        self.set_opacity(state["opacity"])
-        self.set_topmost(state["topmost"])
-        self.set_click_through(state["click_through"])
+        # 恢复时先一次性准备窗口属性，由模块注册后统一显示，避免中途重复淡入。
+        self._opacity = state["opacity"]
+        self._topmost = state["topmost"]
+        self._click_through = state["click_through"]
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, self._topmost)
+        self.setWindowFlag(Qt.WindowTransparentForInput, self._click_through)
+        self.setWindowOpacity(self._opacity * (0.5 if self._click_through else 1.0))
+        self._update_status()
 
 
 class _PinImageView(QGraphicsView):
@@ -283,7 +328,7 @@ class PinWindow(_PinBase):
             if not Path(path).suffix:
                 path += suffix
             if not self._base.save(path):
-                QMessageBox.warning(self, "保存失败", f"无法写入图片：{path}")
+                show_message(self, "保存失败", f"无法写入图片：{path}")
 
     def _recognize(self):
         from ocr import OCRController
@@ -310,8 +355,9 @@ class PinWindow(_PinBase):
         self._content.setFocus()
 
     def closeEvent(self, event):
+        was_closed = self._closed
         super().closeEvent(event)
-        if event.isAccepted() and self._ocr_controller is not None:
+        if not was_closed and event.isAccepted() and self._ocr_controller is not None:
             self._ocr_controller.cancel()
 
     def state(self):
@@ -366,7 +412,7 @@ class PinTextWindow(_PinBase):
             try:
                 Path(path).write_text(self._content.toPlainText(), encoding="utf-8")
             except OSError as error:
-                QMessageBox.warning(self, "保存失败", str(error))
+                show_message(self, "保存失败", str(error))
 
     def state(self):
         return {**super().state(), "text": self._content.toPlainText()}

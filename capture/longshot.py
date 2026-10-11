@@ -11,15 +11,16 @@ import sys
 from time import monotonic
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QApplication,
-    QMessageBox, QComboBox, QCheckBox, QProgressBar,
+    QComboBox, QProgressBar,
 )
 from PySide6.QtGui import QPixmap, QImage, QTransform, QPainter, QColor, QPen, QCursor, QRegion
 from PySide6.QtCore import Qt, QRect, QPointF, Signal, QObject, QTimer
 from styles import tokens as T
-from ui import floating_window_type
+from ui import floating_window_type, show_message
 from .screen import ScreenManager, capture_virtual_desktop
 
 _IS_WIN = sys.platform == "win32"
+MAX_STITCH_LENGTH = 29000
 
 
 def _exclude_window(window):
@@ -88,13 +89,14 @@ class LongShotBar(QWidget):
         self._preview.setFixedSize(320, 180)
         layout.addWidget(self._preview, alignment=Qt.AlignCenter)
         actions = QHBoxLayout()
-        ok = QPushButton("停止并使用当前结果")
-        ok.setProperty("class", "primary")
-        ok.clicked.connect(self.finished.emit)
+        self._finish_button = QPushButton("停止并使用当前结果")
+        self._finish_button.setProperty("class", "primary")
+        self._finish_button.setEnabled(False)
+        self._finish_button.clicked.connect(self.finished.emit)
         no = QPushButton("取消")
         no.setProperty("class", "outline")
         no.clicked.connect(self.cancelled.emit)
-        actions.addWidget(ok)
+        actions.addWidget(self._finish_button)
         actions.addWidget(no)
         layout.addLayout(actions)
         self._progress = QProgressBar()
@@ -113,6 +115,7 @@ class LongShotBar(QWidget):
 
     def set_running(self, running, started=True):
         self._toggle.setText("暂停" if running else ("继续" if started else "开始"))
+        self._finish_button.setEnabled(started)
         self.mode.setEnabled(not running)
         self.direction.setEnabled(not started)
 
@@ -122,7 +125,8 @@ class LongShotBar(QWidget):
         self.setEnabled(False)
 
     def set_preview(self, pixmap, viewport, horizontal=False):
-        preview = pixmap.scaled(320, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        # 预览只用于定位视口；快速缩放避免长图持续占用 GUI 线程，导出仍保留原像素。
+        preview = pixmap.scaled(320, 180, Qt.KeepAspectRatio, Qt.FastTransformation)
         preview.setDevicePixelRatio(1)
         with QPainter(preview) as painter:
             painter.setPen(QPen(QColor(T.ANNOTATION_COLORS[4]), 2))
@@ -260,7 +264,7 @@ class ImageStitcher:
         if self._horizontal:
             pm = pm.transformed(QTransform().rotate(90))
         if self._stitched is None:
-            self._stitched = QPixmap(pm)
+            self._stitched = pm.copy(0, 0, pm.width(), min(pm.height(), MAX_STITCH_LENGTH))
             self._last_input = QPixmap(pm)
             return True
         if pm.toImage() == self._last_input.toImage():
@@ -281,6 +285,10 @@ class ImageStitcher:
         cut_px = cut
         bottom = pm.copy(0, cut_px, pm.width(), pm.height() - cut_px)
         w = self._stitched.width()
+        remaining = MAX_STITCH_LENGTH - self._stitched.height()
+        if remaining <= 0:
+            return False
+        bottom = bottom.copy(0, 0, w, min(bottom.height(), remaining))
         h = self._stitched.height() + bottom.height()
         out = QPixmap(w, h)
         if out.isNull():
@@ -353,9 +361,37 @@ class LongShotFlow(QObject):
         self._ack_timer.setInterval(1000)
         self._ack_timer.timeout.connect(self._injection_timeout)
 
+    @property
+    def is_active(self):
+        return self._win is not None or self._bar is not None
+
+    @property
+    def region(self):
+        return QRect(self._region)
+
     def start(self):
         if self._win is not None or self._bar is not None:
             return
+        self._reset_session()
+        from .overlay import ScreenShotWindow
+        try:
+            self._shot = capture_virtual_desktop()
+        except (OSError, RuntimeError) as exc:
+            show_message(None, "无法开始长截图", str(exc))
+            return
+        self._win = ScreenShotWindow(self._shot)
+        self._win.regionSelected.connect(self._on_region)
+        self._win.cancelled.connect(self._cleanup)
+        self._win.show()
+
+    def start_region(self, capture, rect):
+        """沿用截图会话已确认的选区和原始快照。"""
+        if self._win is not None or self._bar is not None:
+            return
+        self._reset_session()
+        self._begin_region(capture, rect)
+
+    def _reset_session(self):
         self._stitcher = ImageStitcher()
         self._accum = 0
         self._started = False
@@ -367,25 +403,17 @@ class LongShotFlow(QObject):
         self._auto_corrected = False
         self._has_increment = False
         self._layout_changed = False
-        from .overlay import ScreenShotWindow
-        try:
-            self._shot = capture_virtual_desktop()
-        except (OSError, RuntimeError) as exc:
-            QMessageBox.warning(None, "无法开始长截图", str(exc))
-            return
-        self._win = ScreenShotWindow(self._shot)
-        self._win.regionSelected.connect(self._on_region)
-        self._win.cancelled.connect(self._cleanup)
-        self._win.show()
-
     def _on_region(self, rect):
+        window, self._win = self._win, None
+        capture = window.capture
+        window.close()
+        self._begin_region(capture, rect)
+
+    def _begin_region(self, capture, rect):
         self._region = QRect(rect)
         self._screen_region = QRect(rect)
-        window, self._win = self._win, None
-        self._shot = window.capture
-        window.close()
         # 首帧沿用框选前快照，避免桌面合成器尚未移除覆盖层。
-        self._last_frame = self._shot.crop(self._region)
+        self._last_frame = capture.crop(self._region)
         self._shot = None
         self._stitcher.feed(self._last_frame)
         self._bar = LongShotBar()
@@ -399,7 +427,7 @@ class LongShotFlow(QObject):
         if (_IS_WIN and QApplication.platformName() == "windows"
                 and (not self._bar.exclude_from_capture()
                      or not all(_exclude_window(mask) for mask in self._masks))):
-            QMessageBox.warning(self._bar, "无法开始长截图", "无法将操作条从截图中排除，请检查 Windows 截图支持。")
+            show_message(self._bar, "无法开始长截图", "无法将操作条从截图中排除，请检查 Windows 截图支持。")
             self._cleanup()
             return
         screen = self._manager.screen_at(self._screen_region.center()) or self._app.primaryScreen()
@@ -409,7 +437,7 @@ class LongShotFlow(QObject):
         from .wheelhook import WheelHook
         self._hook = WheelHook()
         if not self._hook.start():
-            QMessageBox.warning(self._bar, "无法开始长截图", "Windows 滚轮监听启动失败，未开始采集。")
+            show_message(self._bar, "无法开始长截图", "Windows 滚轮监听启动失败，未开始采集。")
             self._cleanup()
             return
         self._hook.wheel.connect(self._on_wheel, Qt.QueuedConnection)
@@ -417,7 +445,7 @@ class LongShotFlow(QObject):
         self._hook.injectedWheel.connect(self._on_injected_wheel, Qt.QueuedConnection)
 
     def _toggle_capture(self):
-        if self._layout_changed:
+        if self._layout_changed or (self._started and self._stitcher.height >= MAX_STITCH_LENGTH):
             return
         if self._running:
             self._pause("已暂停；可继续采集，或停止并使用当前结果。")
@@ -429,6 +457,9 @@ class LongShotFlow(QObject):
             self._started = True
         self._running = True
         self._bar.set_running(True)
+        if self._stitcher.height >= MAX_STITCH_LENGTH:
+            self._stop_at_limit()
+            return
         if self._bar.mode.currentData() == "auto":
             # 只把鼠标移入选区一次；用户移出选区即暂停，避免滚动其他窗口。
             candidates = [self._screen_region.center(), self._screen_region.bottomLeft() + QPointF(12, -12).toPoint(),
@@ -445,7 +476,7 @@ class LongShotFlow(QObject):
                 self._scroll_target = _focus_scroll_target(self._mask_hwnd(), self._scroll_target)
             except OSError as exc:
                 self._pause("无法激活滚动窗口；可改用手动模式。")
-                QMessageBox.warning(self._bar, "自动滚动失败", str(exc))
+                show_message(self._bar, "自动滚动失败", str(exc))
                 return
             finally:
                 for mask in self._masks:
@@ -547,7 +578,7 @@ class LongShotFlow(QObject):
             self._ack_timer.start()
         except OSError as exc:
             self._pause("自动滚动失败；可改用手动模式。")
-            QMessageBox.warning(self._bar, "自动滚动失败", str(exc))
+            show_message(self._bar, "自动滚动失败", str(exc))
             return
 
     def _on_injected_wheel(self, delta):
@@ -575,7 +606,7 @@ class LongShotFlow(QObject):
             frame = self._grab()
         except (OSError, RuntimeError) as exc:
             self._pause("捕获失败，当前结果已保留；请重试或停止并使用当前结果。")
-            QMessageBox.warning(self._bar, "长截图捕获失败", str(exc))
+            show_message(self._bar, "长截图捕获失败", str(exc))
             return
         if self._layout_changed:
             return
@@ -615,7 +646,7 @@ class LongShotFlow(QObject):
             self._sample_timer.stop()
             if self._saw_change and not self._matched:
                 self._pause("匹配超时：请回滚一小段到预览绿框位置，再点击继续。")
-                QMessageBox.warning(self._bar, "图像匹配失败", "可能滚动过快、切换了窗口或页面仍在动画中。\n当前结果已保留；请回滚至已采集内容后继续。")
+                show_message(self._bar, "图像匹配失败", "可能滚动过快、切换了窗口或页面仍在动画中。\n当前结果已保留；请回滚至已采集内容后继续。")
             elif automatic and not self._saw_change:
                 self._pause("一秒内没有内容变化：可能已经到底，或目标窗口不接受自动滚动。")
             elif not self._saw_change:
@@ -630,26 +661,21 @@ class LongShotFlow(QObject):
         result = self._stitcher.result
         self._bar.set_preview(result, frame, self._horizontal)
         self._bar.set_status(f"已采集 {self._stitcher.height} 像素；绿框为当前视口。")
-        if self._stitcher.height > 29000 and not self._long_warning_shown:
-            from settings import get_settings
-            settings = get_settings()
-            self._long_warning_shown = True
-            if not settings.value("longshot/hide_length_warning", False, type=bool):
-                self._pause("已超过 29000 像素，已暂停等待确认。")
-                notice = QMessageBox(QMessageBox.Warning, "超长截图", "截图已超过 29000 像素，部分软件可能无法打开或处理。\n选择继续，或停止并使用当前结果。", parent=self._bar)
-                proceed = notice.addButton("继续", QMessageBox.AcceptRole)
-                notice.addButton("停止并使用当前结果", QMessageBox.RejectRole)
-                checkbox = QCheckBox("以后不再提示")
-                notice.setCheckBox(checkbox)
-                notice.exec()
-                settings.setValue("longshot/hide_length_warning", checkbox.isChecked())
-                if notice.clickedButton() == proceed:
-                    self._toggle_capture()
-                else:
-                    self._finish()
+        if self._stitcher.height >= MAX_STITCH_LENGTH and not self._long_warning_shown:
+            self._stop_at_limit()
         return True
 
+    def _stop_at_limit(self):
+        from ui import show_message
+        self._long_warning_shown = True
+        self._pause("已达到 29000 像素上限；当前结果已保留，请停止并使用结果。")
+        self._bar._toggle.setEnabled(False)
+        show_message(self._bar, "已达到长截图上限",
+                     "拼接方向最多采集 29000 个物理像素。\n当前结果已保留，不能继续采集；点击“停止并使用当前结果”进入标注。")
+
     def _finish(self):
+        if not self._started:
+            return
         self._ack_timer.stop()
         self._sample_timer.stop()
         self._auto_timer.stop()

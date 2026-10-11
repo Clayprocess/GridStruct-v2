@@ -6,14 +6,15 @@ from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem, QGraphicsTextItem, QFrame, QMenu, QApplication,
 )
 from PySide6.QtGui import (
-    QPainter, QPixmap, QKeySequence, QUndoStack, QPen, QColor,
+    QPainter, QPixmap, QKeySequence, QUndoStack, QPen, QColor, QCursor, QTextCursor,
 )
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal
+from PySide6.QtCore import Qt, QRect, QRectF, QPointF, Signal, QEvent
 
-from .items import MarkStyle, SerialMarkItem, TextMarkItem, MosaicMarkItem
+from .items import MarkStyle, SerialMarkItem, TextMarkItem, MosaicMarkItem, ArrowMarkItem
 from .tools import create_tool
 from .tools import TOOL_CLASSES
-from .commands import RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand
+from .commands import (RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand,
+                       ArrowCommentCommand, ArrowCurveCommand)
 from .pipette import PipettePopup
 from styles import tokens as T
 from settings import get_settings
@@ -47,6 +48,9 @@ class AnnotationCanvas(QGraphicsView):
         self._tool_id = ""
         self._moving = None
         self._drawing = False
+        self._eraser_pos = None
+        self._comment_edit = None
+        self._curve_drag = None
         self._tool = None
         self._pipette = None
         self._loupe = None  # 放大镜：跟随式 loupe，不落图元
@@ -73,6 +77,7 @@ class AnnotationCanvas(QGraphicsView):
         """返回 False 表示该工具未实现（调用方打日志）。"""
         if tool_id not in self.styles:
             return False
+        self._clear_eraser_preview()
         self._finish_tool()
         self._style = self.styles[tool_id]
         tool = create_tool(tool_id, self._style)
@@ -89,12 +94,16 @@ class AnnotationCanvas(QGraphicsView):
             self._loupe = None
         if tool_id == "magnifier":
             self._loupe = PipettePopup(self._bg_pixmap, grid=True)
-        self.viewport().setCursor(Qt.CrossCursor)
+        self.viewport().setCursor(Qt.BlankCursor if tool_id == "eraser" else Qt.CrossCursor)
+        if tool_id == "eraser" and self.viewport().underMouse():
+            self._eraser_pos = self.viewport().mapFromGlobal(QCursor.pos())
+            self.viewport().update(self._eraser_preview_rect())
         self.toolChanged.emit(tool_id)
         return True
 
     def clear_tool(self):
         self._finish_tool()
+        self._clear_eraser_preview()
         self._tool = None
         self._tool_id = ""
         if self._loupe is not None:
@@ -132,7 +141,14 @@ class AnnotationCanvas(QGraphicsView):
         return self._tool_id
 
     def update_style(self, key, value):
+        old_preview = self._eraser_preview_rect() if key == "eraser_size" else None
         setattr(self._style, key, value)
+        if key == "arrow_type":
+            head = "open" if value.startswith("line") or value == "dimension" else "filled"
+            self._style.arrow_start = head if value.endswith("_both") or value == "dimension" else "none"
+            self._style.arrow_end = head
+        if old_preview is not None:
+            self.viewport().update(old_preview.united(self._eraser_preview_rect()))
         if key in _REMEMBERED_STYLE and self._tool_id:
             stored = value.name() if isinstance(value, QColor) else value
             self._settings.setValue(f"annotation/{self._tool_id}/{key}", stored)
@@ -154,6 +170,9 @@ class AnnotationCanvas(QGraphicsView):
                 self._undo.push(SerialIndexCommand(item, item.index + delta))
 
     def finish_editing(self):
+        if self._comment_edit is not None:
+            self._finish_comment()
+            return True
         if self._tool is not None and self._tool.finishes_on_escape and self._tool._item is not None:
             self._finish_tool()
             return True
@@ -187,10 +206,61 @@ class AnnotationCanvas(QGraphicsView):
         return pm
 
     def _finish_tool(self):
+        self._finish_comment()
         if self._tool is not None:
             self._tool.finish(self._undo)
 
+    def _finish_comment(self):
+        if self._comment_edit is None:
+            return
+        arrow, before = self._comment_edit
+        after = arrow.comment_item.toPlainText()
+        self._comment_edit = None
+        arrow.comment_item.clearFocus()
+        arrow.comment_item.setTextInteractionFlags(Qt.NoTextInteraction)
+        if before != after:
+            self._undo.push(ArrowCommentCommand(arrow, before, after))
+        else:
+            arrow.set_comment(after)
+
+    def _edit_comment(self, arrow):
+        self._finish_tool()
+        self._comment_edit = (arrow, arrow.comment_item.toPlainText())
+        arrow.comment_item.show()
+        arrow.comment_item.setTextInteractionFlags(Qt.TextEditorInteraction)
+        arrow.comment_item.setFocus()
+        self._scene.clearSelection()
+        arrow.setSelected(True)
+        cursor = arrow.comment_item.textCursor()
+        cursor.select(QTextCursor.Document)
+        arrow.comment_item.setTextCursor(cursor)
+
     # ---------- 事件 ----------
+
+    def _eraser_preview_rect(self):
+        if self._eraser_pos is None:
+            return QRect()
+        center = self.mapToScene(self._eraser_pos)
+        radius = self._style.eraser_size / 2
+        return self.mapFromScene(QRectF(center.x() - radius, center.y() - radius,
+                                       radius * 2, radius * 2)).boundingRect().adjusted(-3, -3, 3, 3)
+
+    def _clear_eraser_preview(self):
+        old_rect = self._eraser_preview_rect()
+        self._eraser_pos = None
+        self.viewport().update(old_rect)
+
+    def leaveEvent(self, event):
+        self._clear_eraser_preview()
+        super().leaveEvent(event)
+
+    def event(self, event):
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Tab and self._pipette is not None:
+            # QWidget 默认会先用 Tab 移焦，取色模式必须在此前截获。
+            self._pipette.cycle_color_format()
+            event.accept()
+            return True
+        return super().event(event)
 
     def mousePressEvent(self, e):
         if self._loupe is not None:
@@ -202,6 +272,22 @@ class AnnotationCanvas(QGraphicsView):
             self.pipettePicked.emit(color.name().upper())
             return
         hit = self.itemAt(e.pos())
+        if self._comment_edit is not None and hit is not self._comment_edit[0].comment_item:
+            self._finish_comment()
+        if (e.button() == Qt.LeftButton and isinstance(hit, QGraphicsTextItem)
+                and isinstance(hit.parentItem(), ArrowMarkItem) and self._tool_id != "eraser"):
+            if self._comment_edit is None:
+                self._edit_comment(hit.parentItem())
+            super().mousePressEvent(e)
+            return
+        if e.button() == Qt.LeftButton and self._tool_id != "eraser" and not e.modifiers() & Qt.AltModifier:
+            for arrow in self._scene.selectedItems():
+                if isinstance(arrow, ArrowMarkItem) and arrow.control_point is not None:
+                    distance = arrow.mapFromScene(self.mapToScene(e.pos())) - arrow.control_point
+                    if distance.x() ** 2 + distance.y() ** 2 <= 49:
+                        self._finish_tool()
+                        self._curve_drag = (arrow, arrow.control_point)
+                        return
         if (e.button() == Qt.RightButton and isinstance(hit, QGraphicsTextItem)
                 and hit.textInteractionFlags() != Qt.NoTextInteraction):
             # OCR 文字层的菜单不能被此前选中的标注抢占。
@@ -250,6 +336,24 @@ class AnnotationCanvas(QGraphicsView):
             e.accept()
             return
         item = self.itemAt(e.pos())
+        if (e.button() == Qt.LeftButton and isinstance(item, QGraphicsTextItem)
+                and isinstance(item.parentItem(), ArrowMarkItem)):
+            self._moving = None
+            self._drawing = False
+            self._edit_comment(item.parentItem())
+            e.accept()
+            return
+        if isinstance(item, ArrowMarkItem) and e.button() == Qt.LeftButton:
+            self._moving = None
+            self._drawing = False
+            self._finish_tool()
+            before = item.comment_item.toPlainText()
+            if before:
+                self._undo.push(ArrowCommentCommand(item, before, ""))
+            else:
+                self._edit_comment(item)
+            e.accept()
+            return
         if isinstance(item, TextMarkItem) and e.button() == Qt.LeftButton:
             self.set_tool_by_id("text")
             self._tool.edit(item, self._scene, self._undo)
@@ -262,6 +366,14 @@ class AnnotationCanvas(QGraphicsView):
             super().mouseDoubleClickEvent(e)
 
     def mouseMoveEvent(self, e):
+        if self._curve_drag is not None:
+            arrow, _ = self._curve_drag
+            arrow.set_control_point(arrow.mapFromScene(self.mapToScene(e.pos())))
+            return
+        if self._tool_id == "eraser":
+            old_rect = self._eraser_preview_rect()
+            self._eraser_pos = e.pos()
+            self.viewport().update(old_rect.united(self._eraser_preview_rect()))
         if self._moving is not None:
             super().mouseMoveEvent(e)
             return
@@ -277,6 +389,13 @@ class AnnotationCanvas(QGraphicsView):
             super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if self._curve_drag is not None and e.button() == Qt.LeftButton:
+            arrow, before = self._curve_drag
+            self._curve_drag = None
+            after = arrow.control_point
+            if before != after:
+                self._undo.push(ArrowCurveCommand(arrow, before, after))
+            return
         if self._moving is not None:
             super().mouseReleaseEvent(e)
             changed = {item: before for item, before in self._moving.items() if item.pos() != before}
@@ -301,6 +420,9 @@ class AnnotationCanvas(QGraphicsView):
                 return
         if self._scene.focusItem() is not None:
             super().keyPressEvent(e)
+            return
+        if e.modifiers() == Qt.ShiftModifier and Qt.Key_A <= e.key() <= Qt.Key_Z:
+            e.ignore()
             return
         if e.matches(QKeySequence.Undo):
             self.undo()
@@ -341,3 +463,14 @@ class AnnotationCanvas(QGraphicsView):
         painter.setBrush(Qt.NoBrush)
         for item in self._scene.selectedItems():
             painter.drawRect(item.sceneBoundingRect())
+        if self._tool_id == "eraser" and self._eraser_pos is not None:
+            # 画在视图前景，既跟随缩放，也不会混入导出的截图。
+            center = self.mapToScene(self._eraser_pos)
+            radius = self._style.eraser_size / 2
+            painter.setBrush(Qt.NoBrush)
+            for color, width in ((T.THEMES[mode]["background"], 3),
+                                 (T.THEMES[mode]["foreground"], 1)):
+                pen = QPen(QColor(color), width)
+                pen.setCosmetic(True)
+                painter.setPen(pen)
+                painter.drawEllipse(center, radius, radius)

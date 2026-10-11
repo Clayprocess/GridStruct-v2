@@ -8,6 +8,12 @@ from ui import BaseDialog
 from settings import get_settings
 
 
+def format_color(color, color_format):
+    values = {"Hex": color.name().upper(), "RGB": f"rgb({color.red()}, {color.green()}, {color.blue()})",
+              "HSV": f"hsv({max(0, color.hue())}, {round(color.saturationF() * 100)}%, {round(color.valueF() * 100)}%)"}
+    return values[color_format]
+
+
 class ColorDialog(BaseDialog):
     def __init__(self, color, parent=None):
         super().__init__(parent)
@@ -43,10 +49,7 @@ class ColorDialog(BaseDialog):
         self._update_value()
 
     def _update_value(self):
-        c = self.color
-        values = {"Hex": c.name().upper(), "RGB": f"rgb({c.red()}, {c.green()}, {c.blue()})",
-                  "HSV": f"hsv({max(0, c.hue())}, {round(c.saturationF() * 100)}%, {round(c.valueF() * 100)}%)"}
-        self.value.setText(values[self.format.currentText()])
+        self.value.setText(format_color(self.color, self.format.currentText()))
 
     def accept(self):
         get_settings().setValue("color_format", self.format.currentText())

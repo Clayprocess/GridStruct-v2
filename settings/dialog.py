@@ -8,11 +8,12 @@ from subprocess import list2cmdline
 from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
     QComboBox, QCheckBox, QLineEdit, QPushButton, QFileDialog,
-    QDialogButtonBox, QWidget, QApplication, QMessageBox,
+    QDialogButtonBox, QWidget, QApplication,
 )
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 
-from ui import BaseDialog
+from ui import BaseDialog, ask_confirmation, show_message
 from styles import apply_theme
 from tray import GlobalHotkey
 from .storage import get_settings
@@ -22,6 +23,15 @@ _VERSION = "0.1.0"
 # 保留旧版内部标识，避免升级后自启项失联或重复。
 _AUTOSTART_VALUE = "PixShot"
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def check_updates(parent=None):
+    """便携版由用户选择是否访问发布页，不在后台联网。"""
+    if ask_confirmation(parent, "检查更新",
+                        f"当前版本 {_VERSION}。是否打开项目发布页查看可用版本？",
+                        confirm_text="打开发布页"):
+        if not QDesktopServices.openUrl(QUrl("https://github.com/Clayprocess/GridStruct-v2/releases")):
+            show_message(parent, "无法打开发布页", "系统未能打开浏览器，请检查默认浏览器设置后重试。")
 
 
 def _read_autostart() -> bool:
@@ -68,6 +78,7 @@ class SettingsDialog(BaseDialog):
         self.resize(420, 360)
         self._s = get_settings()
         self._original_theme = self._s.value("theme", "system")
+        self._original_language = self._s.value("language", "system")
 
         tabs = QTabWidget()
         tabs.addTab(self._general_tab(), "通用")
@@ -100,6 +111,15 @@ class SettingsDialog(BaseDialog):
         self._theme.setCurrentIndex(max(0, self._theme.findData(cur)))
         self._theme.currentIndexChanged.connect(self._on_theme_changed)
         form.addRow("主题", self._theme)
+
+        self._language = QComboBox()
+        self._language.addItem("跟随系统", "system")
+        self._language.addItem("简体中文", "zh_CN")
+        self._language.setCurrentIndex(max(0, self._language.findData(self._original_language)))
+        form.addRow("语言", self._language)
+        language_hint = QLabel("当前界面支持简体中文；其他系统语言使用中文。更改后需重启。")
+        language_hint.setWordWrap(True)
+        form.addRow("", language_hint)
 
         self._autostart = QCheckBox("开机自启")
         if sys.platform != "win32":
@@ -179,6 +199,10 @@ class SettingsDialog(BaseDialog):
         links.setOpenExternalLinks(True)
         layout.addWidget(links)
         layout.addWidget(QLabel("截图、贴图与中英文 OCR 均在本机处理。"))
+        updates = QPushButton("检查更新")
+        updates.setProperty("class", "outline")
+        updates.clicked.connect(lambda: check_updates(self))
+        layout.addWidget(updates, alignment=Qt.AlignLeft)
         layout.addStretch()
         return w
 
@@ -189,9 +213,10 @@ class SettingsDialog(BaseDialog):
             try:
                 _write_autostart(self._autostart.isChecked())
             except OSError as exc:
-                QMessageBox.warning(self, "无法保存设置", f"开机自启设置失败：{exc}")
+                show_message(self, "无法保存设置", f"开机自启设置失败：{exc}")
                 return
         self._s.setValue("theme", self._theme.currentData())
+        self._s.setValue("language", self._language.currentData())
         self._s.setValue("screenshot_dir", self._shot_dir.text())
         self._s.setValue("image_format", self._img_fmt.currentText())
         self._s.setValue("snap_only_window", self._snap_only.isChecked())
@@ -202,6 +227,8 @@ class SettingsDialog(BaseDialog):
             self._s.setValue("autostart", self._autostart.isChecked())
         self._s.sync()
         if self._s.status() != QSettings.NoError:
-            QMessageBox.warning(self, "无法保存设置", "配置目录不可写，请将应用解压到有写入权限的目录。")
+            show_message(self, "无法保存设置", "配置目录不可写，请将应用解压到有写入权限的目录。")
             return
         self.accept()
+        if self._language.currentData() != self._original_language:
+            show_message(self.parentWidget(), "语言设置已保存", "重启 GridStruct-V2 后应用新的语言设置。")

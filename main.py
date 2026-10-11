@@ -57,19 +57,19 @@ if __name__ == "__main__":
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QToolButton, QLineEdit, QComboBox, QCheckBox,
-    QSlider, QTabWidget, QListWidget, QGroupBox, QLabel, QSystemTrayIcon, QMessageBox,
+    QSlider, QTabWidget, QListWidget, QGroupBox, QLabel, QSystemTrayIcon,
 )
 from PySide6.QtCore import Qt, QSharedMemory, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 
 from styles import apply_theme
 from styles import tokens as T
-from ui import tinted_icon, show_desktop_check
-from tray import create_tray, GlobalHotkey
+from ui import tinted_icon, show_desktop_check, show_message
+from tray import create_tray, GlobalHotkey, MOD_CONTROL, MOD_ALT
 from capture import ScreenshotFlow, ScreenManager
 
 from pin import show_pin_from_clipboard, restore_pins, save_pins, shutdown_pins, disable_click_through
-from settings import SettingsDialog, get_settings
+from settings import SettingsDialog, get_settings, check_updates
 
 APP_NAME = "GridStruct-V2"
 # 显示名称变化时仍与旧包共享单实例锁，避免争抢全局热键。
@@ -101,35 +101,12 @@ def main() -> int:
     try:
         config = get_settings()
     except OSError as exc:
-        QMessageBox.critical(None, "无法读取便携配置", f"{exc}\n请将应用放在有写入权限的目录。")
+        show_message(None, "无法读取便携配置", f"{exc}\n请将应用放在有写入权限的目录。")
         return 1
     mode = apply_theme(app, config.value("theme", "system"))
     print(f"[GridStruct-V2] 启动，主题：{mode}")
 
     flow = ScreenshotFlow(app, theme_mode=mode)
-
-    longshot_flow = None
-
-    def _open_longshot():
-        nonlocal longshot_flow
-        from capture import LongShotFlow
-        from annotate import AnnotationWindow
-        from PySide6.QtCore import QPoint
-
-        def _to_annotate(pixmap):
-            w = AnnotationWindow(
-                pixmap, QPoint(100, 100), app.property("theme_mode"), scrollable=True)
-            w.finished.connect(
-                lambda pm: QApplication.clipboard().setPixmap(pm))
-            w.cancelled.connect(w.close)
-            w.show()
-            # 保持引用防止 GC
-            _to_annotate._wins.append(w)
-            w.destroyed.connect(lambda: _to_annotate._wins.remove(w))
-        _to_annotate._wins = getattr(_to_annotate, "_wins", [])
-        if longshot_flow is None:
-            longshot_flow = LongShotFlow(app, _to_annotate)
-        longshot_flow.start()
 
     def _open_pin():
         show_pin_from_clipboard()
@@ -141,24 +118,17 @@ def main() -> int:
     def _exit():
         if shutdown_pins():
             flow.cancel()
-            if longshot_flow is not None:
-                longshot_flow.cancel()
             app.quit()
 
     def _about():
-        QMessageBox.about(None, "关于 GridStruct-V2", "GridStruct-V2 0.1.0\n本地截图、标注、贴图与中英文 OCR。\n便携配置保存在 user-data。")
-
-    def _updates():
-        if QMessageBox.question(None, "检查更新", "当前版本 0.1.0。是否打开项目发布页查看可用版本？",
-                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
-            QDesktopServices.openUrl(QUrl("https://github.com/Clayprocess/GridStruct-v2/releases"))
+        show_message(None, "关于 GridStruct-V2", "GridStruct-V2 0.1.0\n本地截图、标注、贴图与中英文 OCR。\n便携配置保存在 user-data。")
 
     callbacks = {
         "screenshot": flow.start,
         "pin": _open_pin,
-        "longshot": _open_longshot,
+        "longshot": flow.start_longshot,
         "settings": _open_settings,
-        "update": _updates,
+        "update": check_updates,
         "about": _about,
         "exit": _exit,
         "restore_pin_input": disable_click_through,
@@ -173,11 +143,9 @@ def main() -> int:
     print("[GridStruct-V2] 托盘已创建")
 
     hotkey = GlobalHotkey(app)
-    if hotkey.register(callbacks["screenshot"]):
-        print(f"[GridStruct-V2] 全局热键已注册：{GlobalHotkey.hotkey_name()}")
-    else:
-        print("[GridStruct-V2] 全局热键注册失败（见上方日志）")
-        tray_icon.showMessage("截图热键不可用", "Ctrl+Alt+S 被其他程序占用。请关闭冲突程序后重启，或从托盘点击截图。", QSystemTrayIcon.Warning)
+    hotkey.register(callbacks["screenshot"])
+    hotkey.set_hotkey(MOD_CONTROL | MOD_ALT, ord("L"))
+    hotkey.register(callbacks["longshot"])
 
     QTimer.singleShot(0, restore_pins)
     app.aboutToQuit.connect(save_pins)

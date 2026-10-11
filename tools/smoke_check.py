@@ -220,7 +220,7 @@ def all_tools():
             c.undo()
             assert len(c.scene().items()) == 1, name
             c.redo()
-            assert len(c.scene().items()) == 2, name
+            assert len([item for item in c.scene().items() if item.parentItem() is None]) == 2, name
         c.deleteLater()
         flush()
 
@@ -281,6 +281,7 @@ def scroll_sampling():
     white.fill(QColor(T.LIGHT["background"]))
     flow._last_frame = white
     flow._stitcher.feed(white)
+    flow._toggle_capture()
     with patch.object(flow, "_grab", return_value=white):
         flow._finish()
         assert not result, "finish delivered before returning to the event loop"
@@ -339,6 +340,7 @@ def pin_lifecycle():
     assert len(_open_pins) == count + 1
     w._allow_close = True
     w.close()
+    QTest.qWait(180)
     flush()
     assert len(_open_pins) == count, "closed pin remains retained"
 
@@ -367,6 +369,10 @@ def longshot_lifecycle():
         flow.start()
         flow._win._sel = QRect(-780, 30, 300, 200)
         QTest.keyClick(flow._win._windows[0], Qt.Key_Return)
+        assert not flow._bar._finish_button.isEnabled()
+        flow._finish()
+        assert not result, "unstarted longshot delivered a result"
+        flow._toggle_capture()
         flow._finish()
         flush()
         assert len(result) == 1 and result[0].size() == source.copy(20, 30, 300, 200).size()
@@ -380,7 +386,7 @@ def save_failure():
     with TemporaryDirectory() as folder:
         missing = str(Path(folder) / "missing" / "shot.png")
         with patch("export.image.QFileDialog.getSaveFileName", return_value=(missing, "PNG (*.png)")), \
-             patch("export.image.QMessageBox.warning") as warning:
+             patch("export.image.show_message") as warning:
             w.trigger_action("save")
             assert warning.call_count == 1
             assert app.clipboard().text() == "preserve"
@@ -436,7 +442,7 @@ def canvas_mouse_events():
         QTest.mouseRelease(c.viewport(), Qt.LeftButton, pos=p2)
         assert not errors, errors
         c.undo()
-    w._pip_btn.setChecked(True)
+    w.trigger_action("pipette")
     from annotate.color_dialog import ColorDialog
     with patch.object(ColorDialog, "exec", return_value=ColorDialog.Accepted):
         QTest.mouseClick(c.viewport(), Qt.LeftButton, pos=c.mapFromScene(QPointF(400, 80)))
@@ -465,9 +471,10 @@ def ocr_copy_text():
 
 
 def render_windows():
-    from annotate import AnnotationWindow
+    from annotate import AnnotationWindow, ColorDialog
     from ocr import OCRResult, OCRResultDialog
     from capture.longshot import LongShotBar
+    from ui import MessageDialog
     folder = Path(__file__).resolve().parents[1] / ".local-run" / "smoke"
     folder.mkdir(parents=True, exist_ok=True)
     for mode in ("light", "dark"):
@@ -476,7 +483,10 @@ def render_windows():
         windows = {"annotation": annotation, "toolbar": annotation._toolbar,
                    "settings": SettingsDialog(),
                    "ocr": OCRResultDialog([OCRResult(QRect(0, 0, 40, 20), "合成识别结果 Sample 123", 0.99)]),
-                   "pin": PinWindow(sample(400, 200, 2)), "longshot": LongShotBar()}
+                   "pin": PinWindow(sample(400, 200, 2)), "longshot": LongShotBar(),
+                   "color": ColorDialog(QColor(T.ANNOTATION_COLORS[0])),
+                   "message": MessageDialog(None, "达到长截图上限", "已达到 29000 像素的拼接上限，可使用当前结果。",
+                                            checkbox_text="下次不再提示")}
         for name, window in windows.items():
             window.show()
             flush()

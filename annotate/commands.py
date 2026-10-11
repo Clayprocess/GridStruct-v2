@@ -96,3 +96,27 @@ class TextEditCommand(QUndoCommand):
 
     def undo(self):
         self._item.setHtml(self._before)
+
+
+class ArrowCommentCommand(QUndoCommand):
+    def __init__(self, item, before, after):
+        super().__init__("编辑箭头注释")
+        self._item, self._before, self._after = item, before, after
+
+    def redo(self):
+        self._item.set_comment(self._after)
+
+    def undo(self):
+        self._item.set_comment(self._before)
+
+
+class ArrowCurveCommand(QUndoCommand):
+    def __init__(self, item, before, after):
+        super().__init__("调整箭头曲线")
+        self._item, self._before, self._after = item, before, after
+
+    def redo(self):
+        self._item.set_control_point(self._after)
+
+    def undo(self):
+        self._item.set_control_point(self._before)

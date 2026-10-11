@@ -2,8 +2,9 @@
 
 from pathlib import Path
 from PySide6.QtCore import QStandardPaths
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog
 from settings import get_settings
+from ui import show_message
 
 
 def save_image(pixmap, parent=None):
@@ -17,7 +18,7 @@ def save_image(pixmap, parent=None):
     if not Path(path).suffix:
         path += ".jpg" if chosen.startswith("JPG") else ".png"
     if not pixmap.save(path):
-        QMessageBox.warning(parent, "保存失败", f"无法写入图片：{path}")
+        show_message(parent, "保存失败", f"无法写入图片：{path}")
         return None
     QApplication.clipboard().setText(path)
     return path

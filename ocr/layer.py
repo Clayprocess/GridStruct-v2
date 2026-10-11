@@ -3,14 +3,39 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QTransform
 from PySide6.QtWidgets import QApplication, QGraphicsItemGroup, QGraphicsTextItem, QMenu
+from styles import tokens as T
 
 
 class _SelectableTextItem(QGraphicsTextItem):
     selectionChanged = Signal()
 
-    def __init__(self, text, on_show_results=None):
+    def __init__(self, text, mode, on_show_results=None):
         super().__init__(text)
         self._on_show_results = on_show_results
+        self._hovered = False
+        self._hover_color = QColor(T.THEMES[mode]["accent"])
+        self._hover_color.setAlpha(160)
+        self.setAcceptHoverEvents(True)
+
+    def hoverEnterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().hoverLeaveEvent(event)
+
+    def paint(self, painter, option, widget=None):
+        # 悬停反馈只属于视图，scene.render 导出原图时不写入底色。
+        if self._hovered and widget is not None:
+            painter.save()
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self._hover_color)
+            painter.drawRect(self.boundingRect())
+            painter.restore()
+        super().paint(painter, option, widget)
 
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
@@ -56,7 +81,7 @@ def add_text_layer(scene, results, mode="light", on_show_results=None) -> QGraph
     for result in results:
         if result.box.isEmpty() or not result.text:
             continue
-        item = _SelectableTextItem(result.text, on_show_results)
+        item = _SelectableTextItem(result.text, mode, on_show_results)
         item.document().setDocumentMargin(0)
         font = QFont()
         font.setPixelSize(max(1, result.box.height()))

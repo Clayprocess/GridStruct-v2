@@ -10,8 +10,8 @@ from PySide6.QtCore import QObject, QPoint, QRect, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QAbstractButton
 
-from annotate.window import AnnotationWindow
-from pin.window import PinWindow
+from annotate import AnnotationWindow
+from pin import PinWindow
 from ocr import OCRResult
 from styles import apply_theme, tokens as T
 
@@ -36,7 +36,7 @@ def main():
                                     key == "ocr/hide_empty_notice" or default})()
     with (patch("ocr.controller._get_service", return_value=service),
           patch("settings.get_settings", return_value=settings),
-          patch("ocr.controller.QMessageBox.warning") as warning):
+          patch("ocr.controller.show_message") as warning):
         for mode in ("light", "dark"):
             apply_theme(app, mode)
             pixmap = QPixmap(640, 240)
