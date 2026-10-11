@@ -196,42 +196,6 @@ class MosaicMarkItem(QGraphicsItem):
         p.drawPixmap(self._rect, self._pixmap, QRectF(self._pixmap.rect()))
 
 
-class MagnifierMarkItem(QGraphicsItem):
-    def __init__(self, bg_pixmap: QPixmap, center: QPointF,
-                 radius=70.0, zoom=2.0):
-        super().__init__()
-        self._bg_pixmap = bg_pixmap
-        self._center = QPointF(center)
-        self._radius = radius
-        self._zoom = zoom
-        self.setFlags(QGraphicsItem.ItemIsSelectable)
-
-    def boundingRect(self):
-        r = self._radius
-        return QRectF(self._center.x() - r, self._center.y() - r,
-                      r * 2, r * 2)
-
-    def paint(self, p: QPainter, _opt, _w):
-        target = self.boundingRect()
-        source_size = self._radius * 2 / self._zoom
-        dpr = self._bg_pixmap.devicePixelRatio()
-        source = QRectF(
-            (self._center.x() - source_size / 2) * dpr,
-            (self._center.y() - source_size / 2) * dpr,
-            source_size * dpr,
-            source_size * dpr,
-        )
-        clip = QPainterPath()
-        clip.addEllipse(target)
-        p.save()
-        p.setClipPath(clip)
-        p.drawPixmap(target, self._bg_pixmap, source)
-        p.restore()
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(T.LIGHT["foreground"]), 2))
-        p.drawEllipse(target)
-
-
 class SerialMarkItem(_MarkItemBase):
     def __init__(self, style: MarkStyle, index: int):
         super().__init__(style)

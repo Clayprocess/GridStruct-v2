@@ -44,6 +44,11 @@ class ScreenShotWindow(QWidget):
         self._snap_rect = QRect()
         self._snap.regionDetected.connect(self._on_snap)
 
+        # 放大镜：跟随鼠标，像素级精确定位
+        from annotate import PipettePopup
+        self._loupe = PipettePopup(
+            screenshot, screenshot.devicePixelRatio() or 1.0, grid=True)
+
     def _on_snap(self, rect: QRect):
         """吸附结果（虚拟桌面坐标）-> 本地坐标。仅在未框选时显示。"""
         if not self._sel.isNull() or self._drag_mode is not None:
@@ -54,6 +59,7 @@ class ScreenShotWindow(QWidget):
 
     def closeEvent(self, e):
         self._snap.shutdown()
+        self._loupe.close()
         super().closeEvent(e)
 
     # ---------- 选区几何 ----------
@@ -166,6 +172,8 @@ class ScreenShotWindow(QWidget):
 
     def mouseMoveEvent(self, e):
         pos = e.pos()
+        # 放大镜跟随（虚拟桌面逻辑坐标）
+        self._loupe.pick(pos + self._vg.topLeft(), e.globalPos())
         if self._drag_mode is None:
             # hover：手柄上换光标
             h = self._hit_handle(pos)

@@ -26,6 +26,7 @@ class AnnotationCanvas(QGraphicsView):
         self._style = MarkStyle()
         self._tool = None
         self._pipette = None
+        self._loupe = None  # 放大镜：跟随式 loupe，不落图元
         self._undo = QUndoStack(self)
 
         self._scene = QGraphicsScene(self)
@@ -51,11 +52,20 @@ class AnnotationCanvas(QGraphicsView):
             return False
         self._tool = tool
         self._scene.clearSelection()
+        # 放大镜是检查模式：跟随式 loupe，不在画布落图元
+        if tool_id == "magnifier":
+            self._loupe = PipettePopup(self._bg_pixmap, self._dpr, grid=True)
+        elif self._loupe is not None:
+            self._loupe.close()
+            self._loupe = None
         self.viewport().setCursor(Qt.CrossCursor)
         return True
 
     def clear_tool(self):
         self._tool = None
+        if self._loupe is not None:
+            self._loupe.close()
+            self._loupe = None
         self.viewport().setCursor(Qt.ArrowCursor)
 
     def scene_background(self) -> QPixmap:
@@ -126,6 +136,9 @@ class AnnotationCanvas(QGraphicsView):
             super().mouseDoubleClickEvent(e)
 
     def mouseMoveEvent(self, e):
+        if self._loupe is not None:
+            self._loupe.pick(self.mapToScene(e.pos()),
+                             self.mapToGlobal(e.pos()))
         if self._pipette is not None:
             from PySide6.QtWidgets import QApplication
             self._pipette.pick(self.mapToScene(e.pos()),

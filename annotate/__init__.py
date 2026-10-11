@@ -3,7 +3,8 @@
 from .canvas import AnnotationCanvas
 from .window import AnnotationWindow
 from .items import MarkStyle
+from .pipette import PipettePopup
 from .tools import create_tool, TOOL_CLASSES
 
 __all__ = ["AnnotationCanvas", "AnnotationWindow", "MarkStyle",
-           "create_tool", "TOOL_CLASSES"]
+           "PipettePopup", "create_tool", "TOOL_CLASSES"]

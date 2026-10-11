@@ -12,11 +12,12 @@ class PipettePopup(QWidget):
     ZOOM = 6       # 放大倍数
     CELLS = 9      # 取 9x9 像素
 
-    def __init__(self, pixmap: QPixmap, dpr: float):
+    def __init__(self, pixmap: QPixmap, dpr: float, grid: bool = False):
         super().__init__(
             None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self._pm = pixmap
         self._dpr = dpr
+        self._grid = grid  # 放大镜模式：画像素网格线
         self._color = QColor("#000000")
 
         self.setFixedSize(150, 190)
@@ -46,6 +47,13 @@ class PipettePopup(QWidget):
         big = crop.scaled(self.CELLS * self.ZOOM, self.CELLS * self.ZOOM,
                           Qt.KeepAspectRatio, Qt.FastTransformation)
         with QPainter(big) as p:
+            if self._grid:
+                # 像素网格线（放大镜模式）
+                p.setPen(QPen(QColor(0, 0, 0, 60), 1))
+                for i in range(1, self.CELLS):
+                    x = i * self.ZOOM
+                    p.drawLine(x, 0, x, big.width())
+                    p.drawLine(0, x, big.width(), x)
             # 中心十字标记
             c = big.width() // 2
             p.setPen(QPen(QColor("#ff0000"), 1))
