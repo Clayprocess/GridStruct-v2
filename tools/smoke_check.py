@@ -397,7 +397,7 @@ def saved_settings():
         with patch("export.image.get_settings", return_value=s), \
              patch("export.image.QFileDialog.getSaveFileName", return_value=(destination, "JPG (*.jpg)")) as choose:
             w.trigger_action("save")
-            assert choose.call_args.args[2].endswith("PixShot.jpg")
+            assert choose.call_args.args[2].endswith("GridStruct-V2.jpg")
             assert not QImage(destination).isNull()
         w.close()
         w.deleteLater()

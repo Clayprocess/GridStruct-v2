@@ -49,23 +49,32 @@ class ScreenShotWindow(QWidget):
         self.setMouseTracking(True)
         self.setCursor(QCursor(Qt.CrossCursor))
 
-        # 智能吸附（异步，Windows 才有真数据）
+        # 智能吸附：快照预览后由后台 UIA 精化。
         from .snap import RegionDetector
         self._snap = RegionDetector(ignored_hwnd=int(self.winId()),
                                     only_window=get_settings().value("snap_only_window", False, type=bool))
         self._snap_rect = QRect()
         self._snap.regionDetected.connect(self._on_snap)
 
+        # 放大镜：跟随鼠标，像素级精确定位
+        from annotate import PipettePopup
+        self._loupe = PipettePopup(
+            screenshot, screenshot.devicePixelRatio() or 1.0, grid=True)
+
     def _on_snap(self, rect: QRect):
         """吸附结果（虚拟桌面坐标）-> 本地坐标。仅在未框选时显示。"""
         if not self._sel.isNull() or self._drag_mode is not None:
-            self._snap_rect = QRect()
+            new_rect = QRect()
         else:
-            self._snap_rect = self._to_local(rect)
-        self.update()
+            new_rect = self._to_local(rect)
+        # 高亮不变不重绘：全屏截图重画很贵
+        if new_rect != self._snap_rect:
+            self._snap_rect = new_rect
+            self.update()
 
     def closeEvent(self, e):
         self._snap.shutdown()
+        self._loupe.close()
         if not self._ended:
             self._ended = True
             self.cancelled.emit()
@@ -191,6 +200,8 @@ class ScreenShotWindow(QWidget):
         if self._frozen:
             return
         pos = e.pos()
+        # 截图像素从虚拟桌面的左上角起算，取样使用窗口局部坐标。
+        self._loupe.pick(pos, e.globalPos())
         if self._drag_mode is None:
             # hover：手柄上换光标
             h = self._hit_handle(pos)
@@ -204,7 +215,9 @@ class ScreenShotWindow(QWidget):
                 self.setCursor(QCursor(Qt.CrossCursor))
                 # 未框选时请求智能吸附（虚拟桌面坐标）
                 self._snap.detect(pos + self._vg.topLeft())
-            self.update()  # 尺寸提示跟随
+            # 辅助线和尺寸提示跟随鼠标；其余 hover 只在吸附高亮变化时重绘。
+            if self._guides or not self._sel.isNull():
+                self.update()
             return
 
         dx, dy = pos.x() - self._drag_start.x(), pos.y() - self._drag_start.y()
@@ -276,6 +289,7 @@ class ScreenShotWindow(QWidget):
         self._ended = True
         self._frozen = self._keep_open
         self._snap.shutdown()
+        self._loupe.hide()
         self.update()
         self.regionSelected.emit(QRect(self._sel))
         if not self._keep_open:

@@ -1,4 +1,4 @@
-# PixShot 应用入口（P0-A）。
+# GridStruct-V2 应用入口（P0-A）。
 # 用法：python main.py
 #
 # 启动流程：单实例检查 -> 跟随系统主题 -> 托盘 -> 全局热键 -> 事件循环。
@@ -23,7 +23,8 @@ from capture import ScreenshotFlow
 from pin import show_pin_from_clipboard, restore_pins, save_pins, shutdown_pins, disable_click_through
 from settings import SettingsDialog, get_settings
 
-APP_NAME = "PixShot"
+APP_NAME = "GridStruct-V2"
+# 显示名称变化时仍与旧包共享单实例锁，避免争抢全局热键。
 _SINGLE_INSTANCE_KEY = "PixShot_SingleInstance_v1"
 
 
@@ -32,7 +33,7 @@ def _ensure_single_instance() -> QSharedMemory | None:
     mem = QSharedMemory(_SINGLE_INSTANCE_KEY)
     if mem.create(1):
         return mem
-    print("[PixShot] 已有实例在运行，退出。")
+    print("[GridStruct-V2] 已有实例在运行，退出。")
     return None
 
 
@@ -54,7 +55,7 @@ def main() -> int:
         QMessageBox.critical(None, "无法读取便携配置", f"{exc}\n请将应用放在有写入权限的目录。")
         return 1
     mode = apply_theme(app, config.value("theme", "system"))
-    print(f"[PixShot] 启动，主题：{mode}")
+    print(f"[GridStruct-V2] 启动，主题：{mode}")
 
     flow = ScreenshotFlow(app, theme_mode=mode)
 
@@ -96,7 +97,7 @@ def main() -> int:
             app.quit()
 
     def _about():
-        QMessageBox.about(None, "关于 PixShot", "PixShot（GridStruct v2）0.1.0\n本地截图、标注、贴图与中英文 OCR。\n便携配置保存在 user-data。")
+        QMessageBox.about(None, "关于 GridStruct-V2", "GridStruct-V2 0.1.0\n本地截图、标注、贴图与中英文 OCR。\n便携配置保存在 user-data。")
 
     def _updates():
         if QMessageBox.question(None, "检查更新", "当前版本 0.1.0。是否打开项目发布页查看可用版本？",
@@ -118,15 +119,15 @@ def main() -> int:
     if app.property("desktop_check"):
         app._desktop_check_window = show_desktop_check(callbacks)
     if not QSystemTrayIcon.isSystemTrayAvailable():
-        print("[PixShot] 警告：系统托盘不可用")
+        print("[GridStruct-V2] 警告：系统托盘不可用")
     tray_icon.show()
-    print("[PixShot] 托盘已创建")
+    print("[GridStruct-V2] 托盘已创建")
 
     hotkey = GlobalHotkey(app)
     if hotkey.register(callbacks["screenshot"]):
-        print(f"[PixShot] 全局热键已注册：{GlobalHotkey.hotkey_name()}")
+        print(f"[GridStruct-V2] 全局热键已注册：{GlobalHotkey.hotkey_name()}")
     else:
-        print("[PixShot] 全局热键注册失败（见上方日志）")
+        print("[GridStruct-V2] 全局热键注册失败（见上方日志）")
         tray_icon.showMessage("截图热键不可用", "Ctrl+Alt+S 被其他程序占用。请关闭冲突程序后重启，或从托盘点击截图。", QSystemTrayIcon.Warning)
 
     QTimer.singleShot(0, restore_pins)
@@ -149,7 +150,7 @@ def themed_icon(name, mode):
 
 def build_demo(mode: str) -> QMainWindow:
     w = QMainWindow()
-    w.setWindowTitle(f"PixShot 主题演示（{mode}）")
+    w.setWindowTitle(f"GridStruct-V2 主题演示（{mode}）")
     w.resize(560, 640)
     central = QWidget()
     w.setCentralWidget(central)

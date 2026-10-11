@@ -84,8 +84,9 @@ class ToolOptions(QWidget):
         elif tool_id == "eraser":
             self._number("eraser_size", "大小", 4, 120)
         elif tool_id == "magnifier":
-            self._number("zoom", "倍率", 1, 8)
-        self._check("wheel_enabled", "滚轮调节")
+            self._add("像素预览", QLabel("11 × 11 · 8 倍"))
+        if tool_id != "magnifier":
+            self._check("wheel_enabled", "滚轮调节")
         self.adjustSize()
 
     def _add(self, title, widget):

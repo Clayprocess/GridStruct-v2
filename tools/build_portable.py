@@ -45,8 +45,8 @@ def sha256(path):
 
 
 def verify_bundle(bundle):
-    if not (bundle / "PixShot.exe").is_file():
-        raise RuntimeError("构建未输出 PixShot.exe。")
+    if not (bundle / "GridStruct-V2.exe").is_file():
+        raise RuntimeError("构建未输出 GridStruct-V2.exe。")
     runtime = bundle / "_internal"
     if any(runtime.rglob("icuuc.dll")):
         raise RuntimeError("包内第三方 icuuc.dll 会遮蔽 Qt 所需的 Windows 系统 ICU。")
@@ -97,11 +97,11 @@ def main():
     work.mkdir(parents=True, exist_ok=False)
     subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--noconfirm", "--distpath", str(output),
-         "--workpath", str(work), str(ROOT / "PixShot.spec")],
+         "--workpath", str(work), str(ROOT / "gridstruct-v2.spec")],
         cwd=ROOT,
         check=True,
     )
-    bundle = output / "PixShot"
+    bundle = output / "GridStruct-V2"
     hashes = verify_bundle(bundle)
     manifest = {
         "format": "Windows onedir portable",
@@ -115,14 +115,14 @@ def main():
     }
     (bundle / "build-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     (bundle / "使用说明.txt").write_text(
-        "解压整个 PixShot 文件夹到可写目录，双击 PixShot.exe。\n"
+        "解压整个 GridStruct-V2 文件夹到可写目录，双击 GridStruct-V2.exe。\n"
         "应用常驻系统托盘；默认 Ctrl+Alt+S 截图。\n"
         "_internal 目录包含程序依赖、图标与本地 OCR 模型，请勿单独移动 EXE。\n"
         "配置和历史保存于同目录 user-data；移动整个文件夹可一并迁移。\n"
         "本包已检查资源完整性，尚需在目标 Windows 电脑验证截图、OCR 和贴图。\n",
         encoding="utf-8-sig",
     )
-    archive = output / "PixShot-portable.zip"
+    archive = output / "GridStruct-V2-portable.zip"
     with ZipFile(archive, "x", compression=ZIP_DEFLATED, compresslevel=6) as zipped:
         for file in sorted(bundle.rglob("*")):
             if file.is_file():

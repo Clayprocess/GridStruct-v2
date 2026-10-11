@@ -11,7 +11,7 @@ def floating_window_type():
 
 def show_desktop_check(callbacks):
     window = QWidget()
-    window.setWindowTitle("PixShot 正式包 · 可见验收")
+    window.setWindowTitle("GridStruct-V2 正式包 · 可见验收")
     layout = QVBoxLayout(window)
     layout.addWidget(QLabel("同一 EXE · 正式业务流程"))
     for label, action in (("截图", "screenshot"), ("剪贴板贴图", "pin"),

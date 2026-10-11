@@ -72,7 +72,7 @@ class FloatPanel(QWidget):
             Qt.FramelessWindowHint | floating_window_type() | Qt.WindowStaysOnTopHint,
         )
         self.setObjectName("FloatPanel")
-        self.setWindowTitle("PixShot 标注工具条")
+        self.setWindowTitle("GridStruct-V2 标注工具条")
         # 圆角卡片需要透明背景，否则四角会被填成方形
         self.setAttribute(Qt.WA_TranslucentBackground)
 

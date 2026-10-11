@@ -4,12 +4,12 @@
 #   三级检测：UIA 元素矩形 -> Win32 窗口矩形 -> 有效性校验，
 #   后台线程异步，结果经信号回传，带矩形缓存。
 #
-# 本实现：QThread 异步 + Windows 自带 UIAutomation COM，无额外包。
+# 本实现：窗口快照即时预览 + QThread UIAutomation 精化，无额外包。
 # 非 Windows 平台返回空（Linux 开发机不断）。
 
 import sys
 import time
-from PySide6.QtCore import QObject, QThread, Signal, QRect, QPoint, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, QRect, QPoint, Slot
 
 _IS_WIN = sys.platform == "win32"
 
@@ -66,6 +66,15 @@ class RegionDetector(QObject):
         self._inflight = False
         self._queued = None
         self._stopping = False
+        self._ignored_hwnd = ignored_hwnd
+        self._windows = []
+        self._last_rect = QRect()
+        self._window_api = _win32_api() if _IS_WIN else None
+        self._snapshot_timer = QTimer(self)
+        self._snapshot_timer.timeout.connect(self._refresh_snapshot)
+        if _IS_WIN:
+            self._refresh_snapshot()
+            self._snapshot_timer.start(2000)
         self._thread = QThread(self)
         self._worker = _SnapWorker(only_window, ignored_hwnd)
         self._worker.moveToThread(self._thread)
@@ -87,11 +96,11 @@ class RegionDetector(QObject):
         self._discard_queued()
         hit = self._cache.get(key)
         if hit and time.monotonic() - hit[0] < 2.0:
-            self.regionDetected.emit(QRect(hit[1]))
+            self._publish(hit[1])
             return
         screen = QGuiApplication.screenAt(pos)
         if screen is None:
-            self.regionDetected.emit(QRect())
+            self._publish(QRect())
             return
         origin = screen.geometry().topLeft()
         dpr = screen.devicePixelRatio()
@@ -99,10 +108,29 @@ class RegionDetector(QObject):
         # Qt 的屏幕原点保留原生位置，屏幕内偏移才按 DPR 缩放。
         x = origin.x() + round((pos.x() - origin.x()) * dpr)
         y = origin.y() + round((pos.y() - origin.y()) * dpr)
+        # 快照只提供立即可见的窗口预览；最终结果仍由已验证的 UIA/Win32 路径给出。
+        if not self._last_rect.contains(pos):
+            preview = self._lookup(x, y)
+            self._publish(_logical_rect(preview, origin, dpr) if preview is not None else QRect())
         if self._inflight:
             self._queued = (self._request_id, x, y)
         else:
             self._dispatch(self._request_id, x, y)
+
+    def _publish(self, rect):
+        if rect != self._last_rect:
+            self._last_rect = QRect(rect)
+            self.regionDetected.emit(QRect(rect))
+
+    def _lookup(self, x, y):
+        for hwnd, rect in self._windows:
+            if (rect.contains(x, y) and self._window_api.IsWindow(hwnd)
+                    and self._window_api.IsWindowVisible(hwnd)):
+                return rect
+        return None
+
+    def _refresh_snapshot(self):
+        self._windows = _snapshot_windows(self._ignored_hwnd)
 
     def _dispatch(self, request_id, x, y):
         from PySide6.QtCore import QMetaObject, Qt, Q_ARG
@@ -121,15 +149,12 @@ class RegionDetector(QObject):
         key, origin, dpr, revision = self._requests.pop(request_id)
         if not self._stopping and revision == self._mode_revision:
             if ok:
-                rect = QRect(
-                    origin.x() + round((rect.x() - origin.x()) / dpr),
-                    origin.y() + round((rect.y() - origin.y()) / dpr),
-                    round(rect.width() / dpr), round(rect.height() / dpr))
+                rect = _logical_rect(rect, origin, dpr)
                 self._cache[key] = (time.monotonic(), QRect(rect))
                 if len(self._cache) > 256:
                     self._cache.pop(next(iter(self._cache)))
             if request_id == self._request_id:
-                self.regionDetected.emit(rect if ok else QRect())
+                self._publish(rect if ok else QRect())
         self._inflight = False
         if self._queued is not None and not self._stopping:
             request, self._queued = self._queued, None
@@ -143,11 +168,13 @@ class RegionDetector(QObject):
         self._discard_queued()
         self._last = None
         self._cache.clear()
+        self._last_rect = QRect()
         QMetaObject.invokeMethod(
             self._worker, "set_only_window", Qt.QueuedConnection, Q_ARG(bool, enabled))
 
     def shutdown(self):
         self._stopping = True
+        self._snapshot_timer.stop()
         self._discard_queued()
         self._thread.quit()
         self._thread.wait()
@@ -180,28 +207,70 @@ def _win32_api():
     return user32
 
 
-def _window_at(user32, x, y, ignored_hwnd):
+def _logical_rect(rect, origin, dpr):
+    return QRect(origin.x() + round((rect.x() - origin.x()) / dpr),
+                 origin.y() + round((rect.y() - origin.y()) / dpr),
+                 round(rect.width() / dpr), round(rect.height() / dpr))
+
+
+def _dwm_api():
     import ctypes
     from ctypes import wintypes
     dwm = ctypes.WinDLL("dwmapi")
     dwm.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD]
     dwm.DwmGetWindowAttribute.restype = ctypes.c_long
+    return dwm
 
-    def usable(hwnd):
-        if (not hwnd or hwnd == ignored_hwnd or not user32.IsWindow(hwnd)
-                or not user32.IsWindowVisible(hwnd) or user32.IsHungAppWindow(hwnd)):
-            return False
-        exstyle = user32.GetWindowLongW(hwnd, -20)
-        if exstyle & 0x80020 == 0x80020:
-            return False
-        cloaked = wintypes.DWORD()
-        result = dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
-        return result != 0 or cloaked.value == 0
 
+def _usable_window(user32, dwm, hwnd, ignored_hwnd):
+    import ctypes
+    from ctypes import wintypes
+    if (not hwnd or hwnd == ignored_hwnd or not user32.IsWindow(hwnd)
+            or not user32.IsWindowVisible(hwnd) or user32.IsHungAppWindow(hwnd)):
+        return False
+    exstyle = user32.GetWindowLongW(hwnd, -20)
+    if exstyle & 0x80020 == 0x80020:
+        return False
+    cloaked = wintypes.DWORD()
+    result = dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+    return result != 0 or cloaked.value == 0
+
+
+def _snapshot_windows(ignored_hwnd):
+    """按 Z 序保存物理矩形；查询点和结果统一走 Qt 屏幕原点/DPR 转换。"""
+    import ctypes
+    from ctypes import wintypes
+    user32, dwm = _win32_api(), _dwm_api()
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [enum_proc, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+    windows = []
+
+    @enum_proc
+    def visit(hwnd, _):
+        if not _usable_window(user32, dwm, hwnd, ignored_hwnd):
+            return True
+        rc = wintypes.RECT()
+        if dwm.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(rc), ctypes.sizeof(rc)) != 0:
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+                return True
+        rect = QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top)
+        if _valid_rect(rect, rc.left, rc.top):
+            windows.append((hwnd, rect))
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return windows
+
+
+def _window_at(user32, x, y, ignored_hwnd):
+    import ctypes
+    from ctypes import wintypes
+    dwm = _dwm_api()
     hwnd = user32.WindowFromPoint(wintypes.POINT(x, y))
     root = user32.GetAncestor(hwnd, 2) if hwnd else None
     covered = root == ignored_hwnd
-    target = root if usable(root) else None
+    target = root if _usable_window(user32, dwm, root, ignored_hwnd) else None
     if target is None:
         enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         user32.EnumWindows.argtypes = [enum_proc, wintypes.LPARAM]
@@ -210,7 +279,7 @@ def _window_at(user32, x, y, ignored_hwnd):
         @enum_proc
         def visit(candidate, _):
             nonlocal target
-            if not usable(candidate):
+            if not _usable_window(user32, dwm, candidate, ignored_hwnd):
                 return True
             rc = wintypes.RECT()
             if (user32.GetWindowRect(candidate, ctypes.byref(rc))

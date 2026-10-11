@@ -12,7 +12,7 @@ from PySide6.QtGui import QUndoStack, QImage, QPixmap, QGuiApplication
 
 from .items import (
     ArrowMarkItem, EllipseMarkItem, HighlightMarkItem, LineMarkItem,
-    MagnifierMarkItem, MarkStyle, MosaicMarkItem, PencilMarkItem,
+    MarkStyle, MosaicMarkItem, PencilMarkItem,
     PolylineMarkItem, RectMarkItem, SerialMarkItem, TextMarkItem,
 )
 from .commands import AddMarkCommand, RemoveMarkCommand, TextEditCommand
@@ -308,18 +308,15 @@ class EraserTool(MarkTool):
 
 
 class MagnifierTool(MarkTool):
+    # 检查模式：跟随式 loupe 由画布接管，此处不落图元。
     def on_press(self, scene, pos, undo):
-        self._scene = scene
-        bg = scene.views()[0].scene_background()
-        self._item = MagnifierMarkItem(bg, pos, zoom=self._style.zoom)
-        scene.addItem(self._item)
+        pass
 
     def on_move(self, pos):
         pass
 
     def on_release(self, pos, undo):
-        undo.push(AddMarkCommand(self._scene, self._item))
-        self._item = None
+        pass
 
 
 class SerialTool(MarkTool):

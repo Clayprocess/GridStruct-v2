@@ -53,7 +53,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="PixShot",
+    name="GridStruct-V2",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -61,4 +61,4 @@ exe = EXE(
     console=False,
     contents_directory="_internal",
 )
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="PixShot")
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="GridStruct-V2")

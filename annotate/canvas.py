@@ -49,6 +49,7 @@ class AnnotationCanvas(QGraphicsView):
         self._drawing = False
         self._tool = None
         self._pipette = None
+        self._loupe = None  # 放大镜：跟随式 loupe，不落图元
         self._undo = QUndoStack(self)
 
         self._scene = QGraphicsScene(self)
@@ -82,6 +83,12 @@ class AnnotationCanvas(QGraphicsView):
         self._tool_id = tool_id
         self._scene.setProperty("serial_auto_renumber", self.styles["serial"].serial_auto_renumber)
         self._scene.clearSelection()
+        # 放大镜是检查模式：跟随式 loupe，不在画布落图元
+        if self._loupe is not None:
+            self._loupe.close()
+            self._loupe = None
+        if tool_id == "magnifier":
+            self._loupe = PipettePopup(self._bg_pixmap, self._dpr, grid=True)
         self.viewport().setCursor(Qt.CrossCursor)
         self.toolChanged.emit(tool_id)
         return True
@@ -90,6 +97,9 @@ class AnnotationCanvas(QGraphicsView):
         self._finish_tool()
         self._tool = None
         self._tool_id = ""
+        if self._loupe is not None:
+            self._loupe.close()
+            self._loupe = None
         self.viewport().setCursor(Qt.ArrowCursor)
         self.toolChanged.emit("")
 
@@ -100,8 +110,7 @@ class AnnotationCanvas(QGraphicsView):
 
     def set_pipette_mode(self, on: bool):
         if on:
-            self._finish_tool()
-            self._tool = None
+            self.clear_tool()
             self._pipette = PipettePopup(self._bg_pixmap, self._dpr)
             self.viewport().setCursor(Qt.CrossCursor)
         else:
@@ -184,6 +193,9 @@ class AnnotationCanvas(QGraphicsView):
     # ---------- 事件 ----------
 
     def mousePressEvent(self, e):
+        if self._loupe is not None:
+            e.accept()
+            return
         if self._pipette is not None and e.button() == Qt.LeftButton:
             color = self._pipette.pick(self.mapToScene(e.pos()), e.globalPosition().toPoint())
             self.set_pipette_mode(False)
@@ -234,6 +246,9 @@ class AnnotationCanvas(QGraphicsView):
             super().mousePressEvent(e)
 
     def mouseDoubleClickEvent(self, e):
+        if self._loupe is not None:
+            e.accept()
+            return
         item = self.itemAt(e.pos())
         if isinstance(item, TextMarkItem) and e.button() == Qt.LeftButton:
             self.set_tool_by_id("text")
@@ -250,9 +265,12 @@ class AnnotationCanvas(QGraphicsView):
         if self._moving is not None:
             super().mouseMoveEvent(e)
             return
+        if self._loupe is not None:
+            self._loupe.pick(self.mapToScene(e.pos()),
+                             e.globalPosition().toPoint())
         if self._pipette is not None:
             self._pipette.pick(self.mapToScene(e.pos()),
-                               self.mapToGlobal(e.pos()))
+                               e.globalPosition().toPoint())
         elif self._tool is not None and (self._drawing or self._tool.preview_on_hover):
             self._tool.on_move(self.mapToScene(e.pos()))
         else:
@@ -298,6 +316,9 @@ class AnnotationCanvas(QGraphicsView):
             super().keyPressEvent(e)
 
     def wheelEvent(self, event):
+        if self._loupe is not None:
+            event.ignore()
+            return
         if self._tool is None or not self._style.wheel_enabled:
             if self.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded:
                 super().wheelEvent(event)

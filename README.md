@@ -1,6 +1,6 @@
-# GridStruct v2
+# GridStruct-V2
 
-Windows 本地截图、标注、贴图与 OCR 工具，对标 PixPin 的常用操作。当前程序名和托盘名称仍为 **PixShot**。
+Windows 本地截图、标注、贴图与 OCR 工具，对标 PixPin 的常用操作。程序、托盘和新构建产物统一命名为 **GridStruct-V2**。
 
 范围以 [P0 范围文档](docs/p0-scope.md) 为准，交互实现参考同级目录中的 [docs-clean](../docs-clean/README.md)。下列功能已接入源码；实机验收状态见文末，不代表 P0 已全部验收通过。
 
@@ -39,7 +39,7 @@ ch_ppocr_mobile_v2.0_cls_mobile.onnx
 
 ## 便携数据与 Windows ZIP
 
-配置保存为 `user-data/settings.ini`：源码运行时位于项目根目录，打包后位于 `PixShot.exe` 所在目录。首次创建 INI 时会迁移旧的 `GridStruct/GridStruct` 注册表配置，不删除原配置。
+配置保存为 `user-data/settings.ini`：源码运行时位于项目根目录，打包后位于 `GridStruct-V2.exe` 所在目录。首次创建 INI 时会迁移旧的 `GridStruct/GridStruct` 注册表配置，不删除原配置。
 
 未关闭贴图的会话与图片保存在 `user-data/pins/`。将整个应用目录连同 `user-data/` 一起移动可保留配置和贴图；这是当前会话恢复，不是可浏览的贴图历史库。应用目录需要可写。
 
@@ -51,9 +51,9 @@ ch_ppocr_mobile_v2.0_cls_mobile.onnx
 .\.venv\Scripts\python.exe -X utf8 tools/build_portable.py
 ```
 
-`--check` 只检查构建依赖和资源。构建默认输出到新的 `dist/portable-时间戳/`，其中包含 `PixShot/` 和 `PixShot-portable.zip`；也可用 `--output 新目录` 指定位置，已有目录不会覆盖。
+`--check` 只检查构建依赖和资源。构建默认输出到新的 `dist/portable-时间戳/`，其中包含 `GridStruct-V2/` 和 `GridStruct-V2-portable.zip`；也可用 `--output 新目录` 指定位置，已有目录不会覆盖。
 
-ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使用时完整解压到可写目录，启动 `PixShot.exe`，保留旁边的 `_internal/`；无需另外安装 Python。构建脚本校验资源哈希，并在 `build-manifest.json` 中记录依赖版本。资源校验不等于目标电脑运行验收，清单中的 `runtime_verified` 默认仍为 `false`。
+ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使用时完整解压到可写目录，启动 `GridStruct-V2.exe`，保留旁边的 `_internal/`；无需另外安装 Python。构建脚本校验资源哈希，并在 `build-manifest.json` 中记录依赖版本。资源校验不等于目标电脑运行验收，清单中的 `runtime_verified` 默认仍为 `false`。
 
 构建还会在独立进程加载包内 Qt 原生 DLL，避免仅有文件但不能导入的情况；通过后记录 `native_dependency_load_verified=true`。已修复构建环境误收第三方 ICU 导致 QtWidgets 无法导入的问题，构建进程的依赖搜索路径与用户系统配置隔离。
 
@@ -95,11 +95,11 @@ OCR 后续补齐也已实机验证：截图与图片贴图默认保留原图文�
 
 `portable-20261011-131450` 修复了“箭头仍选中时抢占 OCR 文字右键菜单”的问题，并已重新实测热键截图、箭头标注、OCR 文字菜单、全文复核与复制、截图直接贴图、贴图 OCR 滑选复制、由文字剪贴板创建贴图，以及退出后恢复图片和文字贴图。复制结果通过读取系统剪贴板核对。验收证据保存在 `.local-run/packaged-ocr-review.png`、`.local-run/packaged-pin-ocr.png`，输出样本为 `.local-run/packaged-annotated.png` 和 `.local-run/packaged-pin.jpg`。
 
-最新交付为 `portable-20261011-135117`。针对 OCR 看起来没有启动，已修复识别完成没有明显反馈的问题：截图工具条持续显示状态并提供“查看全文”，贴图底部显示识别状态和原图选字说明；失败、取消、超时和无文字也有状态提示。实机正式包识别合成样本得到 13 处文字，全文入口与中文复制通过；这不等于已复现所有用户环境中的模型启动失败。证据为 `.local-run/ocr-feedback-fixed.png` 和 `.local-run/ocr-pin-feedback-fixed.png`。
+最近一次完成正式包桌面验收的是 `portable-20261011-135117`（当时名称为 PixShot）。针对 OCR 看起来没有启动，已修复识别完成没有明显反馈的问题：截图工具条持续显示状态并提供“查看全文”，贴图底部显示识别状态和原图选字说明；失败、取消、超时和无文字也有状态提示。实机正式包识别合成样本得到 13 处文字，全文入口与中文复制通过；这不等于已复现所有用户环境中的模型启动失败。证据为 `.local-run/ocr-feedback-fixed.png` 和 `.local-run/ocr-pin-feedback-fixed.png`。
 
 控件吸附修复了 UIA 首个重叠容器提前返回、零面积结构父节点丢弃子树的问题。纯 provider 回归先失败后通过；可见桌面源码验证了独立 Qt 按钮和输入框，新正式包验证了资源管理器文件名控件的蓝色吸附框。未暴露可访问性元素的自绘界面仍可能只能吸附窗口。回归脚本为 `tools/check_snap_provider.py`（纯数据）和 `tools/check_ocr_feedback.py`（可见业务窗口、模拟模型结果）。
 
-桌面自动化验收使用同一个正式 EXE 的显式参数 `PixShot.exe --desktop-check`：将浮动窗口暴露为可枚举窗口，并显示调用正式业务回调的入口。正常启动不带参数，保持原有浮动窗口行为。未进行离屏操作；该模式的通过不等于普通窗口模式、多屏混合 DPI 或一周日常稳定性均已验证。构建清单仍保留构建时的 `runtime_verified=false`，具体交互范围以本节为准。
+桌面自动化验收使用同一个正式 EXE 的显式参数 `GridStruct-V2.exe --desktop-check`：将浮动窗口暴露为可枚举窗口，并显示调用正式业务回调的入口。正常启动不带参数，保持原有浮动窗口行为。未进行离屏操作；该模式的通过不等于普通窗口模式、多屏混合 DPI 或一周日常稳定性均已验证。构建清单仍保留构建时的 `runtime_verified=false`，具体交互范围以本节为准。
 
 仓库保留以下开发辅助脚本，需按验证目的显式运行：
 
@@ -110,3 +110,5 @@ OCR 后续补齐也已实机验证：截图与图片贴图默认保留原图文�
 | `tools/build_portable.py --check` | 构建依赖与资源预检；不生成包、不启动应用 |
 
 合成 OCR 样本只验证回归和接线，不代表真实业务文字准确率。混合 DPI、多屏交互、不同滚动应用和打包后的目标电脑运行需分别记录实测结果。
+
+2026-10-11 合并远程更新后，应用与构建产物统一为 GridStruct-V2；内部自启项和单实例锁保留旧标识，避免升级后重复启动。整合了固定 11×11 @8× 跟随放大镜和窗口快照预览，并保留后台 UIA 控件精化及 OCR 反馈修复。合并后通过源码编译、吸附 provider 回归、可见业务窗口 OCR 反馈回归与模拟注册表兼容检查；`portable-20261011-141553` 构建、资源与原生依赖加载、ZIP CRC 校验通过。该合并包尚未重新完成真实桌面全流程验收，前述旧包实测结果不覆盖新增放大镜和快照行为。

@@ -3,7 +3,7 @@
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PySide6.QtGui import QPixmap, QColor, QPainter, QPen
-from PySide6.QtCore import Qt, QPoint, Signal
+from PySide6.QtCore import Qt, QPoint
 from styles import tokens as T
 
 
@@ -13,11 +13,18 @@ class PipettePopup(QWidget):
     ZOOM = 6       # 放大倍数
     CELLS = 9      # 取 9x9 像素
 
-    def __init__(self, pixmap: QPixmap, dpr: float):
+    def __init__(self, pixmap: QPixmap, dpr: float, grid: bool = False):
         super().__init__(
-            None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+            None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+            | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
         self._pm = pixmap
         self._dpr = dpr
+        self._grid = grid  # 放大镜模式：画像素网格线
+        # 放大镜按承诺规格 11x11 @8x；取色器保持 9x9 @6x
+        self._cells = 11 if grid else self.CELLS
+        self._zoom = 8 if grid else self.ZOOM
         self._color = QColor(T.ANNOTATION_COLORS[1])
 
         self.setFixedSize(150, 190)
@@ -25,6 +32,8 @@ class PipettePopup(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         self._view = QLabel()
         self._view.setFixedSize(134, 134)
+        if grid:
+            self._view.setAlignment(Qt.AlignCenter)
         self._hex = QLabel(self._color.name().upper())
         self._hex.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._view)
@@ -39,18 +48,25 @@ class PipettePopup(QWidget):
         py = max(0, min(img.height() - 1, py))
         self._color = QColor(img.pixel(px, py))
 
-        # 放大预览：以 (px,py) 为中心的 9x9 区域
-        half = self.CELLS // 2
-        x0 = max(0, min(img.width() - self.CELLS, px - half))
-        y0 = max(0, min(img.height() - self.CELLS, py - half))
-        crop = self._pm.copy(x0, y0, self.CELLS, self.CELLS)
+        # 放大预览：以 (px,py) 为中心的取样区域
+        half = self._cells // 2
+        x0 = max(0, min(img.width() - self._cells, px - half))
+        y0 = max(0, min(img.height() - self._cells, py - half))
+        crop = self._pm.copy(x0, y0, self._cells, self._cells)
         crop.setDevicePixelRatio(1.0)
-        big = crop.scaled(self.CELLS * self.ZOOM, self.CELLS * self.ZOOM,
+        big = crop.scaled(self._cells * self._zoom, self._cells * self._zoom,
                           Qt.KeepAspectRatio, Qt.FastTransformation)
         with QPainter(big) as p:
+            if self._grid:
+                # 像素网格线（放大镜模式）
+                p.setPen(QPen(QColor(*T.PIXEL_GRID), 1))
+                for i in range(1, self._cells):
+                    x = i * self._zoom
+                    p.drawLine(x, 0, x, big.width())
+                    p.drawLine(0, x, big.width(), x)
             # 中心十字标记
-            cx = int((px - x0 + 0.5) * self.ZOOM)
-            cy = int((py - y0 + 0.5) * self.ZOOM)
+            cx = int((px - x0 + 0.5) * self._zoom)
+            cy = int((py - y0 + 0.5) * self._zoom)
             p.setPen(QPen(QColor(T.ANNOTATION_COLORS[0]), 1))
             p.drawRect(cx - 3, cy - 3, 6, 6)
         self._view.setPixmap(big)

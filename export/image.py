@@ -11,7 +11,7 @@ def save_image(pixmap, parent=None):
     directory = settings.value("screenshot_dir", "") or QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
     fmt = settings.value("image_format", "png")
     filters = "JPG (*.jpg);;PNG (*.png)" if fmt == "jpg" else "PNG (*.png);;JPG (*.jpg)"
-    path, chosen = QFileDialog.getSaveFileName(parent, "保存截图", str(Path(directory) / f"PixShot.{fmt}"), filters)
+    path, chosen = QFileDialog.getSaveFileName(parent, "保存截图", str(Path(directory) / f"GridStruct-V2.{fmt}"), filters)
     if not path:
         return None
     if not Path(path).suffix:

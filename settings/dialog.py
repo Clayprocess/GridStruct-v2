@@ -19,6 +19,8 @@ from .storage import get_settings
 
 _ORG, _APP = "GridStruct", "GridStruct"
 _VERSION = "0.1.0"
+# 保留旧版内部标识，避免升级后自启项失联或重复。
+_AUTOSTART_VALUE = "PixShot"
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
@@ -29,7 +31,7 @@ def _read_autostart() -> bool:
     import winreg
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
-            winreg.QueryValueEx(k, "PixShot")
+            winreg.QueryValueEx(k, _AUTOSTART_VALUE)
         return True
     except OSError:
         return False
@@ -41,10 +43,10 @@ def _write_autostart(enabled: bool):
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_KEY,
                            0, winreg.KEY_SET_VALUE) as k:
         if enabled:
-            winreg.SetValueEx(k, "PixShot", 0, winreg.REG_SZ, _autostart_command())
+            winreg.SetValueEx(k, _AUTOSTART_VALUE, 0, winreg.REG_SZ, _autostart_command())
         else:
             try:
-                winreg.DeleteValue(k, "PixShot")
+                winreg.DeleteValue(k, _AUTOSTART_VALUE)
             except FileNotFoundError:
                 pass  # 已关闭时再次保存，无需创建值。
 
@@ -170,7 +172,7 @@ class SettingsDialog(BaseDialog):
     def _about_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.addWidget(QLabel("PixShot（GridStruct v2）"))
+        layout.addWidget(QLabel("GridStruct-V2"))
         layout.addWidget(QLabel(f"版本 {_VERSION} · Windows 便携版"))
         links = QLabel('<a href="https://github.com/Clayprocess/GridStruct-v2#readme">使用说明</a> · '
                        '<a href="https://github.com/Clayprocess/GridStruct-v2/issues">反馈问题</a>')

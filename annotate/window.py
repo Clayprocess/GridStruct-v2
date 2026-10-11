@@ -23,7 +23,7 @@ class AnnotationWindow(QWidget):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | floating_window_type())
         self._mode = theme_mode
         self._scrollable = scrollable
-        self.setWindowTitle("PixShot 截图标注")
+        self.setWindowTitle("GridStruct-V2 截图标注")
         self._ended = False
         self._text_layer = None
         self._pipette_tool = ""
@@ -201,6 +201,7 @@ class AnnotationWindow(QWidget):
 
     def closeEvent(self, event):
         self._ocr.cancel()
+        self._canvas.clear_tool()
         self._canvas.set_pipette_mode(False)
         self._toolbar.close()
         if not self._ended:
