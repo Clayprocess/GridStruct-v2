@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 import shiboken6
 import capture.snap as snap
@@ -25,25 +25,27 @@ def physical(rect, dpr):
 
 target = QWidget()
 target.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-target.setGeometry(100, 100, 300, 200)
+target.setGeometry(QRect(app.primaryScreen().availableGeometry().topLeft() + QPoint(100, 100),
+                         QSize(300, 200)))
 child = QWidget(target)
 child.setAttribute(Qt.WA_NativeWindow)
 child.setGeometry(30, 30, 100, 80)
 target.show()
 overlay = QWidget()
 overlay.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-overlay.setGeometry(80, 80, 380, 280)
+overlay.setGeometry(QRect(target.pos() - QPoint(20, 20), QSize(380, 280)))
 overlay.show()
 app.processEvents()
 ignored = int(overlay.winId())
 dpr = target.devicePixelRatioF()
-point = round(150 * dpr)
+logical_point = target.pos() + QPoint(50, 50)
+point = physical(QRect(logical_point, QSize(1, 1)), dpr).topLeft()
 try:
     # 快照点查：overlay 自身被排除，应命中 target（窗口级）
     probe = snap.RegionDetector(ignored_hwnd=ignored)
     try:
         probe._refresh_snapshot()
-        hit = probe._lookup(point, point)
+        hit = probe._lookup(point.x(), point.y())
         assert hit is not None, "快照未命中窗口"
         hwnd, rect = hit
         assert hwnd != ignored, "应排除 overlay 自身"
@@ -54,7 +56,7 @@ try:
     results = []
     detector.regionDetected.connect(results.append)
     try:
-        detector.detect(QPoint(150, 150))
+        detector.detect(logical_point)
         wait_until(lambda: results)
         assert results[-1] == target.geometry(), (results, target.geometry())
         print(f"PASS: snapshot lookup excludes overlay and hits top-level, DPR={dpr} logical result")
@@ -69,39 +71,53 @@ finally:
 
 class _FakeUIA:
     """模拟 UIA：按窗口返回固定控件矩形（物理坐标），验证缓存路径。"""
-    def __init__(self):
+    def __init__(self, rect):
         self.seen = []
+        self.rect = rect
     def window_rectangles(self, hwnd):
         self.seen.append(hwnd)
-        return [QRect(10, 10, 50, 40)]
+        return [QRect(self.rect)]
     def close(self):
         pass
 
-fake = _FakeUIA()
+target.show()
+app.processEvents()
+hwnd = int(target.winId())
+window_rect = target.geometry()
+button_rect = QRect(window_rect.topLeft() + QPoint(30, 30), QSize(50, 40))
+native_window = physical(window_rect, dpr)
+fake = _FakeUIA(physical(button_rect, dpr))
 original_try = snap._try_init_uia
 snap._try_init_uia = lambda: fake
-detector = snap.RegionDetector()
-# 直接注入快照：hwnd=12345 的 1000x1000 物理窗口
-detector._windows = [(12345, QRect(0, 0, 1000, 1000))]
+detector = snap.RegionDetector(only_window=False)
+# 保留真实 HWND 校验，只隔离桌面其他窗口及周期刷新对缓存用例的影响。
+detector._snapshot_timer.stop()
+detector._windows = [(hwnd, native_window)]
 results = []
 detector.regionDetected.connect(results.append)
 try:
-    key = (12345, (0, 0, 1000, 1000))
-    detector.detect(QPoint(100, 100))
-    # 同步快照命中，立即发布窗口矩形（逻辑坐标）
-    assert results == [QRect(0, 0, 1000, 1000)], results
+    key = (hwnd, native_window.getRect())
+    background_point = window_rect.bottomRight() - QPoint(20, 20)
+    detector.detect(background_point)
+    assert results == [window_rect], results
     wait_until(lambda: key in detector._cache)
-    # UIA 结果已缓存，同一窗口内移动不再跨 COM
-    calls = len(fake.seen)
-    detector.detect(QPoint(200, 200))
-    app.processEvents()
-    assert len(fake.seen) == calls, "缓存命中后不应再次调用 UIA"
-    # 缓存的控件矩形被采用（物理 10,10,50,40 -> 逻辑）
-    assert results[-1] == QRect(10, 10, 50, 40), results
-    print("PASS: per-window UIA cache, no recompute inside cached window")
+    assert fake.seen == [hwnd], "必须先完成一次 UIA 查询，避免零调用的假通过"
+    request_id = detector._request_id
+    detector.detect(button_rect.center())
+    assert results[-1] == button_rect, results
+    signal_count = len(results)
+    for offset in range(10):
+        detector.detect(button_rect.topLeft() + QPoint(10 + offset, 10))
+    assert len(results) == signal_count, "同一控件内移动不应重复发布高亮"
+    detector.detect(background_point)
+    assert results[-1] == window_rect, results
+    assert detector._request_id == request_id and not detector._requests, "窗内移动不应派发新请求"
+    assert fake.seen == [hwnd], "缓存命中后不应再次调用 UIA"
+    print(f"PASS: per-window UIA cache, button/background transitions, one UIA query, DPR={dpr}")
 finally:
     detector.shutdown()
     snap._try_init_uia = original_try
+    target.close()
 print("PASS: detector thread shutdown and worker deletion")
 
 import ctypes
