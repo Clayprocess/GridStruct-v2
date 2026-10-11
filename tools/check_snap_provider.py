@@ -1,8 +1,11 @@
-"""纯 provider 树回归：不创建窗口、不调用原生 UIA，也不读取桌面。"""
+"""UIA 控件收集回归：不创建窗口、不调用原生 UIA，也不读取桌面。
+
+验证 _UIAutomation.window_rectangles 的广度优先遍历、
+offscreen 过滤、非法矩形过滤、引用释放契约。
+"""
 
 from pathlib import Path
 import sys
-import time
 import ctypes
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -11,85 +14,108 @@ from capture.snap import _UIAutomation
 
 
 class ProviderTree(_UIAutomation):
-    def __init__(self, children, rectangles):
+    """模拟 UIA 树：children 为 {父: [子]}，rectangles 为 {节点: QRect}。"""
+
+    def __init__(self, children, rectangles, offscreen=()):
         self._ctypes = ctypes
+        self._automation = object()  # 哑指针，仅用于 _call 分发
         self.children = children
         self.rectangles = rectangles
+        self.offscreen = set(offscreen)
         self.visited = []
         self.released = []
-        self.siblings = {}
-        for nodes in children.values():
-            for index, node in enumerate(nodes):
-                self.siblings[node] = nodes[index + 1] if index + 1 < len(nodes) else 0
+
+    def _eid(self, element):
+        # window_rectangles 的 pending 里是 c_void_p，_relative 返回 int，统一转 int
+        v = element.value if isinstance(element, ctypes.c_void_p) else element
+        return v if v else 0
 
     def _relative(self, element, index):
-        if index == 4:
-            children = self.children.get(element, [])
-            return children[0] if children else 0
-        assert index == 6
-        return self.siblings[element]
+        eid = self._eid(element)
+        if index == 4:  # first child
+            kids = self.children.get(eid, [])
+            return kids[0] if kids else 0
+        assert index == 6  # next sibling
+        for kids in self.children.values():
+            if eid in kids:
+                i = kids.index(eid)
+                return kids[i + 1] if i + 1 < len(kids) else 0
+        return 0
 
-    def _call(self, element, index, argtypes, *args):
-        if index == 38:
-            args[0]._obj.value = 0
+    def _call(self, target, index, argtypes, *args):
+        if index == 6:  # ElementFromHandle -> 根节点为 1
+            args[1]._obj.value = 1
+        elif index == 43:  # get_CurrentBoundingRectangle
+            eid = self._eid(target)
+            self.visited.append(eid)
+            r = self.rectangles[eid]
+            obj = args[0]._obj
+            obj.left, obj.top = r.x(), r.y()
+            obj.right, obj.bottom = r.x() + r.width(), r.y() + r.height()
+        elif index == 38:  # get_IsOffscreen
+            args[0]._obj.value = 1 if self._eid(target) in self.offscreen else 0
         else:
-            assert index == 43
-            self.visited.append(element)
-            rect = self.rectangles[element]
-            result = args[0]._obj
-            result.left, result.top = rect.x(), rect.y()
-            result.right, result.bottom = rect.x() + rect.width(), rect.y() + rect.height()
+            raise AssertionError(f"unexpected vtable index {index}")
 
     def _release(self, element):
-        self.released.append(element)
+        self.released.append(self._eid(element))
 
 
-def check_overlapping_container():
-    window = QRect(0, 0, 800, 600)
-    button = QRect(40, 50, 120, 32)
-    provider = ProviderTree({1: [2, 3], 3: [4]}, {2: window, 3: window, 4: button})
-    actual = provider._descend(1, 70, 60, time.monotonic() + 1)
-    assert actual == button, f"expected button {button.getRect()}, got {actual}; visited={provider.visited}"
-    assert sorted(provider.released) == [2, 3, 4], provider.released
-    print("PASS: overlapping sibling container does not hide button")
-
-
-def check_rectless_container():
-    button = QRect(40, 50, 120, 32)
-    provider = ProviderTree({1: [2], 2: [3]}, {2: QRect(), 3: button})
-    actual = provider._descend(1, 70, 60, time.monotonic() + 1)
-    assert actual == button, f"expected child through structural container, got {actual}; visited={provider.visited}"
-    assert sorted(provider.released) == [2, 3], provider.released
-    print("PASS: structural container without bounds retains child traversal")
-
-
-def check_nonmatching_branch():
-    button = QRect(40, 50, 120, 32)
+def check_bfs_order():
+    """广度优先：浅层控件先于深层被收集。"""
     provider = ProviderTree(
         {1: [2, 3], 2: [4]},
-        {2: QRect(400, 400, 200, 100), 3: button, 4: QRect(420, 420, 100, 30)})
-    actual = provider._descend(1, 70, 60, time.monotonic() + 1)
-    assert actual == button
-    assert provider.visited == [2, 3], provider.visited
-    assert sorted(provider.released) == [2, 3], provider.released
-    print("PASS: nonmatching subtree is pruned and references are released")
+        {1: QRect(0, 0, 800, 600), 2: QRect(0, 0, 800, 100),
+         3: QRect(0, 100, 800, 500), 4: QRect(10, 10, 120, 32)})
+    rects = provider.window_rectangles(12345)
+    assert provider.visited == [1, 2, 3, 4], provider.visited
+    assert len(rects) == 4
+    assert sorted(provider.released) == [1, 2, 3, 4], provider.released
+    print("PASS: BFS visits shallow controls before deep ones")
 
 
-def check_timeout_release():
-    provider = ProviderTree({1: [2]}, {2: QRect(0, 0, 800, 600)})
-    try:
-        provider._descend(1, 70, 60, time.monotonic() - 1)
-    except TimeoutError:
-        assert provider.released == [2], provider.released
-    else:
-        raise AssertionError("expired deadline did not stop provider traversal")
-    print("PASS: timeout keeps COM-reference release contract")
+def check_offscreen_filtered():
+    """offscreen 节点被过滤，其子树不再遍历。"""
+    provider = ProviderTree(
+        {1: [2, 3], 2: [4]},
+        {1: QRect(0, 0, 800, 600), 2: QRect(0, 0, 800, 100),
+         3: QRect(0, 100, 800, 500), 4: QRect(10, 10, 120, 32)},
+        offscreen=(2,))
+    rects = provider.window_rectangles(12345)
+    assert QRect(0, 0, 800, 100) not in rects
+    assert QRect(10, 10, 120, 32) not in rects  # 子树被剪掉
+    assert len(rects) == 2
+    print("PASS: offscreen node and its subtree are pruned")
+
+
+def check_invalid_rect_filtered():
+    """过小矩形被 _valid_rect 过滤，但遍历继续。"""
+    provider = ProviderTree(
+        {1: [2, 3]},
+        {1: QRect(0, 0, 800, 600), 2: QRect(5, 5, 2, 2),
+         3: QRect(40, 50, 120, 32)})
+    rects = provider.window_rectangles(12345)
+    assert rects == [QRect(0, 0, 800, 600), QRect(40, 50, 120, 32)], rects
+    print("PASS: too-small rect filtered, traversal continues")
+
+
+def check_overlapping_kept():
+    """重叠的兄弟容器都保留（调用方按面积取最小）。"""
+    window = QRect(0, 0, 800, 600)
+    button = QRect(40, 50, 120, 32)
+    provider = ProviderTree(
+        {1: [2, 3], 3: [4]},
+        {1: window, 2: window, 3: window, 4: button})
+    rects = provider.window_rectangles(12345)
+    assert button in rects
+    assert rects.count(window) == 3
+    print("PASS: overlapping sibling containers are all kept")
 
 
 if __name__ == "__main__":
     failures = []
-    for check in (check_overlapping_container, check_rectless_container,
-                  check_nonmatching_branch, check_timeout_release):
+    for check in (check_bfs_order, check_offscreen_filtered,
+                  check_invalid_rect_filtered, check_overlapping_kept):
         try:
             check()
         except AssertionError as error:

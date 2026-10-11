@@ -309,32 +309,6 @@ def _valid_rect(rect, x, y):
             and rect.contains(x, y))
 
 
-def _detect_win32(x: int, y: int, only_window: bool = True,
-                  ignored_hwnd: int = 0) -> QRect | None:
-    import ctypes
-    from ctypes import wintypes
-    user32 = _win32_api()
-    target, _ = _window_at(user32, x, y, ignored_hwnd)
-    if not target:
-        return None
-    if not only_window:
-        while True:
-            point = wintypes.POINT(x, y)
-            if not user32.ScreenToClient(target, ctypes.byref(point)):
-                return None
-            child = user32.ChildWindowFromPointEx(target, point, 7)
-            if not child or child == target:
-                break
-            if not user32.IsWindow(child) or user32.IsHungAppWindow(child):
-                return None
-            target = child
-    rc = wintypes.RECT()
-    if not user32.GetWindowRect(target, ctypes.byref(rc)):
-        return None
-    rect = QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top)
-    return rect if _valid_rect(rect, x, y) else None
-
-
 # ---------- UIAutomation COM（Windows 自带，ABI 来自 UIAutomationClient.h） ----------
 
 
@@ -384,48 +358,11 @@ class _UIAutomation:
         self._release(self._automation)
         self._ole32.CoUninitialize()
 
-    def _rectangle(self, element, x, y):
-        from ctypes import wintypes
-        ctypes = self._ctypes
-        rc = wintypes.RECT()
-        self._call(element, 43, [ctypes.POINTER(wintypes.RECT)], ctypes.byref(rc))
-        rect = QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top)
-        if rect.width() >= 0 and rect.height() >= 0 and rect.isEmpty():
-            # UIA 结构节点可以没有自己的可绘制区域，不能因此丢掉其子控件。
-            return QRect()
-        offscreen = wintypes.BOOL()
-        self._call(element, 38, [ctypes.POINTER(wintypes.BOOL)], ctypes.byref(offscreen))
-        if offscreen.value:
-            return None
-        return rect if _valid_rect(rect, x, y) else None
-
     def _relative(self, element, index):
         ctypes = self._ctypes
         found = ctypes.c_void_p()
         self._call(self._walker, index, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)], element, ctypes.byref(found))
         return found
-
-    def _descend(self, element, x, y, deadline):
-        best = None
-        child = self._relative(element, 4)
-        while child:
-            try:
-                if time.monotonic() > deadline:
-                    raise TimeoutError("UIAutomation 控件树查询超时")
-                rect = self._rectangle(child, x, y)
-                if rect is not None:
-                    candidate = self._descend(child, x, y, deadline)
-                    if candidate is None and not rect.isEmpty():
-                        candidate = rect
-                    # 兄弟节点的区域可能重叠；前面的整窗容器不能屏蔽后面的按钮。
-                    if candidate is not None and (best is None or
-                            candidate.width() * candidate.height() < best.width() * best.height()):
-                        best = candidate
-                next_child = self._relative(child, 6)
-            finally:
-                self._release(child)
-            child = next_child
-        return best
 
     def window_rectangles(self, hwnd):
         from ctypes import wintypes
@@ -464,43 +401,8 @@ class _UIAutomation:
             for element in pending:
                 self._release(element)
 
-    def rectangle_at(self, x, y, target, covered):
-        from ctypes import wintypes
-        ctypes = self._ctypes
-        element = ctypes.c_void_p()
-        if covered:
-            # 覆盖层遮住 ElementFromPoint，只在底层 HWND 的控件树内命中。
-            self._call(self._automation, 6, [wintypes.HWND, ctypes.POINTER(ctypes.c_void_p)], target, ctypes.byref(element))
-        else:
-            self._call(self._automation, 7, [wintypes.POINT, ctypes.POINTER(ctypes.c_void_p)],
-                       wintypes.POINT(x, y), ctypes.byref(element))
-        if not element:
-            return None
-        try:
-            rect = self._rectangle(element, x, y)
-            if covered and rect is not None:
-                candidate = self._descend(element, x, y, time.monotonic() + 0.2)
-                if candidate is not None:
-                    return candidate
-            return rect if rect is not None and not rect.isEmpty() else None
-        finally:
-            self._release(element)
-
-
 def _try_init_uia():
     try:
         return _UIAutomation()
     except OSError:
-        return None
-
-
-def _detect_uia(uia, x: int, y: int, ignored_hwnd: int = 0) -> QRect | None:
-    user32 = _win32_api()
-    target, covered = _window_at(user32, x, y, ignored_hwnd)
-    if not target:
-        return None
-    try:
-        return uia.rectangle_at(x, y, target, covered)
-    except OSError:
-        # Provider 拒绝、消失或超时均回退到经过相同校验的 Win32 路径。
         return None

@@ -39,10 +39,17 @@ ignored = int(overlay.winId())
 dpr = target.devicePixelRatioF()
 point = round(150 * dpr)
 try:
-    assert snap._detect_win32(point, point) == physical(overlay.geometry(), dpr)
-    assert snap._detect_win32(point, point, True, ignored) == physical(target.geometry(), dpr)
-    child_geo = QRect(child.mapToGlobal(QPoint()), child.size())
-    assert snap._detect_win32(point, point, False, ignored) == physical(child_geo, dpr)
+    # 快照点查：overlay 自身被排除，应命中 target（窗口级）
+    probe = snap.RegionDetector(ignored_hwnd=ignored)
+    try:
+        probe._refresh_snapshot()
+        hit = probe._lookup(point, point)
+        assert hit is not None, "快照未命中窗口"
+        hwnd, rect = hit
+        assert hwnd != ignored, "应排除 overlay 自身"
+        assert rect == physical(target.geometry(), dpr), (rect, physical(target.geometry(), dpr))
+    finally:
+        probe.shutdown()
     detector = snap.RegionDetector(ignored_hwnd=ignored)
     results = []
     detector.regionDetected.connect(results.append)
@@ -50,7 +57,7 @@ try:
         detector.detect(QPoint(150, 150))
         wait_until(lambda: results)
         assert results[-1] == target.geometry(), (results, target.geometry())
-        print(f"PASS: native overlay exclusion, top-level/child modes, DPR={dpr} logical result")
+        print(f"PASS: snapshot lookup excludes overlay and hits top-level, DPR={dpr} logical result")
     finally:
         worker = detector._worker
         detector.shutdown()
@@ -60,28 +67,41 @@ finally:
     overlay.close()
     target.close()
 
-original = snap._detect_win32
-snap._detect_win32 = lambda x, y, *_: QRect(x, y, round(50*dpr), round(40*dpr))
+class _FakeUIA:
+    """模拟 UIA：按窗口返回固定控件矩形（物理坐标），验证缓存路径。"""
+    def __init__(self):
+        self.seen = []
+    def window_rectangles(self, hwnd):
+        self.seen.append(hwnd)
+        return [QRect(10, 10, 50, 40)]
+    def close(self):
+        pass
+
+fake = _FakeUIA()
+original_try = snap._try_init_uia
+snap._try_init_uia = lambda: fake
 detector = snap.RegionDetector()
+# 直接注入快照：hwnd=12345 的 1000x1000 物理窗口
+detector._windows = [(12345, QRect(0, 0, 1000, 1000))]
 results = []
 detector.regionDetected.connect(results.append)
 try:
+    key = (12345, (0, 0, 1000, 1000))
     detector.detect(QPoint(100, 100))
+    # 同步快照命中，立即发布窗口矩形（逻辑坐标）
+    assert results == [QRect(0, 0, 1000, 1000)], results
+    wait_until(lambda: key in detector._cache)
+    # UIA 结果已缓存，同一窗口内移动不再跨 COM
+    calls = len(fake.seen)
     detector.detect(QPoint(200, 200))
-    wait_until(lambda: not detector._requests)
-    assert results == [QRect(200, 200, 50, 40)], results
-    assert detector._cache[(100, 100)][1] == QRect(100, 100, 50, 40)
-    assert detector._cache[(200, 200)][1] == QRect(200, 200, 50, 40)
-    detector.detect(QPoint(100, 100))
-    assert results[-1] == QRect(100, 100, 50, 40)
-    snap._detect_win32 = lambda *_: None
-    detector.detect(QPoint(300, 300))
-    wait_until(lambda: not detector._requests)
-    assert results[-1].isNull(), results
-    print("PASS: request-owned cache, stale response rejection, cache return, invalid-target clearing")
+    app.processEvents()
+    assert len(fake.seen) == calls, "缓存命中后不应再次调用 UIA"
+    # 缓存的控件矩形被采用（物理 10,10,50,40 -> 逻辑）
+    assert results[-1] == QRect(10, 10, 50, 40), results
+    print("PASS: per-window UIA cache, no recompute inside cached window")
 finally:
     detector.shutdown()
-    snap._detect_win32 = original
+    snap._try_init_uia = original_try
 print("PASS: detector thread shutdown and worker deletion")
 
 import ctypes
