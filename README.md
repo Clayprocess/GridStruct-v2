@@ -1,38 +1,112 @@
-# PixShot（暂定名）
+# GridStruct v2
 
-对标 PixPin 的截图/贴图/标注工具，自研实现。
+Windows 本地截图、标注、贴图与 OCR 工具，对标 PixPin 的常用操作。当前程序名和托盘名称仍为 **PixShot**。
 
-## 技术栈
+范围以 [P0 范围文档](docs/p0-scope.md) 为准，交互实现参考同级目录中的 [docs-clean](../docs-clean/README.md)。下列功能已接入源码；实机验收状态见文末，不代表 P0 已全部验收通过。
 
-- **UI**: PySide6（Qt for Python）—— Qt Widgets，**不用 QML**
-- **设计语言**：翻译自 shadcn/ui（zinc 主题），见 `styles/tokens.py`（唯一的视觉真值源）
-- **图标**：Lucide SVG（MIT），见 `assets/icons/`，用 `ui/icons.py` 加载
-- **OCR**（二期）：RapidOCR + onnxruntime（PaddleOCR 系模型，本地跑）
-- **打包**：PyInstaller / Nuitka → 单文件 exe
+## 当前功能
 
-## 模块划分
+- **截图**：虚拟桌面框选、窗口/元素吸附、选区移动与八方向缩放、尺寸提示；方向键微调，按住 Shift 加大步长。选区建立后显示浮动工具条，进入标注时保留选区外遮罩。
+- **标注**：矩形、椭圆、箭头、画笔、直线、折线、文字、序号、马赛克、高亮、橡皮擦、放大镜，共 12 种工具；支持选择、移动、删除、撤销和重做。二级面板提供各工具的颜色、粗细或专属选项。
+- **样式与编辑**：矩形填充/圆角、7 种箭头、5 种线型、文字字体/字号/背景/描边、序号起点与编号调整、像素化/模糊马赛克、高亮透明度、橡皮大小、放大倍率。画笔按住 Shift 画直线；文字和折线先用 Esc 结束当前编辑。
+- **输出与取色**：截图复制、保存 PNG/JPG、贴图、OCR；保存成功后复制文件路径。取色支持 Hex/RGB/HSV，确认后复制色值并可应用到当前标注。
+- **图片和文字贴图**：拖动、滚轮缩放、置顶、10%～100% 不透明度和鼠标穿透；托盘可退出所有贴图的鼠标穿透。文字支持滑选复制、双击编辑；图片支持 OCR。应用退出后恢复未关闭的贴图，主动关闭的贴图不会再次恢复。
+- **长截图**：手动/自动滚动、纵向/横向拼接、开始/暂停/继续、预览和完成后标注。反向滚动仅在能唯一匹配已有画面时裁回尾部；无法匹配、目标窗口变化或超出限制时提示并停止继续拼接。不同滚动应用的兼容性仍需实机确认。
+- **OCR**：后台本地识别，截图和图片贴图默认叠加可选文字层；右键可打开全文复核，支持复制全部/选中文字、去空格/换行等选项。按几何位置整理分栏、段落和阅读顺序，保留原始识别框。使用随项目提供的 PP-OCRv6 small 检测/识别模型和本地方向分类模型，不在识别时下载模型。
+- **设置与托盘**：明暗/系统主题、截图保存选项、工具颜色联动、部分工具偏好记忆、开机启动和关于页。当前截图热键固定为 `Ctrl+Alt+S`，设置页展示该快捷键。
 
-| 模块 | 职责 | 边界 |
-|------|------|------|
-| `capture/` | 截图捕获、多显示器/DPI 适配、全局热键 | 只输出 QPixmap + 显示器信息 |
-| `annotate/` | 标注画布（QGraphicsView/Scene）、12 种标注工具、FloatPanel 工具条 | 不碰文件 IO |
-| `pin/` | 贴图窗口（6 种子类型）、贴图管理 | 不碰 OCR |
-| `ocr/` | ONNX 推理封装（检测+识别）、表格/公式 | 纯函数式，输入图输出结构化结果 |
-| `export/` | xlsx/图片导出、剪贴板 | 只做格式转换 |
-| `styles/` | 设计 tokens + QSS 主题生成 | **视觉的唯一真值源** |
-| `ui/` | 通用 UI 构件（图标加载、对话框基类） | 不写业务逻辑 |
+## 从源码运行
 
-## 不做的功能（对照 PixPin 砍掉）
+需要 Windows、Python 3.10+。在仓库根目录执行：
 
-会员/登录/订阅、云同步、工业条码、TTS、摄像头画中画、录屏剪辑、多语种 OCR（只留中/英）
-
-## UI 规格
-
-见 `../pixpin/pixpin-ui-spec.md`（PixPin 逆向规格书：窗口清单、工具条按钮、菜单项）
-
-## 运行
-
-```bash
-pip install -r requirements.txt
-python main.py   # 主题演示窗口
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -X utf8 -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -X utf8 main.py
 ```
+
+应用常驻系统托盘，无常规主窗口。按 `Ctrl+Alt+S` 框选，使用浮动工具条开始标注或输出；双击选区或按 Enter 复制截图并结束。右键托盘可打开设置、从剪贴板创建贴图、开始长截图或退出。
+
+运行依赖为 PySide6、RapidOCR 和 onnxruntime。安装依赖需要对应安装源；安装完成且本地模型齐全后，OCR 推理不需要联网。以下文件必须位于 `assets/models/`：
+
+```text
+PP-OCRv6_det_small.onnx
+PP-OCRv6_rec_small.onnx
+ch_ppocr_mobile_v2.0_cls_mobile.onnx
+```
+
+长截图控制条和遮罩的窗口捕获排除依赖 Windows 10 2004 或更新版本。多显示器和 DPI 适配已有实现，混合缩放组合需要在实际设备上确认。
+
+## 便携数据与 Windows ZIP
+
+配置保存为 `user-data/settings.ini`：源码运行时位于项目根目录，打包后位于 `PixShot.exe` 所在目录。首次创建 INI 时会迁移旧的 `GridStruct/GridStruct` 注册表配置，不删除原配置。
+
+未关闭贴图的会话与图片保存在 `user-data/pins/`。将整个应用目录连同 `user-data/` 一起移动可保留配置和贴图；这是当前会话恢复，不是可浏览的贴图历史库。应用目录需要可写。
+
+打包采用 **PyInstaller 6.x onedir + ZIP**。只有构建包时才需要另行安装 PyInstaller：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m pip install "pyinstaller>=6,<7"
+.\.venv\Scripts\python.exe -X utf8 tools/build_portable.py --check
+.\.venv\Scripts\python.exe -X utf8 tools/build_portable.py
+```
+
+`--check` 只检查构建依赖和资源。构建默认输出到新的 `dist/portable-时间戳/`，其中包含 `PixShot/` 和 `PixShot-portable.zip`；也可用 `--output 新目录` 指定位置，已有目录不会覆盖。
+
+ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使用时完整解压到可写目录，启动 `PixShot.exe`，保留旁边的 `_internal/`；无需另外安装 Python。构建脚本校验资源哈希，并在 `build-manifest.json` 中记录依赖版本。资源校验不等于目标电脑运行验收，清单中的 `runtime_verified` 默认仍为 `false`。
+
+构建还会在独立进程加载包内 Qt 原生 DLL，避免仅有文件但不能导入的情况；通过后记录 `native_dependency_load_verified=true`。已修复构建环境误收第三方 ICU 导致 QtWidgets 无法导入的问题，构建进程的依赖搜索路径与用户系统配置隔离。
+
+## 模块边界
+
+跨模块调用必须从各模块 `__init__.py` 导入公开接口，不直接导入内部实现文件。
+
+| 模块 | 职责 | 主要公开接口与边界 |
+|---|---|---|
+| `capture/` | 桌面捕获、选区、吸附、截图流程、长截图 | `ScreenshotFlow`、`LongShotFlow`、`ScreenShotWindow`、`RegionDetector`；将选区/拼接结果交给标注流程 |
+| `annotate/` | 标注画布、工具、样式和浮动工具条 | `AnnotationWindow`、`AnnotationCanvas`、`MarkStyle`、`FloatPanel`、`create_tool`；输出动作调用其他模块的公开接口 |
+| `pin/` | 图片/文字贴图、窗口管理、会话保存恢复 | `show_pin`、`show_text_pin`、`show_pin_from_clipboard`、`restore_pins`、`save_pins`、`shutdown_pins`、`disable_click_through`；图片识别调用 OCR 接口 |
+| `ocr/` | 本地推理、后台任务、文字结果对话框与文字层 | `OCREngine`、`OCRResult`、`OCRController`、`OCRResultDialog`、`add_text_layer`；不包含表格/公式识别 |
+| `export/` | 截图图片保存与保存路径复制 | `save_image`；当前支持 PNG/JPG，不包含 xlsx 导出 |
+| `settings/` | 设置窗口、便携 INI 和数据目录 | `SettingsDialog`、`get_settings`、`data_directory` |
+| `tray/` | 托盘入口和 Windows 全局热键 | `create_tray`、`GlobalHotkey` |
+| `styles/` | 设计 tokens 与主题 | `tokens`、`apply_theme`；视觉值只定义在 `styles/tokens.py`，QSS 只写在 `styles/theme.py` |
+| `ui/` | 通用图标与对话框基类 | `tinted_icon`、`BaseDialog`；图标来自 `assets/icons/` 中的 Lucide SVG |
+
+UI 使用 PySide6 Qt Widgets，不使用 QML。业务模块通过动态属性选择按钮样式，不直接写 QSS。
+
+## 范围外功能
+
+表格/公式识别、动图/文件/LaTeX 贴图、单文件 EXE 属于 P1；本轮不实现 AI 自动打码、曲线等扩展标注功能。翻译以后另议。
+
+不做会员、登录、订阅、云同步、兑换码、工业条码、TTS、摄像头画中画、录屏剪辑和多语种切换界面。当前也不提供可浏览的贴图历史库或完整的自定义热键管理。
+
+## 验证范围
+
+本轮使用真实 Windows 桌面窗口进行验收，未运行离屏渲染。已操作框选、浮动工具条、矩形标注、取色格式切换、文字贴图编辑及退出恢复、设置窗口层级、本地 OCR 和原图文字选择复制；OCR 原图文字重影、画布边距及置顶贴图遮挡设置的问题已修复并复测。验收使用合成数据窗口，辅助入口调用正式应用回调，不作为发布功能。
+
+OCR 后续补齐也已实机验证：截图与图片贴图默认保留原图文字层，滑选复制得到实际文字，右键可主动打开全文复核；图片贴图放大到 110% 后选字区域仍与原图对齐。段落整理通过乱序行、同行片段、双列及跨栏标题等纯数据检查；该算法为几何启发式，尚未验证复杂业务版面的准确率。
+
+自动长截图已在真实桌面合成页面完成从顶部到底部的连续采集：初始 1012 像素，加上实际滚动 2066 逻辑像素 × 1.5 DPR，导出尺寸精确为 1149×4111，包含最后 39 像素短步；到底后无变化一秒自动暂停。长图末尾可滚动浏览和标注，完整导出保留末尾标记。实测修复了反向滚轮、钩子线程超时、重复行误配和短步拼接缓慢。自动滚动采用一格滚轮加稳定帧确认，与参考文档的固定步长/间隔不同，以适配不同应用的滚轮设置。
+
+这些结果不代表所有应用与屏幕环境都已通过。P0 关闭还要求按范围文档，在工作电脑日常使用 ZIP 包一周，确认截图输出、贴图与 OCR 三条链路稳定。
+
+2026-10-11 已在打包 EXE 上完成可见桌面交互验收：`portable-20261011-130851` 跑通热键框选、矩形/箭头、撤销/重做、PNG 保存、图片复制贴图、110% 缩放与 JPG 保存。实际 PNG/JPG 均为 1066×549 像素。
+
+`portable-20261011-131450` 修复了“箭头仍选中时抢占 OCR 文字右键菜单”的问题，并已重新实测热键截图、箭头标注、OCR 文字菜单、全文复核与复制、截图直接贴图、贴图 OCR 滑选复制、由文字剪贴板创建贴图，以及退出后恢复图片和文字贴图。复制结果通过读取系统剪贴板核对。验收证据保存在 `.local-run/packaged-ocr-review.png`、`.local-run/packaged-pin-ocr.png`，输出样本为 `.local-run/packaged-annotated.png` 和 `.local-run/packaged-pin.jpg`。
+
+最新交付为 `portable-20261011-135117`。针对 OCR 看起来没有启动，已修复识别完成没有明显反馈的问题：截图工具条持续显示状态并提供“查看全文”，贴图底部显示识别状态和原图选字说明；失败、取消、超时和无文字也有状态提示。实机正式包识别合成样本得到 13 处文字，全文入口与中文复制通过；这不等于已复现所有用户环境中的模型启动失败。证据为 `.local-run/ocr-feedback-fixed.png` 和 `.local-run/ocr-pin-feedback-fixed.png`。
+
+控件吸附修复了 UIA 首个重叠容器提前返回、零面积结构父节点丢弃子树的问题。纯 provider 回归先失败后通过；可见桌面源码验证了独立 Qt 按钮和输入框，新正式包验证了资源管理器文件名控件的蓝色吸附框。未暴露可访问性元素的自绘界面仍可能只能吸附窗口。回归脚本为 `tools/check_snap_provider.py`（纯数据）和 `tools/check_ocr_feedback.py`（可见业务窗口、模拟模型结果）。
+
+桌面自动化验收使用同一个正式 EXE 的显式参数 `PixShot.exe --desktop-check`：将浮动窗口暴露为可枚举窗口，并显示调用正式业务回调的入口。正常启动不带参数，保持原有浮动窗口行为。未进行离屏操作；该模式的通过不等于普通窗口模式、多屏混合 DPI 或一周日常稳定性均已验证。构建清单仍保留构建时的 `runtime_verified=false`，具体交互范围以本节为准。
+
+仓库保留以下开发辅助脚本，需按验证目的显式运行：
+
+| 脚本 | 用途与限制 |
+|---|---|
+| `tools/smoke_check.py` | 离屏合成样本回归，覆盖标注、OCR、拼接、设置和生命周期等；本轮已适配当前接口并编译，未重新运行离屏验收 |
+| `tools/windows_smoke.py` | 会显示合成窗口，检查 Windows 吸附、热键、滚轮钩子及捕获排除；不能代替真实应用滚动与交互验收 |
+| `tools/build_portable.py --check` | 构建依赖与资源预检；不生成包、不启动应用 |
+
+合成 OCR 样本只验证回归和接线，不代表真实业务文字准确率。混合 DPI、多屏交互、不同滚动应用和打包后的目标电脑运行需分别记录实测结果。

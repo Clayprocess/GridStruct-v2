@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication
 
 from .screen import capture_virtual_desktop, virtual_geometry
 from .overlay import ScreenShotWindow
-from annotate.window import AnnotationWindow
+from annotate import AnnotationWindow, FloatPanel
 
 
 class ScreenshotFlow(QObject):
@@ -19,16 +19,39 @@ class ScreenshotFlow(QObject):
         self._win: ScreenShotWindow | None = None
         self._ann: AnnotationWindow | None = None
         self._shot = None
+        self._panel = None
 
     def start(self):
         if self._win is not None or self._ann is not None:
             return  # 已有会话在跑
         self._shot = capture_virtual_desktop()
         vg = virtual_geometry()
-        self._win = ScreenShotWindow(self._shot, vg)
+        self._win = ScreenShotWindow(self._shot, vg, keep_open=True)
         self._win.regionSelected.connect(self._on_region)
+        self._win.selectionChanged.connect(self._on_selection)
+        self._win.actionRequested.connect(self._trigger_action)
         self._win.cancelled.connect(self._cleanup)
         self._win.show()
+
+    def _on_selection(self, rect):
+        if rect.width() < 4 or rect.height() < 4:
+            if self._panel is not None:
+                self._panel.hide()
+            return
+        if self._panel is None:
+            self._panel = FloatPanel(self._app.property("theme_mode") or self._mode, self._win)
+            self._panel.toolSelected.connect(self._select_tool)
+            self._panel.actionTriggered.connect(self._trigger_action)
+        self._panel.set_position_near(rect.translated(self._win.pos()))
+        self._panel.show()
+
+    def _select_tool(self, tool):
+        self._win.confirm()
+        self._ann.select_tool(tool)
+
+    def _trigger_action(self, action):
+        self._win.confirm()
+        self._ann.trigger_action(action)
 
     # ---------- 内部 ----------
 
@@ -39,11 +62,15 @@ class ScreenshotFlow(QObject):
         cropped = self._shot.copy(pr)
         cropped.setDevicePixelRatio(dpr)
 
-        self._win.close()
-        self._win = None
+        if self._panel is not None:
+            self._panel.close()
+            self._panel = None
+        self._shot = None
 
         # 标注窗口放在选区原位置
-        self._ann = AnnotationWindow(cropped, rect.topLeft(), self._mode)
+        position = rect.topLeft() + virtual_geometry().topLeft()
+        mode = self._app.property("theme_mode") or self._mode
+        self._ann = AnnotationWindow(cropped, position, mode)
         self._ann.finished.connect(self._on_finished)
         self._ann.cancelled.connect(self._cleanup)
         self._ann.show()
@@ -53,10 +80,18 @@ class ScreenshotFlow(QObject):
         print(f"[截图] 已复制 {pixmap.width()}×{pixmap.height()} 到剪贴板")
         self._cleanup()
 
+    def cancel(self):
+        self._cleanup()
+
     def _cleanup(self):
-        if self._ann is not None:
-            self._ann.close()
-            self._ann = None
-        if self._win is not None:
-            self._win.close()
-            self._win = None
+        # closeEvent 也会发出取消信号，先释放会话引用避免重入。
+        annotation, self._ann = self._ann, None
+        window, self._win = self._win, None
+        panel, self._panel = self._panel, None
+        self._shot = None
+        if annotation is not None:
+            annotation.close()
+        if window is not None:
+            window.close()
+        if panel is not None:
+            panel.close()

@@ -7,7 +7,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtCore import Qt
 
 from styles import tokens as T
-from ui.icons import tinted_icon
+from ui import tinted_icon
 
 TRAY_ICON_NAME = "pin"
 TRAY_TOOLTIP = "PixShot"
@@ -49,7 +49,7 @@ def create_tray(app, callbacks: dict | None) -> QSystemTrayIcon:
     截图菜单项约定用 callbacks["screenshot"]。
     """
     callbacks = callbacks or {}
-    theme = _current_theme()
+    theme = app.property("theme_mode") or _current_theme()
     color = T.THEMES[theme]["foreground"]
     icon = tinted_icon(TRAY_ICON_NAME, color, 16)
 
@@ -59,10 +59,16 @@ def create_tray(app, callbacks: dict | None) -> QSystemTrayIcon:
     menu = QMenu()
     for key, text in MENU_ITEMS:
         cb = callbacks.get(key) or _placeholder(text)
-        action = menu.addAction(text)
+        if key == "pin" and "restore_pin_input" in callbacks:
+            submenu = menu.addMenu(text)
+            action = submenu.addAction("从剪贴板贴图 / 文字")
+            submenu.addAction("恢复所有贴图鼠标操作").triggered.connect(callbacks["restore_pin_input"])
+        else:
+            action = menu.addAction(text)
         # triggered(bool) -> 零参槽：Qt 允许槽参数少于信号参数
         action.triggered.connect(lambda _checked=False, _cb=cb: _cb())
         if key in _SEPARATOR_AFTER:
             menu.addSeparator()
     tray.setContextMenu(menu)
+    tray.activated.connect(lambda reason: callbacks["screenshot"]() if reason == QSystemTrayIcon.Trigger else None)
     return tray

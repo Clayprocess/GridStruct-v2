@@ -7,26 +7,22 @@
 #   4. 在 TOOL_CLASSES 注册 id（id 必须与 annotate/toolbar.py 的 TOOLS 一致）。
 
 from PySide6.QtCore import QRect, QRectF, QPointF, Qt
-from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene
-from PySide6.QtGui import QUndoStack
+from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QApplication
+from PySide6.QtGui import QUndoStack, QImage, QPixmap, QGuiApplication
 
 from .items import (
     ArrowMarkItem, EllipseMarkItem, HighlightMarkItem, LineMarkItem,
     MagnifierMarkItem, MarkStyle, MosaicMarkItem, PencilMarkItem,
     PolylineMarkItem, RectMarkItem, SerialMarkItem, TextMarkItem,
 )
-from .commands import AddMarkCommand, RemoveMarkCommand
-
-
-# P0-C 设置窗口落地后，这些配置再迁入设置模块。
-SERIAL_START_FROM_ZERO = False
-SERIAL_GLOBAL_COUNTING = False
-SERIAL_AUTO_RENUMBER = True
-_serial_global_next = None
+from .commands import AddMarkCommand, RemoveMarkCommand, TextEditCommand
 
 
 class MarkTool:
     """标注工具基类。style 为画布持有的共享 MarkStyle（引用）。"""
+
+    preview_on_hover = False
+    finishes_on_escape = False
 
     def __init__(self, style: MarkStyle):
         self._style = style
@@ -48,6 +44,9 @@ class MarkTool:
     def on_right_press(self, pos, undo):
         pass
 
+    def finish(self, undo):
+        pass
+
 
 class RectTool(MarkTool):
     def on_press(self, scene, pos, undo):
@@ -61,7 +60,8 @@ class RectTool(MarkTool):
         self._item.set_rect(QRectF(self._start, QPointF(pos)).normalized())
 
     def on_release(self, pos, undo):
-        r = self._item.boundingRect()
+        r = QRectF(self._start, QPointF(pos)).normalized()
+        self._item.set_rect(r)
         if r.width() < 4 or r.height() < 4:
             self._scene.removeItem(self._item)
         else:
@@ -82,6 +82,7 @@ class ArrowTool(MarkTool):
 
     def on_release(self, pos, undo):
         p = QPointF(pos)
+        self._item.set_line(self._start, p)
         dx, dy = p.x() - self._start.x(), p.y() - self._start.y()
         if dx * dx + dy * dy < 16:
             self._scene.removeItem(self._item)
@@ -91,21 +92,51 @@ class ArrowTool(MarkTool):
 
 
 class TextTool(MarkTool):
+    finishes_on_escape = True
+
+    def __init__(self, style):
+        super().__init__(style)
+        self._before = None
+
     def on_press(self, scene, pos, undo):
+        self.finish(undo)
         self._scene = scene
         self._item = TextMarkItem(self._style)
         self._item.setPos(pos)
         scene.addItem(self._item)
         self._item.setFocus()
 
+    def edit(self, item, scene, undo):
+        self.finish(undo)
+        self._scene, self._item = scene, item
+        self._before = item.toHtml()
+        item.setTextInteractionFlags(Qt.TextEditorInteraction)
+        item.setFocus()
+
     def on_move(self, pos):
         pass
 
     def on_release(self, pos, undo):
-        # 空文本不入栈，失去焦点时由 canvas 清理
-        if self._item.toPlainText():
-            undo.push(AddMarkCommand(self._scene, self._item))
-        self._item = None
+        pass
+
+    def finish(self, undo):
+        if self._item is not None:
+            self._item.clearFocus()
+            self._item.setTextInteractionFlags(Qt.NoTextInteraction)
+            if self._before is not None:
+                after = self._item.toHtml()
+                if after != self._before:
+                    undo.beginMacro("编辑文字")
+                    undo.push(TextEditCommand(self._item, self._before, after))
+                    if not self._item.toPlainText():
+                        undo.push(RemoveMarkCommand(self._scene, [self._item]))
+                    undo.endMacro()
+            elif self._item.toPlainText():
+                undo.push(AddMarkCommand(self._scene, self._item))
+            else:
+                self._scene.removeItem(self._item)
+            self._item = None
+            self._before = None
 
 
 class EllipseTool(RectTool):
@@ -127,6 +158,8 @@ class LineTool(ArrowTool):
 
 
 class PolylineTool(MarkTool):
+    preview_on_hover = True
+    finishes_on_escape = True
     def on_press(self, scene, pos, undo):
         if self._item is None:
             self._scene = scene
@@ -135,7 +168,8 @@ class PolylineTool(MarkTool):
         self._item.add_point(pos)
 
     def on_move(self, pos):
-        self._item.set_preview(pos)
+        if self._item is not None:
+            self._item.set_preview(pos)
 
     def on_release(self, pos, undo):
         pass
@@ -147,6 +181,9 @@ class PolylineTool(MarkTool):
         self._finish(undo)
 
     def _finish(self, undo):
+        if self._item is None:
+            return  # 尚未落点或已经通过双击结束。
+        self._item.set_preview(None)
         points = self._item.points
         if len(points) > 1:
             delta = points[-1] - points[-2]
@@ -158,18 +195,25 @@ class PolylineTool(MarkTool):
             self._scene.removeItem(self._item)
         self._item = None
 
+    def finish(self, undo):
+        self._finish(undo)
+
 
 class PencilTool(MarkTool):
     item_class = PencilMarkItem
 
     def on_press(self, scene, pos, undo):
         self._scene = scene
+        self._start = QPointF(pos)
         self._item = self.item_class(self._style)
         self._item.move_to(pos)
         scene.addItem(self._item)
 
     def on_move(self, pos):
-        self._item.line_to(pos)
+        if self.item_class is PencilMarkItem and QGuiApplication.keyboardModifiers() & Qt.ShiftModifier:
+            self._item.set_straight(self._start, pos)
+        else:
+            self._item.line_to(pos)
 
     def on_release(self, pos, undo):
         if self._item.point_count < 2:
@@ -192,28 +236,45 @@ class MosaicTool(MarkTool):
         scene.addItem(self._item)
 
     def on_move(self, pos):
-        self._item.set_preview_rect(
-            QRectF(self._start, QPointF(pos)).normalized())
+        rect = QRectF(self._start, QPointF(pos)).normalized()
+        if rect.width() >= 4 and rect.height() >= 4:
+            self._update_mosaic(rect)
+        else:
+            self._item.set_preview_rect(rect)
 
     def on_release(self, pos, undo):
         rect = QRectF(self._start, QPointF(pos)).normalized()
         if rect.width() < 4 or rect.height() < 4:
-            self._scene.removeItem(self._item)
-        else:
-            bg = self._scene.views()[0].scene_background()
-            dpr = bg.devicePixelRatio()
-            physical = QRect(int(rect.x() * dpr), int(rect.y() * dpr),
-                             int(rect.width() * dpr), int(rect.height() * dpr))
-            region = bg.copy(physical)
-            w, h = region.width(), region.height()
-            k = max(6, min(w, h) // 12)
-            small = region.scaled(max(1, w // k), max(1, h // k),
-                                  Qt.IgnoreAspectRatio, Qt.FastTransformation)
-            mosaic = small.scaled(w, h, Qt.IgnoreAspectRatio,
-                                  Qt.FastTransformation)
-            self._item.set_mosaic(mosaic, rect)
-            undo.push(AddMarkCommand(self._scene, self._item))
+            size = max(16, self._style.mosaic_strength * 2)
+            rect = QRectF(pos.x() - size / 2, pos.y() - size / 2, size, size)
+        self._update_mosaic(rect)
+        undo.push(AddMarkCommand(self._scene, self._item))
         self._item = None
+
+    def _update_mosaic(self, rect):
+        bg = self._scene.views()[0].scene_background()
+        rect = rect.intersected(self._scene.sceneRect())
+        dpr = bg.devicePixelRatio()
+        physical = QRect(int(rect.x() * dpr), int(rect.y() * dpr),
+                         max(1, int(rect.width() * dpr)), max(1, int(rect.height() * dpr)))
+        region = bg.copy(physical)
+        w, h = region.width(), region.height()
+        strength = self._style.mosaic_strength
+        if self._style.mosaic_mode == "blur":
+            import numpy as np
+            image = region.toImage().convertToFormat(QImage.Format_RGBA8888)
+            pixels = np.frombuffer(image.constBits(), dtype=np.uint8).reshape(h, image.bytesPerLine())[:, :w * 4].reshape(h, w, 4)
+            # 积分图实现方框模糊，避免引入图像处理依赖。
+            radius = strength
+            padded = np.pad(pixels.astype(np.float64), ((radius, radius), (radius, radius), (0, 0)), mode="edge")
+            integral = np.pad(padded, ((1, 0), (1, 0), (0, 0))).cumsum(0).cumsum(1)
+            size = radius * 2 + 1
+            blurred = ((integral[size:, size:] - integral[:-size, size:] - integral[size:, :-size] + integral[:-size, :-size]) / (size * size)).astype(np.uint8)
+            mosaic = QPixmap.fromImage(QImage(blurred.data, w, h, w * 4, QImage.Format_RGBA8888).copy())
+        else:
+            small = region.scaled(max(1, w // strength), max(1, h // strength), Qt.IgnoreAspectRatio, Qt.FastTransformation)
+            mosaic = small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+        self._item.set_mosaic(mosaic, rect)
 
 
 class EraserTool(MarkTool):
@@ -231,15 +292,13 @@ class EraserTool(MarkTool):
 
     def on_release(self, pos, undo):
         if self._erased:
-            deleted_indices = [item.index for item in self._erased
-                               if isinstance(item, SerialMarkItem)]
             undo.push(RemoveMarkCommand(self._scene, self._erased))
-            renumber_serials_after_delete(self._scene, deleted_indices)
         self._erased = []
         self._erased_ids = set()
 
     def _erase(self, pos):
-        for item in self._scene.items(pos):
+        radius = self._style.eraser_size / 2
+        for item in self._scene.items(QRectF(pos.x() - radius, pos.y() - radius, radius * 2, radius * 2)):
             item_id = id(item)
             if isinstance(item, QGraphicsPixmapItem) or item_id in self._erased_ids:
                 continue
@@ -252,7 +311,7 @@ class MagnifierTool(MarkTool):
     def on_press(self, scene, pos, undo):
         self._scene = scene
         bg = scene.views()[0].scene_background()
-        self._item = MagnifierMarkItem(bg, pos)
+        self._item = MagnifierMarkItem(bg, pos, zoom=self._style.zoom)
         scene.addItem(self._item)
 
     def on_move(self, pos):
@@ -266,7 +325,7 @@ class MagnifierTool(MarkTool):
 class SerialTool(MarkTool):
     def on_press(self, scene, pos, undo):
         self._scene = scene
-        self._item = SerialMarkItem(self._style, _next_serial_index(scene))
+        self._item = SerialMarkItem(self._style, _next_serial_index(scene, self._style))
         self._item.setPos(pos)
         scene.addItem(self._item)
 
@@ -281,29 +340,21 @@ class SerialTool(MarkTool):
         item.set_index(value)
 
 
-def _next_serial_index(scene) -> int:
+def _next_serial_index(scene, style) -> int:
     """序号计数器。放 scene 属性上，不随工具实例重建而重置。"""
-    if SERIAL_GLOBAL_COUNTING:
-        global _serial_global_next
-        if _serial_global_next is None:
-            _serial_global_next = 0 if SERIAL_START_FROM_ZERO else 1
-        idx = _serial_global_next
-        _serial_global_next += 1
-        return idx
+    start = style.serial_start
+    if style.serial_global:
+        app = QApplication.instance()
+        nxt = app.property("serial_counter")
+        if nxt is None:
+            nxt = start
+        app.setProperty("serial_counter", int(nxt) + 1)
+        return int(nxt)
     nxt = scene.property("serial_next")
     if nxt is None:
-        nxt = 0 if SERIAL_START_FROM_ZERO else 1
+        nxt = start
     scene.setProperty("serial_next", int(nxt) + 1)
     return int(nxt)
-
-
-def renumber_serials_after_delete(scene, deleted_indices):
-    if not SERIAL_AUTO_RENUMBER:
-        return
-    for deleted in sorted(set(deleted_indices), reverse=True):
-        for item in scene.items():
-            if isinstance(item, SerialMarkItem) and item.index > deleted:
-                item.set_index(item.index - 1)
 
 
 # id -> 工具类。id 必须与 toolbar.py 的 TOOLS 一致。

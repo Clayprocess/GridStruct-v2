@@ -122,7 +122,7 @@ QToolButton[class="destructive"]:hover {{
 }}
 
 /* ===== 输入框 ===== */
-QLineEdit, QComboBox, QSpinBox {{
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
     background-color: {t['background']};
     border: 1px solid {t['input']};
     border-radius: {r}px;
@@ -133,9 +133,26 @@ QLineEdit, QComboBox, QSpinBox {{
 QLineEdit:focus, QComboBox:focus {{
     border: 1px solid {t['ring']};
 }}
+QGraphicsView {{
+    background-color: {t['background']};
+    color: {t['foreground']};
+    border: none;
+    padding: 0;
+}}
 QComboBox::drop-down {{
     border: none;
     width: 24px;
+}}
+QProgressBar {{
+    border: 1px solid {t['border']};
+    border-radius: {r}px;
+    background: {t['secondary']};
+    text-align: center;
+    min-height: 16px;
+}}
+QProgressBar::chunk {{
+    background: {t['primary']};
+    border-radius: {r}px;
 }}
 
 /* ===== 菜单 / 浮层 ===== */
@@ -293,14 +310,8 @@ QGroupBox::title {{
 
 
 def _system_is_dark() -> bool:
-    # Qt 6.5+：按调色板亮度判断
-    try:
-        from PySide6.QtGui import QGuiApplication
-        from PySide6.QtCore import Qt
-        hint = QGuiApplication.styleHints().colorScheme()
-        return hint == Qt.ColorScheme.Dark
-    except Exception:
-        return False
+    from PySide6.QtGui import QGuiApplication
+    return QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
 
 
 def apply_theme(app: QApplication, mode: str = "system") -> str:
@@ -311,4 +322,5 @@ def apply_theme(app: QApplication, mode: str = "system") -> str:
         raise ValueError(f"unknown theme mode: {mode}")
     t = T.THEMES[mode]
     app.setStyleSheet(build_qss(t))
+    app.setProperty("theme_mode", mode)
     return mode

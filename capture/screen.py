@@ -2,8 +2,9 @@
 # PerMonitorV2 思路：按每块显示器抓取，在逻辑坐标系下拼成一张大图。
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QPixmap, QPainter
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtGui import QPixmap, QPainter, QColor
+from PySide6.QtCore import QRect
+from styles import tokens as T
 
 
 def virtual_geometry() -> QRect:
@@ -23,7 +24,7 @@ def capture_virtual_desktop() -> QPixmap:
     size = vg.size()
     pm = QPixmap(int(size.width() * max_dpr), int(size.height() * max_dpr))
     pm.setDevicePixelRatio(max_dpr)
-    pm.fill(Qt.black)
+    pm.fill(QColor(*T.CAPTURE_BACKGROUND))
 
     with QPainter(pm) as p:
         for s in screens:

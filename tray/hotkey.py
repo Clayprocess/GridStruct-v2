@@ -52,7 +52,8 @@ class _HotkeyNativeFilter(QAbstractNativeEventFilter):
 
     def nativeEventFilter(self, eventType, message):
         if eventType == b"windows_generic_MSG" and _user32 is not None:
-            msg = ctypes.cast(message, ctypes.POINTER(wintypes.MSG)).contents
+            # PySide6 传入 VoidPtr，ctypes 需要先取得整数地址。
+            msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
             if msg.message == WM_HOTKEY:
                 self._manager._on_hotkey(int(msg.wParam))
                 return True, 0

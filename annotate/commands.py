@@ -16,6 +16,8 @@ class AddMarkCommand(QUndoCommand):
         if not self._in_scene:
             self._scene.addItem(self._item)
             self._in_scene = True
+        self._scene.clearSelection()
+        self._item.setSelected(True)
 
     def undo(self):
         self._scene.removeItem(self._item)
@@ -30,13 +32,67 @@ class RemoveMarkCommand(QUndoCommand):
         super().__init__("删除标注")
         self._scene = scene
         self._items = list(items)
+        from .items import SerialMarkItem
+        self._serials = {it: it.index for it in [*scene.items(), *items]
+                         if isinstance(it, SerialMarkItem)}
+        self._next = scene.property("serial_next")
+        self._auto = scene.property("serial_auto_renumber") is not False
 
     def redo(self):
         for it in self._items:
             if it.scene() is self._scene:
                 self._scene.removeItem(it)
+        deleted = [self._serials[it] for it in self._items if it in self._serials]
+        if self._auto:
+            for item, value in self._serials.items():
+                if item not in self._items:
+                    item.set_index(value - sum(index < value for index in deleted))
+            if self._next is not None:
+                self._scene.setProperty("serial_next", self._next - sum(index < self._next for index in deleted))
 
     def undo(self):
         for it in self._items:
             if it.scene() is not self._scene:
                 self._scene.addItem(it)
+        for it, index in self._serials.items():
+            it.set_index(index)
+        self._scene.setProperty("serial_next", self._next)
+
+
+class MoveMarksCommand(QUndoCommand):
+    def __init__(self, before, after):
+        super().__init__("移动标注")
+        self._before = before
+        self._after = after
+
+    def redo(self):
+        for item, pos in self._after.items():
+            item.setPos(pos)
+
+    def undo(self):
+        for item, pos in self._before.items():
+            item.setPos(pos)
+
+
+class SerialIndexCommand(QUndoCommand):
+    def __init__(self, item, value):
+        super().__init__("调整序号")
+        self._item, self._before, self._after = item, item.index, value
+
+    def redo(self):
+        self._item.set_index(self._after)
+
+    def undo(self):
+        self._item.set_index(self._before)
+
+
+class TextEditCommand(QUndoCommand):
+    def __init__(self, item, before, after):
+        super().__init__("编辑文字")
+        self._item, self._before, self._after = item, before, after
+
+    def redo(self):
+        self._item.setHtml(self._after)
+
+    def undo(self):
+        self._item.setHtml(self._before)

@@ -34,7 +34,7 @@ def icon(name: str) -> QIcon:
 
 
 def tinted_icon(name: str, color: str, size: int = 16) -> QIcon:
-    """按颜色渲染图标。color 为十六进制，如 '#09090b'。"""
+    """按 styles/tokens.py 提供的颜色渲染图标。"""
     key = ("tinted", name, color, size)
     if key not in _cache:
         svg = _load_svg(name).replace("currentColor", color)

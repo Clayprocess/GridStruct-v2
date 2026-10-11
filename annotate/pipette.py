@@ -4,6 +4,7 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PySide6.QtGui import QPixmap, QColor, QPainter, QPen
 from PySide6.QtCore import Qt, QPoint, Signal
+from styles import tokens as T
 
 
 class PipettePopup(QWidget):
@@ -17,14 +18,14 @@ class PipettePopup(QWidget):
             None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self._pm = pixmap
         self._dpr = dpr
-        self._color = QColor("#000000")
+        self._color = QColor(T.ANNOTATION_COLORS[1])
 
         self.setFixedSize(150, 190)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         self._view = QLabel()
         self._view.setFixedSize(134, 134)
-        self._hex = QLabel("#000000")
+        self._hex = QLabel(self._color.name().upper())
         self._hex.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._view)
         layout.addWidget(self._hex)
@@ -43,19 +44,23 @@ class PipettePopup(QWidget):
         x0 = max(0, min(img.width() - self.CELLS, px - half))
         y0 = max(0, min(img.height() - self.CELLS, py - half))
         crop = self._pm.copy(x0, y0, self.CELLS, self.CELLS)
+        crop.setDevicePixelRatio(1.0)
         big = crop.scaled(self.CELLS * self.ZOOM, self.CELLS * self.ZOOM,
                           Qt.KeepAspectRatio, Qt.FastTransformation)
         with QPainter(big) as p:
             # 中心十字标记
-            c = big.width() // 2
-            p.setPen(QPen(QColor("#ff0000"), 1))
-            p.drawLine(c - 6, c, c + 6, c)
-            p.drawLine(c, c - 6, c, c + 6)
+            cx = int((px - x0 + 0.5) * self.ZOOM)
+            cy = int((py - y0 + 0.5) * self.ZOOM)
+            p.setPen(QPen(QColor(T.ANNOTATION_COLORS[0]), 1))
+            p.drawRect(cx - 3, cy - 3, 6, 6)
         self._view.setPixmap(big)
         self._hex.setText(self._color.name().upper())
 
         # 跟随鼠标右下方
-        self.move(cursor_global + QPoint(16, 20))
+        from PySide6.QtGui import QGuiApplication
+        geo = QGuiApplication.screenAt(cursor_global).availableGeometry()
+        self.move(min(cursor_global.x() + 16, geo.right() - self.width()),
+                  min(cursor_global.y() + 20, geo.bottom() - self.height()))
         if not self.isVisible():
             self.show()
         return QColor(self._color)

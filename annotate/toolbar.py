@@ -18,10 +18,10 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)
 
 from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
-from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QToolButton, QWidget
+from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QToolButton, QWidget, QLabel
 
 from styles import tokens as T
-from ui.icons import tinted_icon
+from ui import floating_window_type, tinted_icon
 
 # 工具 id -> (中文名, Lucide 图标名)，顺序即工具条从左到右
 TOOLS: list[tuple[str, str, str]] = [
@@ -69,9 +69,10 @@ class FloatPanel(QWidget):
     def __init__(self, mode: str = "light", parent=None):
         super().__init__(
             parent,
-            Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint,
+            Qt.FramelessWindowHint | floating_window_type() | Qt.WindowStaysOnTopHint,
         )
         self.setObjectName("FloatPanel")
+        self.setWindowTitle("PixShot 标注工具条")
         # 圆角卡片需要透明背景，否则四角会被填成方形
         self.setAttribute(Qt.WA_TranslucentBackground)
 
@@ -80,7 +81,13 @@ class FloatPanel(QWidget):
         # 按钮 id -> 图标颜色在 tokens 中的键（确认/取消用前景色变体）
         self._icon_color_key: dict[str, str] = {}
 
-        layout = QHBoxLayout(self)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(0)
+        self._options = None
+        buttons = QWidget(self)
+        self._root_layout.addWidget(buttons)
+        layout = QHBoxLayout(buttons)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(2)
 
@@ -120,6 +127,21 @@ class FloatPanel(QWidget):
         cancel.clicked.connect(lambda: self.actionTriggered.emit(CANCEL_ID))
         layout.addWidget(cancel)
 
+        self._ocr_feedback = QWidget(self)
+        feedback_layout = QHBoxLayout(self._ocr_feedback)
+        feedback_layout.setContentsMargins(8, 4, 8, 4)
+        self._ocr_status = QLabel()
+        self._ocr_status.setWordWrap(True)
+        feedback_layout.addWidget(self._ocr_status, 1)
+        self._ocr_results = QToolButton()
+        self._ocr_results.setText("查看全文")
+        self._ocr_results.setProperty("class", "ghost")
+        self._ocr_results.setToolTip("打开可编辑的识别全文")
+        self._ocr_results.clicked.connect(lambda: self.actionTriggered.emit("ocr_results"))
+        feedback_layout.addWidget(self._ocr_results)
+        self._root_layout.addWidget(self._ocr_feedback)
+        self._ocr_feedback.hide()
+
         self.refresh_icons(mode)
 
     def paintEvent(self, _event) -> None:
@@ -140,8 +162,10 @@ class FloatPanel(QWidget):
     ) -> QToolButton:
         btn = QToolButton(self)
         btn.setToolTip(label)
+        btn.setAccessibleName(label)
         btn.setCheckable(checkable)
         btn.setAutoRaise(True)
+        btn.setProperty("class", "ghost")
         btn.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
         self._buttons[btn_id] = btn
         self._icon_color_key.setdefault(btn_id, "foreground")
@@ -163,6 +187,12 @@ class FloatPanel(QWidget):
         return _END_BUTTONS[btn_id][1]
 
     # ---- 对外接口 ----
+
+    def set_ocr_status(self, message: str, has_results: bool):
+        """识别文字层本身透明，持续反馈让用户知道结果已可操作。"""
+        self._ocr_status.setText(message)
+        self._ocr_results.setVisible(has_results)
+        self._ocr_feedback.show()
 
     def refresh_icons(self, mode: str) -> None:
         """按主题重染全部图标。mode: 'light' | 'dark'。"""
@@ -196,6 +226,18 @@ class FloatPanel(QWidget):
                 return tool_id
         return None
 
+    def clear_selection(self):
+        """画布进入选择模式时清除工具高亮，不再触发绘制工具。"""
+        self._tool_group.setExclusive(False)
+        for button in self._tool_group.buttons():
+            button.setChecked(False)
+        self._tool_group.setExclusive(True)
+
+    def set_options_widget(self, widget):
+        """工具配置跟随浮动面板，避免挤占截图画布。"""
+        self._options = widget
+        self._root_layout.addWidget(widget)
+
     def set_position_near(self, rect: QRect) -> None:
         """把工具条放到选区附近：下方优先，放不下放上方；始终不超出屏幕。"""
         size = self.sizeHint()
@@ -220,7 +262,7 @@ if __name__ == "__main__":
 
     from PySide6.QtWidgets import QApplication
 
-    from styles.theme import apply_theme
+    from styles import apply_theme
 
     app = QApplication(sys.argv)
     mode = "dark" if "--dark" in sys.argv else "light"

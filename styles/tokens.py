@@ -69,3 +69,9 @@ FONT_MD = 13
 FONT_LG = 15
 
 THEMES = {"light": LIGHT, "dark": DARK}
+
+ANNOTATION_COLORS = ["#ef4444", "#18181b", "#ffffff", "#3b82f6", "#22c55e", "#eab308"]
+CAPTURE_MASK = (0, 0, 0, 110)
+CAPTURE_GUIDE = (255, 255, 255, 140)
+CAPTURE_TIP = (9, 9, 11, 230)
+CAPTURE_BACKGROUND = (0, 0, 0)

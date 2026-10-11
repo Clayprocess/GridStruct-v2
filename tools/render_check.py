@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
-from styles.theme import apply_theme
+from styles import apply_theme
 from main import build_demo
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

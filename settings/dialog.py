@@ -2,17 +2,20 @@
 # organization/app 名按任务约定为 GridStruct/GridStruct。
 
 import sys
+from pathlib import Path
+from subprocess import list2cmdline
 
 from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
     QComboBox, QCheckBox, QLineEdit, QPushButton, QFileDialog,
-    QDialogButtonBox, QWidget, QApplication,
+    QDialogButtonBox, QWidget, QApplication, QMessageBox,
 )
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 
-from ui.dialogs import BaseDialog
-from styles.theme import apply_theme
-from tray.hotkey import GlobalHotkey
+from ui import BaseDialog
+from styles import apply_theme
+from tray import GlobalHotkey
+from .storage import get_settings
 
 _ORG, _APP = "GridStruct", "GridStruct"
 _VERSION = "0.1.0"
@@ -33,26 +36,36 @@ def _read_autostart() -> bool:
 
 
 def _write_autostart(enabled: bool):
-    """写开机自启。失败静默跳过（任务要求不报错）。"""
+    """写入可从任意工作目录启动的命令，失败交由设置窗口报告。"""
     import winreg
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY,
-                             0, winreg.KEY_SET_VALUE) as k:
-            if enabled:
-                winreg.SetValueEx(k, "PixShot", 0, winreg.REG_SZ,
-                                  sys.executable)
-            else:
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_KEY,
+                           0, winreg.KEY_SET_VALUE) as k:
+        if enabled:
+            winreg.SetValueEx(k, "PixShot", 0, winreg.REG_SZ, _autostart_command())
+        else:
+            try:
                 winreg.DeleteValue(k, "PixShot")
-    except OSError:
-        pass
+            except FileNotFoundError:
+                pass  # 已关闭时再次保存，无需创建值。
+
+
+def _autostart_command() -> str:
+    executable = Path(sys.executable)
+    if getattr(sys, "frozen", False):
+        return list2cmdline([str(executable)])
+    pythonw = executable.with_name("pythonw.exe")
+    return list2cmdline([str(pythonw), "-X", "utf8", str(Path(__file__).resolve().parents[1] / "main.py")])
 
 
 class SettingsDialog(BaseDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 模态设置会禁用贴图输入，必须位于已有置顶贴图之上。
+        self.setWindowFlag(Qt.WindowStaysOnTopHint)
         self.setWindowTitle("设置")
         self.resize(420, 360)
-        self._s = QSettings(_ORG, _APP)
+        self._s = get_settings()
+        self._original_theme = self._s.value("theme", "system")
 
         tabs = QTabWidget()
         tabs.addTab(self._general_tab(), "通用")
@@ -98,7 +111,10 @@ class SettingsDialog(BaseDialog):
     def _on_theme_changed(self, _idx: int):
         mode = self._theme.currentData()
         apply_theme(QApplication.instance(), mode)
-        self._s.setValue("theme", mode)
+
+    def reject(self):
+        apply_theme(QApplication.instance(), self._original_theme)
+        super().reject()
 
     # ---------- 截图 ----------
 
@@ -119,6 +135,18 @@ class SettingsDialog(BaseDialog):
         self._img_fmt.addItems(["png", "jpg"])
         self._img_fmt.setCurrentText(self._s.value("image_format", "png"))
         form.addRow("图片格式", self._img_fmt)
+        self._snap_only = QCheckBox("仅吸附窗口（关闭控件级吸附）")
+        self._snap_only.setChecked(self._s.value("snap_only_window", False, type=bool))
+        form.addRow("", self._snap_only)
+        self._guides = QCheckBox("显示十字辅助线")
+        self._guides.setChecked(self._s.value("capture_guides", True, type=bool))
+        form.addRow("", self._guides)
+        self._same_color = QCheckBox("所有标注工具使用同一颜色")
+        self._same_color.setChecked(self._s.value("same_tool_color", False, type=bool))
+        form.addRow("", self._same_color)
+        self._ocr_copy = QCheckBox("OCR 完成后直接复制，不显示复核窗口")
+        self._ocr_copy.setChecked(self._s.value("ocr/direct_copy", False, type=bool))
+        form.addRow("", self._ocr_copy)
         return w
 
     def _browse_dir(self):
@@ -143,17 +171,35 @@ class SettingsDialog(BaseDialog):
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.addWidget(QLabel("PixShot（GridStruct v2）"))
-        layout.addWidget(QLabel(f"版本 {_VERSION}"))
+        layout.addWidget(QLabel(f"版本 {_VERSION} · Windows 便携版"))
+        links = QLabel('<a href="https://github.com/Clayprocess/GridStruct-v2#readme">使用说明</a> · '
+                       '<a href="https://github.com/Clayprocess/GridStruct-v2/issues">反馈问题</a>')
+        links.setOpenExternalLinks(True)
+        layout.addWidget(links)
+        layout.addWidget(QLabel("截图、贴图与中英文 OCR 均在本机处理。"))
         layout.addStretch()
         return w
 
     # ---------- 保存 ----------
 
     def _save(self):
+        if sys.platform == "win32":
+            try:
+                _write_autostart(self._autostart.isChecked())
+            except OSError as exc:
+                QMessageBox.warning(self, "无法保存设置", f"开机自启设置失败：{exc}")
+                return
         self._s.setValue("theme", self._theme.currentData())
         self._s.setValue("screenshot_dir", self._shot_dir.text())
         self._s.setValue("image_format", self._img_fmt.currentText())
+        self._s.setValue("snap_only_window", self._snap_only.isChecked())
+        self._s.setValue("capture_guides", self._guides.isChecked())
+        self._s.setValue("same_tool_color", self._same_color.isChecked())
+        self._s.setValue("ocr/direct_copy", self._ocr_copy.isChecked())
         if sys.platform == "win32":
-            _write_autostart(self._autostart.isChecked())
             self._s.setValue("autostart", self._autostart.isChecked())
+        self._s.sync()
+        if self._s.status() != QSettings.NoError:
+            QMessageBox.warning(self, "无法保存设置", "配置目录不可写，请将应用解压到有写入权限的目录。")
+            return
         self.accept()
