@@ -68,7 +68,7 @@ ACTIONS: list[tuple[str, str, str]] = [
     ("copy", "复制", "copy"),
     ("pin", "贴图", "pin"),
     ("ocr", "文字识别", "scan-text"),
-    ("longshot", "长截图", "scan-text"),
+    ("longshot", "长截图", "unfold-vertical"),
 ]
 
 CONFIRM_ID = "confirm"
