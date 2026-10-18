@@ -105,7 +105,7 @@ OCR 后续补齐也已实机验证：截图与图片贴图默认保留原图文�
 
 | 脚本 | 用途与限制 |
 |---|---|
-| `tools/smoke_check.py` | 离屏合成样本回归，覆盖标注、OCR、拼接、设置和生命周期等；本轮已适配当前接口并编译，未重新运行离屏验收 |
+| `tools/smoke_check.py` | 离屏合成样本回归，覆盖标注、OCR、拼接、设置和生命周期等；2026-10-18 在 master `d6f0d5b` 上离屏（Linux，`QT_QPA_PLATFORM=offscreen`）重跑 21/21 通过，未覆盖真实桌面交互 |
 | `tools/windows_smoke.py` | 会显示合成窗口，检查 Windows 吸附、热键、滚轮钩子及捕获排除；不能代替真实应用滚动与交互验收 |
 | `tools/build_portable.py --check` | 构建依赖与资源预检；不生成包、不启动应用 |
 
