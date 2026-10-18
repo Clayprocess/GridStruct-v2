@@ -1,6 +1,6 @@
 """当前工具的二级配置：单行紧凑条，高频项平铺，开关类收进"更多"菜单。"""
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QRectF, QSize
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QWidget, QHBoxLayout, QLabel, QComboBox, QSpinBox, QToolButton,
@@ -20,20 +20,21 @@ def _theme():
     return T.THEMES[QApplication.instance().property("theme_mode") or "light"]
 
 
-def _swatch_icon(color, dashed=False):
-    # 色块是数据（当前颜色）而非图标；白色色块需要描边才能在浅色面板上看见。
+def _swatch_icon(color, current=False):
+    # 色块是数据（颜色值）而非图标。圆形是预设色；方形是"当前颜色"，点开自定义取色，
+    # 同 PixPin 调色板里那块最大的当前色。白色色块需要描边才能在浅色面板上看见。
     pm = QPixmap(QSize(_SWATCH, _SWATCH) * 2)
     pm.setDevicePixelRatio(2)
     pm.fill(Qt.transparent)
     with QPainter(pm) as p:
         p.setRenderHint(QPainter.Antialiasing)
         # 深色主题的 border 与面板几乎同色，黑色色块会消失，描边改用更亮一级的灰。
-        pen = QPen(QColor(_theme()["muted_foreground" if dashed else "secondary_hover"]), 1)
-        if dashed:
-            pen.setStyle(Qt.DashLine)
-        p.setPen(pen)
-        p.setBrush(Qt.NoBrush if dashed else QColor(color))
-        p.drawEllipse(1, 1, _SWATCH - 2, _SWATCH - 2)
+        p.setPen(QPen(QColor(_theme()["secondary_hover"]), 1))
+        p.setBrush(QColor(color))
+        if current:
+            p.drawRoundedRect(QRectF(0.5, 0.5, _SWATCH - 1, _SWATCH - 1), T.RADIUS_SM, T.RADIUS_SM)
+        else:
+            p.drawEllipse(QRectF(2, 2, _SWATCH - 4, _SWATCH - 4))
     return QIcon(pm)
 
 
@@ -169,6 +170,8 @@ class ToolOptions(QWidget):
 
     def _colors(self, key):
         row = self._row()
+        current = self._color_button(key, row)
+        current.setToolTip("当前颜色，点击自定义")
         group = QButtonGroup(row)
         buttons = {}
         for name, color in zip(_COLOR_NAMES, T.ANNOTATION_COLORS):
@@ -177,16 +180,13 @@ class ToolOptions(QWidget):
             button.clicked.connect(lambda _=False, c=color: self._canvas.update_style(key, QColor(c)))
             group.addButton(button)
             buttons[color] = button
-        custom = self._swatch_button(row, "自定义颜色…")
-        custom.clicked.connect(lambda: self._choose_color(key))
-        group.addButton(custom)
 
         def refresh(value):
-            name = value.name()
-            preset = buttons.get(name)
-            # 自定义按钮在选中时显示当前色，未选中时是虚线空圈，提示"可以加颜色"。
-            custom.setIcon(_swatch_icon(name) if preset is None else _swatch_icon(None, dashed=True))
-            (preset or custom).setChecked(True)
+            # 自定义色不在预设里时，预设都不选中，只看左侧当前色。
+            group.setExclusive(False)
+            for color, button in buttons.items():
+                button.setChecked(color == value.name())
+            group.setExclusive(True)
 
         self._bind(key, row, refresh)
 
@@ -199,14 +199,15 @@ class ToolOptions(QWidget):
         row.layout().addWidget(button)
         return button
 
-    def _color_button(self, key):
+    def _color_button(self, key, row=None):
         button = QToolButton()
         button.setObjectName("Swatch")
         button.setToolTip("选择颜色")
         button.setIconSize(QSize(_SWATCH, _SWATCH))
         button.clicked.connect(lambda: self._choose_color(key))
-        self._layout.addWidget(button)
-        self._bind(key, button, lambda value: button.setIcon(_swatch_icon(value.name())))
+        (row.layout() if row is not None else self._layout).addWidget(button)
+        self._bind(key, button, lambda value: button.setIcon(_swatch_icon(value.name(), current=True)))
+        return button
 
     def _width(self):
         row = self._row()
@@ -347,9 +348,6 @@ class ToolOptions(QWidget):
         color = QColorDialog.getColor(getattr(self._canvas.style, key), self, "选择颜色")
         if color.isValid():
             self._canvas.update_style(key, color)
-        else:
-            # 点自定义时 Qt 已先勾上该按钮，取消对话框要按实际颜色恢复选中态。
-            self._sync(self._tool_id)
 
     def _sync(self, tool_id):
         if tool_id != self._tool_id:

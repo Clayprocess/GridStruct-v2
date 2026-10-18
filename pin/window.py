@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QGraphicsTextItem, QFrame,
 )
 from PySide6.QtGui import QPixmap, QGuiApplication, QFont, QPainter, QColor, QPen
-from PySide6.QtCore import Qt, QPoint, QRectF, QSize, Signal, QPropertyAnimation, QEasingCurve, QTimer
+from PySide6.QtCore import Qt, QEvent, QPoint, QRectF, QSize, Signal, QPropertyAnimation, QEasingCurve, QTimer
 
 from styles import tokens as T
 from ui import floating_window_type, MessageDialog, tinted_icon, show_message
@@ -103,8 +103,22 @@ class _PinBase(QWidget):
         else:
             self._hud_timer.stop()
 
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.ActivationChange:
+            self.update()
+
+    def _state_color(self):
+        # 参照 PixPin：阴影颜色表达贴图状态，多张贴图并排时一眼看出哪张在操作、哪张已穿透。
+        if self._click_through:
+            return QColor(T.PIN_STATE_COLORS["click_through"])
+        if self.isActiveWindow():
+            return QColor(T.PIN_STATE_COLORS["active"])
+        return None
+
     def paintEvent(self, _event):
         t = _theme()
+        state = self._state_color()
         card = QRectF(self.rect()).adjusted(_SHADOW + 0.5, _SHADOW + 0.5, -_SHADOW - 0.5, -_SHADOW - 0.5)
         with QPainter(self) as p:
             p.setRenderHint(QPainter.Antialiasing)
@@ -112,11 +126,14 @@ class _PinBase(QWidget):
             # 由外向内叠加半透明圆角矩形，近似柔和投影，避免引入图形效果的离屏开销。
             for inset, alpha in enumerate(T.PIN_SHADOW_ALPHAS):
                 spread = _SHADOW - inset
-                p.setBrush(QColor(0, 0, 0, alpha))
+                color = QColor(state) if state is not None else QColor(0, 0, 0)
+                # 彩色光晕比黑影淡，需要加倍 alpha 才看得出。
+                color.setAlpha(alpha * 2 if state is not None else alpha)
+                p.setBrush(color)
                 p.drawRoundedRect(card.adjusted(-spread, -spread, spread, spread),
                                   self._radius + spread, self._radius + spread)
             p.setBrush(QColor(t["popover"]))
-            p.setPen(QPen(QColor(t["border"]), 1))
+            p.setPen(QPen(state if state is not None else QColor(t["border"]), 1))
             p.drawRoundedRect(card, self._radius, self._radius)
 
     def _resize_content(self):
@@ -174,6 +191,7 @@ class _PinBase(QWidget):
         self.setWindowOpacity(current)
         self._animate_opacity(self._opacity * (0.5 if enabled else 1.0))
         self._show_hud("鼠标穿透已开启，从托盘菜单退出" if enabled else "鼠标穿透已关闭", T.PIN_HUD_MS * 2)
+        self.update()
         self.stateChanged.emit()
 
     def _animate_opacity(self, target):
