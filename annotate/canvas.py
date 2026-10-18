@@ -203,8 +203,12 @@ class AnnotationCanvas(QGraphicsView):
         if key in _REMEMBERED_STYLE and self.options_tool_id:
             stored = value.name(QColor.HexArgb) if isinstance(value, QColor) else value
             self._settings.setValue(f"annotation/{self.options_tool_id}/{key}", stored)
-        if key == "color" and self._settings.value("same_tool_color", False, type=bool):
+        # 同 PixPin：默认所有工具共用一个颜色，高亮单独记色，因为它要的是浅色。
+        if (key == "color" and self.options_tool_id != "highlight"
+                and self._settings.value("same_tool_color", True, type=bool)):
             for name, style in self.styles.items():
+                if name == "highlight":
+                    continue
                 style.color = QColor(value)
                 self._settings.setValue(f"annotation/{name}/color", value.name(QColor.HexArgb))
         if key == "serial_start":
@@ -306,8 +310,9 @@ class AnnotationCanvas(QGraphicsView):
         super().leaveEvent(event)
 
     def event(self, event):
-        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Tab and self._pipette is not None:
-            # QWidget 默认会先用 Tab 移焦，取色模式必须在此前截获。
+        if (event.type() == QEvent.KeyPress and event.key() == Qt.Key_Shift
+                and self._pipette is not None and not event.isAutoRepeat()):
+            # 同截图阶段：取色时按 Shift 切换颜色格式。
             self._pipette.cycle_color_format()
             event.accept()
             return True

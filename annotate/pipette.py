@@ -6,7 +6,7 @@ from PySide6.QtGui import QPixmap, QColor, QPainter, QPen
 from PySide6.QtCore import Qt, QPoint
 from styles import tokens as T
 from settings import get_settings
-from .color_dialog import format_color
+from .color_dialog import COLOR_FORMATS, format_color
 
 
 class PipettePopup(QWidget):
@@ -27,7 +27,7 @@ class PipettePopup(QWidget):
         self._cells = 11 if grid else self.CELLS
         self._zoom = 8 if grid else self.ZOOM
         self._color = QColor(T.ANNOTATION_COLORS[1])
-        self._format = get_settings().value("color_format", "Hex")
+        self._format = get_settings().value("color_format", COLOR_FORMATS[0])
 
         self.setFixedSize(150, 190)
         layout = QVBoxLayout(self)
@@ -88,12 +88,15 @@ class PipettePopup(QWidget):
     def color(self) -> QColor:
         return QColor(self._color)
 
+    @property
+    def color_text(self) -> str:
+        return format_color(self._color, self._format)
+
     def set_color_format(self, color_format):
         self._format = color_format
         self._hex.setText(format_color(self._color, color_format))
 
     def cycle_color_format(self):
-        formats = ("Hex", "RGB", "HSV")
-        self.set_color_format(formats[(formats.index(self._format) + 1) % len(formats)])
+        self.set_color_format(COLOR_FORMATS[(COLOR_FORMATS.index(self._format) + 1) % len(COLOR_FORMATS)])
         get_settings().setValue("color_format", self._format)
         return self._format

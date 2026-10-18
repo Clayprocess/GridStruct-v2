@@ -456,7 +456,7 @@ QToolButton#Segment:checked {{
 QToolButton#MoreOptions {{
     padding: 5px;
 }}
-QToolButton#MoreOptions::menu-indicator {{
+QToolButton#MoreOptions::menu-indicator, QToolButton#MoreTools::menu-indicator {{
     image: none;
     width: 0;
 }}
@@ -469,9 +469,17 @@ QMenu::indicator:checked {{
     image: url({_icon_url("check", t["popover_foreground"])});
 }}
 
+/* 截图选区的宽高输入框（capture/size_editor.py） */
+QFrame#SizeEditor {{
+    background-color: {t['popover']};
+    color: {t['popover_foreground']};
+    border: 1px solid {t['border']};
+    border-radius: {T.RADIUS_LG}px;
+}}
+
 /* ===== 贴图（pin/window.py）：卡片本体由 paintEvent 画，这里只管浮动提示 ===== */
 /* 提示浮在任意截图内容上，明暗主题都用深底浅字，与截图尺寸提示同源。 */
-QLabel#PinHud {{
+QLabel#PinHud, QLabel#Toast {{
     background-color: rgba{T.CAPTURE_TIP};
     color: {T.DARK['foreground']};
     border-radius: 12px;

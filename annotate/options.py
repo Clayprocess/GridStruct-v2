@@ -83,6 +83,9 @@ class ToolOptions(QWidget):
         if not tool_id:
             return
         more = []
+        if tool_id in ("rect", "ellipse") and self._canvas.tool_id == tool_id:
+            self._geo_shape(tool_id)
+            self._separator()
         if tool_id not in ("mosaic", "eraser", "magnifier"):
             self._colors("color")
         if tool_id in ("rect", "ellipse", "arrow", "line", "polyline", "pencil", "highlight"):
@@ -269,6 +272,25 @@ class ToolOptions(QWidget):
             buttons[value] = button
         self._layout.addWidget(frame)
         self._bind(key, frame, lambda value: buttons[value].setChecked(True))
+
+    def _geo_shape(self, tool_id):
+        # 同 PixPin：矩形和椭圆是同一个几何工具，形状在这里切换；只在画新图形时出现，选中已有图形时不改它的形状。
+        frame = QFrame()
+        frame.setObjectName("SegmentGroup")
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(1, 1, 1, 1)
+        row.setSpacing(2)
+        group = QButtonGroup(frame)
+        for label, shape in (("矩形", "rect"), ("椭圆", "ellipse")):
+            button = QToolButton()
+            button.setObjectName("Segment")
+            button.setText(label)
+            button.setCheckable(True)
+            button.setChecked(shape == tool_id)
+            button.clicked.connect(lambda _=False, s=shape: self._canvas.set_tool_by_id(s))
+            group.addButton(button)
+            row.addWidget(button)
+        self._layout.addWidget(frame)
 
     def _combo(self, key, title, values):
         if title:

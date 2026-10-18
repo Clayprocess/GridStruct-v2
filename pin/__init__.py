@@ -6,10 +6,10 @@ import re
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPixmap
-from PySide6.QtCore import QTimer, QSaveFile, QIODevice
+from PySide6.QtCore import QPoint, QTimer, QSaveFile, QIODevice
 
 from settings import data_directory
-from ui import show_message
+from ui import show_message, show_toast
 from .window import PinWindow, PinTextWindow, _ConfirmDialog
 
 __all__ = [
@@ -51,9 +51,38 @@ def _register(window, pos=None):
     _open_pins.append(window)
     window.stateChanged.connect(_schedule_save)
     window.closed.connect(_closed)
+    if window.kind == "image":
+        window.annotateRequested.connect(_annotate)
     window.show()
     _schedule_save()
     return window
+
+
+def _annotate(window):
+    """同 PixPin 在贴图上标注：确认后用结果替换这张贴图（并复制，与截图标注一致），取消则原样恢复。"""
+    from annotate import AnnotationWindow
+    mode = QApplication.instance().property("theme_mode") or "light"
+    # 标注窗口按原图 100% 打开，放在贴图内容的位置上。
+    annotation = AnnotationWindow(window._base, window._content.mapToGlobal(QPoint(0, 0)), mode)
+    annotation.finished.connect(lambda pixmap: _replace_pin(window, pixmap))
+    annotation.cancelled.connect(window.show)
+    # 标注窗口没有父对象，必须有人持有 Python 引用，否则会被回收。
+    window.annotation = annotation
+    window.hide()
+    annotation.show()
+    annotation.raise_()
+    annotation.activateWindow()
+
+
+def _replace_pin(window, pixmap):
+    QApplication.clipboard().setPixmap(pixmap)
+    replacement = PinWindow(pixmap)
+    # 换新 id 存新图，位置、缩放、透明度、置顶和锁定沿用原贴图。
+    replacement.restore_state({**window.state(), "id": replacement.pin_id})
+    _register(replacement)
+    window._allow_close = True
+    window.close()
+    show_toast("标注已应用到贴图，并已复制")
 
 
 def show_pin(pixmap, pos=None, document=None):

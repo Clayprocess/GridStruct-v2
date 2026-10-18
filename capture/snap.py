@@ -66,6 +66,9 @@ class RegionDetector(QObject):
         self._windows = []
         self._last_rect = QRect()
         self._last = None
+        # 滚轮选中的层级：0 是鼠标下最小的元素，越大越接近整个窗口。
+        self._chain = []
+        self._level = 0
         self._window_api = _win32_api() if _IS_WIN else None
         self._snapshot_timer = QTimer(self)
         self._snapshot_timer.timeout.connect(self._refresh_snapshot)
@@ -90,6 +93,7 @@ class RegionDetector(QObject):
         screen = manager.screen_at(pos)
         if screen is None:
             self._discard_queued()
+            self._chain = []
             self._publish(QRect())
             return
         point = manager.logical_to_physical(pos, screen)
@@ -97,16 +101,18 @@ class RegionDetector(QObject):
         hit = self._lookup(x, y)
         if hit is None:
             self._discard_queued()
+            self._chain = []
             self._publish(QRect())
             return
         hwnd, window_rect = hit
         key = (hwnd, window_rect.getRect())
-        rect = window_rect
-        if not self._only_window:
-            for candidate in self._cache.get(key, ()):
-                if candidate.contains(x, y):
-                    rect = candidate
-                    break
+        chain = [] if self._only_window else [c for c in self._cache.get(key, ()) if c.contains(x, y) and c != window_rect]
+        chain.append(window_rect)
+        # 换到另一个元素上时回到最内层，在同一元素内移动保持滚轮选的层级。
+        if not self._chain or chain[0] != self._chain[0]:
+            self._level = 0
+        self._chain = chain
+        rect = chain[min(self._level, len(chain) - 1)]
         self._publish(manager.physical_rect_to_logical(rect))
         # 冻结截图内按窗口收集一次控件，按钮之间移动也无需再跨 COM。
         if self._queued is not None and self._requests[self._queued[0]][0] != key:
@@ -170,6 +176,13 @@ class RegionDetector(QObject):
             self._dispatch(*request)
         if not self._stopping and self._last is not None:
             self.detect(self._last)
+
+    def step_level(self, delta):
+        """delta>0 选更外层的父元素，<0 回到更内层的子元素。"""
+        if self._last is None or not self._chain:
+            return
+        self._level = max(0, min(len(self._chain) - 1, self._level + delta))
+        self.detect(self._last)
 
     def setIsOnlyWindow(self, enabled: bool):
         self._only_window = enabled

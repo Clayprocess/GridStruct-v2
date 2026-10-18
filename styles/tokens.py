@@ -90,3 +90,8 @@ PIN_SHADOW_ALPHAS = (3, 5, 8, 11, 15, 20)
 PIN_STATE_COLORS = {"active": "#3b82f6", "locked": "#f97316", "click_through": "#22c55e"}
 # 贴图缩放/不透明度提示停留时长。
 PIN_HUD_MS = 1200
+# 同 PixPin 默认：Ctrl+滚轮每格 5%；鼠标穿透时不透明度最高 50%。
+PIN_OPACITY_STEP = 0.05
+PIN_CLICK_THROUGH_OPACITY = 0.5
+# 复制、保存等结果提示的停留时长。
+TOAST_MS = 1600

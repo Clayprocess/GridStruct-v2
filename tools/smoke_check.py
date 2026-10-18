@@ -1,6 +1,7 @@
 """离屏功能回归：python -X utf8 tools/smoke_check.py。使用合成图片，不读取桌面或用户配置。"""
 import os
 import sys
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -424,7 +425,7 @@ def saved_settings():
         with patch("export.image.get_settings", return_value=s), \
              patch("export.image.QFileDialog.getSaveFileName", return_value=(destination, "JPG (*.jpg)")) as choose:
             w.trigger_action("save")
-            assert choose.call_args.args[2].endswith("GridStruct-V2.jpg")
+            assert re.search(r"GridStruct-V2_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.jpg$", choose.call_args.args[2])
             assert not QImage(destination).isNull()
         w.close()
         w.deleteLater()
@@ -452,7 +453,9 @@ def canvas_mouse_events():
     from annotate.color_dialog import ColorDialog
     with patch.object(ColorDialog, "exec", return_value=ColorDialog.Accepted):
         QTest.mouseClick(c.viewport(), Qt.LeftButton, pos=c.mapFromScene(QPointF(400, 80)))
-    assert app.clipboard().text() == T.LIGHT["background"].upper()
+    # 取色默认格式同 PixPin 为 RGB。
+    background = QColor(T.LIGHT["background"])
+    assert app.clipboard().text() == f"rgb({background.red()}, {background.green()}, {background.blue()})"
     assert not c.pipette_active
     count = len(_open_pins)
     w._on_action("pin")
