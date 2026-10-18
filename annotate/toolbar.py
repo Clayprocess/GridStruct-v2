@@ -39,8 +39,20 @@ TOOLS: list[tuple[str, str, str]] = [
     ("magnifier", "放大镜", "zoom-in"),
 ]
 
-# 逆向材料未确认逐工具映射，采用不占用 O/Q/F 识别快捷键的本地键位。
-TOOL_SHORTCUTS = dict(zip("REAPLBTNMHZC", [tool[0] for tool in TOOLS]))
+# 同 PixPin 的 Shift+1～9 顺序；PixPin 把矩形和椭圆合成一个几何工具占 1 号位，这里先给矩形。
+DIGIT_TOOLS = ("rect", "polyline", "arrow", "serial", "pencil", "highlight", "mosaic", "text", "eraser")
+
+
+def shortcut_tool(event):
+    """Shift+数字对应的工具 id，没有则返回 None。"""
+    if event.modifiers() != Qt.ShiftModifier:
+        return None
+    # Shift 让数字键产生的字符随键盘布局变化；Windows 虚拟键码 0x31～0x39 与布局无关，优先用它。
+    vk, key = event.nativeVirtualKey(), event.key()
+    if 0x31 <= vk <= 0x39:
+        return DIGIT_TOOLS[vk - 0x31]
+    index = "123456789!@#$%^&*(".find(chr(key)) if key < 0x110000 else -1
+    return DIGIT_TOOLS[index % 9] if index >= 0 else None
 
 # 操作 id -> (中文名, Lucide 图标名)
 ACTIONS: list[tuple[str, str, str]] = [
@@ -188,10 +200,10 @@ class FloatPanel(QWidget):
         self, btn_id: str, label: str, icon_name: str, checkable: bool = False
     ) -> QToolButton:
         btn = QToolButton(self)
-        shortcut = next((f"Shift+{key}" for key, tool in TOOL_SHORTCUTS.items() if tool == btn_id),
-                        {"undo": "Ctrl+Z", "redo": "Ctrl+Y", "save": "Ctrl+S",
-                         "copy": "Ctrl+C", "ocr": "Shift+O", "pipette": "Tab 切换颜色格式",
-                         "longshot": "Ctrl+Alt+L", "confirm": "Enter", "cancel": "Esc"}.get(btn_id, ""))
+        shortcut = (f"Shift+{DIGIT_TOOLS.index(btn_id) + 1}" if btn_id in DIGIT_TOOLS else
+                    {"undo": "Ctrl+Z", "redo": "Ctrl+Y", "save": "Ctrl+S",
+                     "copy": "Ctrl+C", "ocr": "Shift+O", "pipette": "Tab 切换颜色格式",
+                     "longshot": "Ctrl+Alt+L", "confirm": "Enter", "cancel": "Esc"}.get(btn_id, ""))
         btn.setToolTip(f"{label} ({shortcut})" if shortcut else label)
         btn.setAccessibleName(label)
         btn.setCheckable(checkable)

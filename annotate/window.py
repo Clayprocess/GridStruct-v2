@@ -5,7 +5,7 @@ from PySide6.QtGui import QPixmap, QColor, QKeySequence
 from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QPropertyAnimation, QEasingCurve, QEvent
 
 from .canvas import AnnotationCanvas
-from .toolbar import FloatPanel, TOOL_SHORTCUTS
+from .toolbar import FloatPanel, shortcut_tool
 from .options import ToolOptions
 from .color_dialog import ColorDialog
 from ui import floating_window_type, ask_confirmation
@@ -222,9 +222,9 @@ class AnnotationWindow(QWidget):
                 and (obj is self._canvas or obj is self._canvas.viewport())):
             return False
         # 面板控件会先消化字母和撤销，工具命令必须在 QWidget 的局部编辑之前分发。
-        if (event.modifiers() == Qt.ShiftModifier and Qt.Key_A <= event.key() <= Qt.Key_Z
-                and chr(event.key()) in TOOL_SHORTCUTS):
-            self.select_tool(TOOL_SHORTCUTS[chr(event.key())])
+        tool = shortcut_tool(event)
+        if tool:
+            self.select_tool(tool)
         elif event.matches(QKeySequence.Undo):
             self._canvas.undo()
         elif event.matches(QKeySequence.Redo):
@@ -245,8 +245,8 @@ class AnnotationWindow(QWidget):
             self._on_action("save" if key == Qt.Key_S else "copy")
         elif modifiers & Qt.ShiftModifier and key == Qt.Key_O:
             self._on_action("ocr")
-        elif modifiers == Qt.ShiftModifier and key < 0x110000 and chr(key) in TOOL_SHORTCUTS:
-            self.select_tool(TOOL_SHORTCUTS[chr(key)])
+        elif shortcut_tool(event):
+            self.select_tool(shortcut_tool(event))
         elif key in (Qt.Key_Return, Qt.Key_Enter):
             self._finish()
         else:
