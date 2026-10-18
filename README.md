@@ -57,6 +57,8 @@ ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使
 
 构建还会在独立进程加载包内 Qt 原生 DLL，避免仅有文件但不能导入的情况；通过后记录 `native_dependency_load_verified=true`。已修复构建环境误收第三方 ICU 导致 QtWidgets 无法导入的问题，构建进程的依赖搜索路径与用户系统配置隔离。
 
+发布走 GitHub Releases：先把 `settings/dialog.py` 的 `_VERSION` 改成新版本并合入 master，再推送同名附注标签（如 `git tag -a v0.1.0` 后 `git push origin v0.1.0`）。`.github/workflows/release.yml` 在 Windows runner 上执行上面的构建，把 `GridStruct-V2-<标签>-portable.zip` 挂到 Release，发布说明取自标签正文。标签与 `_VERSION` 不一致时构建直接失败。
+
 ## 模块边界
 
 跨模块调用必须从各模块 `__init__.py` 导入公开接口，不直接导入内部实现文件。

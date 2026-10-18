@@ -1,0 +1,55 @@
+# 推送 v* 标签时在 Windows 上构建便携 ZIP 并发布 Release；打包相关改动的 PR 只构建不发布。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - gridstruct-v2.spec
+      - tools/build_portable.py
+      - requirements.txt
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # 构建脚本和 PyInstaller 输出中文，Windows 控制台默认代码页会报编码错误。
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt "pyinstaller>=6,<7"
+
+      - name: 校验标签与应用版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          $version = (Select-String -Path settings/dialog.py -Pattern '_VERSION = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "标签 ${{ github.ref_name }} 与 settings/dialog.py 的 _VERSION=$version 不一致" }
+
+      - name: 构建便携包
+        run: |
+          python tools/build_portable.py --output dist/release
+          $name = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "pr-${{ github.event.pull_request.number }}" }
+          Move-Item dist/release/GridStruct-V2-portable.zip "dist/GridStruct-V2-$name-portable.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GridStruct-V2-portable
+          path: dist/GridStruct-V2-*-portable.zip
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # 发布说明取自附注标签的正文，打标签时写好即可。
+        run: gh release create "${{ github.ref_name }}" (Get-Item dist/GridStruct-V2-*-portable.zip).FullName --title "GridStruct V2 ${{ github.ref_name }}" --notes-from-tag --verify-tag
