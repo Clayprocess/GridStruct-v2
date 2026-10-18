@@ -15,7 +15,7 @@ from .items import (
     MarkStyle, MosaicMarkItem, PencilMarkItem,
     PolylineMarkItem, RectMarkItem, SerialMarkItem, TextMarkItem,
 )
-from .commands import AddMarkCommand, RemoveMarkCommand, TextEditCommand
+from .commands import AddMarkCommand, AddSerialCommand, RemoveMarkCommand, TextEditCommand
 
 
 class MarkTool:
@@ -118,6 +118,11 @@ class TextTool(MarkTool):
 
     def on_release(self, pos, undo):
         pass
+
+    def restyle(self):
+        # 新建文字还没进撤销栈，样式直接写进图元，随 AddMarkCommand 一起撤销。
+        if self._item is not None and self._before is None:
+            self._item.set_style(self._style)
 
     def finish(self, undo):
         if self._item is not None:
@@ -291,6 +296,7 @@ class MagnifierTool(MarkTool):
 class SerialTool(MarkTool):
     def on_press(self, scene, pos, undo):
         self._scene = scene
+        self._before_next = scene.property("serial_next")
         self._item = SerialMarkItem(self._style, _next_serial_index(scene, self._style))
         self._item.setPos(pos)
         scene.addItem(self._item)
@@ -299,7 +305,7 @@ class SerialTool(MarkTool):
         pass
 
     def on_release(self, pos, undo):
-        undo.push(AddMarkCommand(self._scene, self._item))
+        undo.push(AddSerialCommand(self._scene, self._item, self._before_next))
         self._item = None
 
     def set_index(self, item, value):

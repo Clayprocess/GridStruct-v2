@@ -1,6 +1,7 @@
 # Undo 命令。AddMarkCommand 的 redo 幂等：工具在 on_press 时已把图元
 # 加入 scene（拖拽可见），push 触发的第一次 redo 不重复添加。
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGraphicsScene
 from PySide6.QtGui import QUndoCommand
 from copy import copy
@@ -54,11 +55,29 @@ class AddMarkCommand(QUndoCommand):
         self._in_scene = False
 
 
+class AddSerialCommand(AddMarkCommand):
+    """局部序号计数随添加一起撤销/重做，否则撤销后再加会跳号。"""
+
+    def __init__(self, scene: QGraphicsScene, item, before_next):
+        super().__init__(scene, item)
+        self._before, self._after = before_next, scene.property("serial_next")
+
+    def redo(self):
+        super().redo()
+        self._scene.setProperty("serial_next", self._after)
+
+    def undo(self):
+        super().undo()
+        self._scene.setProperty("serial_next", self._before)
+
+
 class RemoveMarkCommand(QUndoCommand):
     def __init__(self, scene: QGraphicsScene, items: list):
         super().__init__("删除标注")
         self._scene = scene
         self._items = list(items)
+        # 标注 Z 值相同，叠放靠插入顺序；重新 addItem 会落到最上层，撤销时要放回原位。
+        self._order = [it for it in scene.items(Qt.AscendingOrder) if it.parentItem() is None]
         from .items import SerialMarkItem
         self._serials = {it: it.index for it in [*scene.items(), *items]
                          if isinstance(it, SerialMarkItem)}
@@ -81,6 +100,11 @@ class RemoveMarkCommand(QUndoCommand):
         for it in self._items:
             if it.scene() is not self._scene:
                 self._scene.addItem(it)
+        # 自上而下逐个塞回原上邻之下；上邻若也是被删项，此时已经归位。
+        for it in sorted(self._items, key=self._order.index, reverse=True):
+            above = self._order.index(it) + 1
+            if above < len(self._order):
+                it.stackBefore(self._order[above])
         for it, index in self._serials.items():
             it.set_index(index)
         self._scene.setProperty("serial_next", self._next)

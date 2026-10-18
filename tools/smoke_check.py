@@ -144,6 +144,94 @@ def serial_undo():
     c.undo()
     assert items[2].style.serial_type == "circle" and items[2]._label() == "2"
     c.deleteLater()
+    c = AnnotationCanvas(sample())
+    c.set_tool_by_id("serial")
+    for x in (30, 90, 150, 200):
+        if x == 200:
+            c.undo()
+        c._tool.on_press(c.scene(), QPointF(x, 40), c._undo)
+        c._tool.on_release(QPointF(x, 40), c._undo)
+    assert sorted(i.index for i in c.scene().items() if isinstance(i, SerialMarkItem)) == [1, 2, 3], "undo add skips serial"
+    c.deleteLater()
+
+
+def remove_undo_order():
+    c = AnnotationCanvas(sample())
+    c.set_tool_by_id("rect")
+    c.update_style("fill", True)
+    for x, color in ((20, "#ff0000"), (60, "#0000ff"), (100, "#00ff00")):
+        c.update_style("color", QColor(color))
+        c._tool.on_press(c.scene(), QPointF(x, 20), c._undo)
+        c._tool.on_move(QPointF(x + 80, 120))
+        c._tool.on_release(QPointF(x + 80, 120), c._undo)
+    before = c.render_to_pixmap().toImage()
+    marks = [i for i in c.scene().items(Qt.AscendingOrder) if hasattr(i, "style_keys")]
+    for removed in ([marks[0]], [marks[0], marks[1]], [marks[0], marks[2]]):
+        c.scene().clearSelection()
+        for item in removed:
+            item.setSelected(True)
+        QTest.keyClick(c, Qt.Key_Delete)
+        c.undo()
+        assert c.render_to_pixmap().toImage() == before, "undo delete changed stacking order"
+    c.deleteLater()
+
+
+def text_live_style():
+    c = AnnotationCanvas(sample(640, 300))
+    c.resize(640, 300)
+    c.show()
+    c.activateWindow()
+    c.setFocus()
+    c.set_tool_by_id("text")
+    flush()
+    QTest.mouseClick(c.viewport(), Qt.LeftButton, pos=c.mapFromScene(QPointF(40, 40)))
+    QTest.keyClicks(c.viewport(), "hi")
+    c.update_style("font_size", 48)
+    c.update_style("text_background", True)
+    QTest.keyClicks(c.viewport(), "!")
+    item = next(i for i in c.scene().items() if isinstance(i, TextMarkItem))
+    assert item.font().pointSize() == 48 and item.style.text_background, "style ignored while typing"
+    cursor = QTextCursor(item.document())
+    cursor.movePosition(QTextCursor.End)
+    assert cursor.charFormat().font().pointSize() == 48 and item.toPlainText() == "hi!"
+    c.set_tool_by_id("rect")
+    c.undo()
+    assert item.scene() is None
+    c.redo()
+    assert item.scene() is c.scene() and item.font().pointSize() == 48
+    c.close()
+    c.deleteLater()
+
+
+def square_edge():
+    from capture import ScreenshotFlow, DesktopCapture, ScreenFrame
+    flow = ScreenshotFlow(app)
+    geometry = app.primaryScreen().geometry()
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), geometry, sample(geometry.width(), geometry.height()),
+                                       geometry.topLeft())])
+
+    def drag(start, end, modifiers=Qt.ShiftModifier):
+        win._snap_rect = QRect()
+        for kind, pos, buttons, mods in ((QEvent.MouseButtonPress, start, Qt.LeftButton, Qt.NoModifier),
+                                         (QEvent.MouseMove, end, Qt.LeftButton, modifiers)):
+            event = QMouseEvent(kind, QPointF(pos), QPointF(pos), Qt.LeftButton, buttons, mods)
+            (win.mouse_press if kind == QEvent.MouseButtonPress else win.mouse_move)(event)
+        win.mouse_release(QMouseEvent(QEvent.MouseButtonRelease, QPointF(end), QPointF(end),
+                                      Qt.LeftButton, Qt.NoButton, modifiers))
+
+    with patch("capture.flow.capture_virtual_desktop", return_value=shot):
+        flow.start()
+        win = flow._win
+        corner = geometry.bottomRight() - QPoint(100, 50)
+        drag(corner, corner + QPoint(90, 30))
+        assert win._sel.width() == win._sel.height() == 51, win._sel
+        # 拖左上角越过屏幕左缘：以右下角为锚点保持 1:1。
+        drag(QPoint(100, 320), QPoint(180, 400))
+        drag(QPoint(100, 320), QPoint(geometry.left() - 50, 350))
+        assert win._sel == QRect(geometry.left(), 220, 181, 181), win._sel
+        flow._win.cancelled.emit()
+        flush()
+    flow.deleteLater()
 
 
 def pin_geometry():
@@ -340,6 +428,35 @@ def screenshot_lifecycle():
     flow.deleteLater()
 
 
+def pin_missing_fields():
+    import json
+    import pin
+    from pin import data_directory
+    session = data_directory() / "pins" / "session.json"
+    session.parent.mkdir(parents=True, exist_ok=True)
+    state = {"id": "a" * 32, "kind": "text", "text": "recovery sample", "x": 0, "y": 0,
+             "scale": 1.0, "opacity": 1.0, "topmost": False, "click_through": False}
+    try:
+        with patch("pin.show_message") as warning:
+            for missing in ("topmost", "click_through"):
+                session.write_text(json.dumps({"version": 1, "pins": [{k: v for k, v in state.items() if k != missing}]}))
+                assert not pin.restore_pins() and warning.called, f"missing {missing} accepted"
+                assert not pin._restoring
+                pin._restore_failed = False
+            # 旧会话只缺 locked 仍要恢复。
+            session.write_text(json.dumps({"version": 1, "pins": [state]}))
+            warning.reset_mock()
+            assert pin.restore_pins() and not warning.called
+        restored = next(w for w in pin._open_pins if w.pin_id == state["id"])
+        assert not restored._locked
+        restored._allow_close = True
+        restored.close()
+        QTest.qWait(180)
+    finally:
+        session.unlink()
+        pin._restore_failed = False
+
+
 def pin_lifecycle():
     from pin import show_pin, _open_pins
     count = len(_open_pins)
@@ -510,7 +627,8 @@ def render_windows():
 
 if __name__ == "__main__":
     checks = [high_dpi_canvas, ocr_pixels, offline_models, empty_polyline,
-              text_undo, serial_undo, pin_geometry, longshot_pixels, cancelled_settings,
+              text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
+              pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, pin_lifecycle, save_failure,
               longshot_lifecycle, saved_settings, canvas_mouse_events, ocr_copy_text, render_windows]
     failures = []
