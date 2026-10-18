@@ -1,8 +1,8 @@
 # annotate/toolbar.py
 # FloatPanel 浮动工具条：截图窗口的标注工具切换 + 操作按钮。
 #
-# 布局（见 ../pixpin/pixpin-ui-spec.md §2.2，从左到右）：
-#   [12 个标注工具（单选互斥）] | [撤销 重做 保存 复制 贴图 OCR] | [确认 取消]
+# 布局（同 PixPin 的主区 + 次区，从左到右）：
+#   [9 个常用工具 | 次区浮动按钮 | 次区展开] | [撤销 重做 保存 复制 贴图 OCR 长截图] | [确认 取消]
 #
 # 约束（AGENTS.md）：
 # - 样式全部走 styles/theme.py，本文件不写任何 setStyleSheet；
@@ -16,31 +16,37 @@ import sys as _sys
 # 作为模块导入时此操作无害（路径已存在则重复）。
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
-from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QToolButton, QWidget, QLabel
+from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QMenu, QToolButton, QWidget, QLabel
 
 from styles import tokens as T
+from settings import get_settings
 from ui import floating_window_type, tinted_icon
 
-# 工具 id -> (中文名, Lucide 图标名)，顺序即工具条从左到右
-TOOLS: list[tuple[str, str, str]] = [
-    ("rect", "矩形", "square"),
-    ("ellipse", "椭圆", "circle"),
-    ("arrow", "箭头", "arrow-up-right"),
-    ("pencil", "画笔", "pencil"),
-    ("line", "直线", "minus"),
+# 主区：同 PixPin 的 Shift+1～9 顺序。矩形和椭圆合成一个“几何”按钮，形状在二级面板切换。
+PRIMARY_TOOLS: list[tuple[str, str, str]] = [
+    ("geo", "几何", "square"),
     ("polyline", "折线", "spline"),
-    ("text", "文字", "type"),
+    ("arrow", "箭头", "arrow-up-right"),
     ("serial", "序号", "list-ordered"),
-    ("mosaic", "马赛克", "grid-2x2"),
+    ("pencil", "画笔", "pencil"),
     ("highlight", "高亮", "highlighter"),
+    ("mosaic", "马赛克", "grid-2x2"),
+    ("text", "文字", "type"),
     ("eraser", "橡皮擦", "eraser"),
+]
+DIGIT_TOOLS = tuple(tool[0] for tool in PRIMARY_TOOLS)
+# 几何按钮背后的真实工具，按钮图标跟随当前形状。
+GEO_SHAPES = {"rect": ("矩形", "square"), "ellipse": ("椭圆", "circle")}
+# 次区：低频工具和取色，悬停展开；同 PixPin，最近用过的次区工具会浮到主区。
+SECONDARY_TOOLS: list[tuple[str, str, str]] = [
+    ("line", "直线", "minus"),
     ("magnifier", "放大镜", "zoom-in"),
 ]
-
-# 同 PixPin 的 Shift+1～9 顺序；PixPin 把矩形和椭圆合成一个几何工具占 1 号位，这里先给矩形。
-DIGIT_TOOLS = ("rect", "polyline", "arrow", "serial", "pencil", "highlight", "mosaic", "text", "eraser")
+SECONDARY_ACTIONS: list[tuple[str, str, str]] = [
+    ("pipette", "取色", "pipette"),
+]
 
 
 def shortcut_tool(event):
@@ -62,7 +68,6 @@ ACTIONS: list[tuple[str, str, str]] = [
     ("copy", "复制", "copy"),
     ("pin", "贴图", "pin"),
     ("ocr", "文字识别", "scan-text"),
-    ("pipette", "取色", "pipette"),
     ("longshot", "长截图", "scan-text"),
 ]
 
@@ -100,6 +105,8 @@ class FloatPanel(QWidget):
             animation.setDuration(150)
             animation.setEasingCurve(QEasingCurve.OutCubic)
         self._buttons: dict[str, QToolButton] = {}
+        # 按钮 id -> 当前图标名；几何和浮动按钮的图标会随所选工具变化。
+        self._icon_names: dict[str, str] = {}
         # 按钮 id -> 图标颜色在 tokens 中的键（确认/取消用前景色变体）
         self._icon_color_key: dict[str, str] = {}
 
@@ -116,13 +123,38 @@ class FloatPanel(QWidget):
         # 标注工具：单选互斥
         self._tool_group = QButtonGroup(self)
         self._tool_group.setExclusive(True)
-        for tool_id, label, icon_name in TOOLS:
+        self._geo_shape = get_settings().value("annotation/geo_shape", "rect")
+        for tool_id, label, icon_name in PRIMARY_TOOLS:
             btn = self._make_button(tool_id, label, icon_name, checkable=True)
             self._tool_group.addButton(btn)
             layout.addWidget(btn)
-            btn.clicked.connect(
-                lambda _checked=False, tid=tool_id: self.toolSelected.emit(tid)
-            )
+            btn.clicked.connect(lambda _checked=False, tid=tool_id: self._pick(tid))
+        self._set_geo_shape(self._geo_shape)
+
+        # 次区浮动按钮：没用过次区工具时隐藏。
+        self._floating_tool = ""
+        self._floating = self._make_button("floating", "", "minus", checkable=True)
+        self._tool_group.addButton(self._floating)
+        self._floating.clicked.connect(lambda: self._pick(self._floating_tool))
+        self._floating.hide()
+        layout.addWidget(self._floating)
+
+        self._more = self._make_button("more", "更多工具", "chevron-down")
+        self._more.setObjectName("MoreTools")
+        self._more.setPopupMode(QToolButton.InstantPopup)
+        self._more_menu = QMenu(self._more)
+        self._menu_actions = {}
+        for tool_id, label, icon_name in SECONDARY_TOOLS:
+            action = self._more_menu.addAction(label, lambda tid=tool_id: self._pick(tid))
+            self._menu_actions[tool_id] = (action, icon_name)
+        self._more_menu.addSeparator()
+        for action_id, label, icon_name in SECONDARY_ACTIONS:
+            action = self._more_menu.addAction(label, lambda aid=action_id: self.actionTriggered.emit(aid))
+            self._menu_actions[action_id] = (action, icon_name)
+        self._more.setMenu(self._more_menu)
+        # 同 PixPin 悬停即展开；showMenu 会进入嵌套事件循环，不能在事件过滤器里同步调用。
+        self._more.installEventFilter(self)
+        layout.addWidget(self._more)
 
         layout.addWidget(self._make_separator())
 
@@ -166,6 +198,20 @@ class FloatPanel(QWidget):
 
         self.refresh_icons(mode)
 
+    def eventFilter(self, watched, event):
+        if watched is self._more and event.type() == QEvent.Enter and not self._more_menu.isVisible():
+            QTimer.singleShot(0, self._more.showMenu)
+        return super().eventFilter(watched, event)
+
+    def _pick(self, tool_id):
+        self.toolSelected.emit(self._geo_shape if tool_id == "geo" else tool_id)
+
+    def _set_geo_shape(self, shape):
+        self._geo_shape = shape
+        label, icon_name = GEO_SHAPES[shape]
+        self._icon_names["geo"] = icon_name
+        self._buttons["geo"].setToolTip(f"几何：{label} (Shift+1)")
+
     def paintEvent(self, _event) -> None:
         # 圆角卡片背景：WA_TranslucentBackground 下 QSS 不绘制自身背景，
         # 这里用 QPainter 手绘（颜色取自 tokens，与 QSS 同源）。
@@ -202,7 +248,7 @@ class FloatPanel(QWidget):
         btn = QToolButton(self)
         shortcut = (f"Shift+{DIGIT_TOOLS.index(btn_id) + 1}" if btn_id in DIGIT_TOOLS else
                     {"undo": "Ctrl+Z", "redo": "Ctrl+Y", "save": "Ctrl+S",
-                     "copy": "Ctrl+C", "ocr": "Shift+O", "pipette": "Shift 切换颜色格式",
+                     "copy": "Ctrl+C", "ocr": "Shift+O",
                      "longshot": "Ctrl+Alt+L", "confirm": "Enter", "cancel": "Esc"}.get(btn_id, ""))
         btn.setToolTip(f"{label} ({shortcut})" if shortcut else label)
         btn.setAccessibleName(label)
@@ -211,6 +257,7 @@ class FloatPanel(QWidget):
         btn.setProperty("class", "ghost")
         btn.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
         self._buttons[btn_id] = btn
+        self._icon_names[btn_id] = icon_name
         self._icon_color_key.setdefault(btn_id, "foreground")
         return btn
 
@@ -219,15 +266,6 @@ class FloatPanel(QWidget):
         sep.setObjectName("FloatPanelSeparator")
         sep.setFrameShape(QFrame.VLine)
         return sep
-
-    def _icon_name(self, btn_id: str) -> str:
-        for bid, _, icon_name in TOOLS:
-            if bid == btn_id:
-                return icon_name
-        for bid, _, icon_name in ACTIONS:
-            if bid == btn_id:
-                return icon_name
-        return _END_BUTTONS[btn_id][1]
 
     # ---- 对外接口 ----
 
@@ -244,30 +282,50 @@ class FloatPanel(QWidget):
         self._mode = mode
         t = T.THEMES[mode]
         for btn_id, btn in self._buttons.items():
-            btn.setIcon(
-                tinted_icon(
-                    self._icon_name(btn_id),
-                    t[self._icon_color_key[btn_id]],
-                    _ICON_SIZE,
-                )
-            )
+            btn.setIcon(tinted_icon(self._icon_names[btn_id], t[self._icon_color_key[btn_id]], _ICON_SIZE))
+        for action, icon_name in self._menu_actions.values():
+            action.setIcon(tinted_icon(icon_name, t["popover_foreground"], _ICON_SIZE))
         self.update()  # 卡片背景色也在 paintEvent 里取自主题，需重绘
 
     def set_tool(self, tool_id: str) -> None:
-        """程序化选中标注工具（走 click，保证与用户点击一致的信号）。"""
-        btn = self._buttons.get(tool_id)
-        if btn is not None and btn.isCheckable():
-            btn.click()
+        """程序化选中标注工具，与用户点击发出同样的信号。tool_id 可以是 "geo"。"""
+        if tool_id in GEO_SHAPES:
+            self._set_geo_shape(tool_id)
+        self._pick(tool_id)
+
+    def mark_tool(self, tool_id: str) -> None:
+        """画布换了工具后同步按钮选中态、几何图标和次区浮动按钮，不发信号。"""
+        if tool_id in GEO_SHAPES:
+            if tool_id != self._geo_shape:
+                self._set_geo_shape(tool_id)
+                get_settings().setValue("annotation/geo_shape", tool_id)
+                self.refresh_icons(self._mode)
+            button = self._buttons["geo"]
+        elif any(tool_id == tool[0] for tool in SECONDARY_TOOLS):
+            if tool_id != self._floating_tool:
+                self._floating_tool = tool_id
+                label, icon_name = next(tool[1:] for tool in SECONDARY_TOOLS if tool[0] == tool_id)
+                self._floating.setToolTip(label)
+                self._floating.setAccessibleName(label)
+                self._icon_names["floating"] = icon_name
+                self._floating.show()
+                self.refresh_icons(self._mode)
+                self.adjustSize()
+            button = self._floating
+        else:
+            button = self._buttons[tool_id]
+        button.setChecked(True)
 
     def selected_tool(self) -> str | None:
         """当前选中的工具 id，未选返回 None。"""
         checked = self._tool_group.checkedButton()
         if checked is None:
             return None
-        for tool_id, btn in self._buttons.items():
-            if btn is checked:
-                return tool_id
-        return None
+        if checked is self._buttons["geo"]:
+            return self._geo_shape
+        if checked is self._floating:
+            return self._floating_tool
+        return next(tool_id for tool_id, btn in self._buttons.items() if btn is checked)
 
     def clear_selection(self):
         """画布进入选择模式时清除工具高亮，不再触发绘制工具。"""

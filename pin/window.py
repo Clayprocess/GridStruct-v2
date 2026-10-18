@@ -323,6 +323,7 @@ class _PinBase(QWidget):
         if self.kind == "text":
             menu.addAction(_fg_icon("pencil"), "编辑文字", self._edit_text)
         if self.kind == "image":
+            menu.addAction(_fg_icon("pencil"), "标注", "Space", lambda: self.annotateRequested.emit(self))
             menu.addAction(_fg_icon("scan-text"), "复核识别结果" if self._document is not None else "文本识别", self._recognize)
             if self._document is not None:
                 menu.addAction("重新识别（替换校正结果）", self._rerun_ocr)
@@ -449,7 +450,8 @@ class _PinImageView(QGraphicsView):
 
 class PinWindow(_PinBase):
     kind = "image"
-    _HINT = "拖动移动；滚轮缩放，Ctrl+滚轮调透明度；中键复原；双击或 Esc 关闭。识别后可滑选文字并复制"
+    _HINT = "拖动移动；滚轮缩放，Ctrl+滚轮调透明度；中键复原；Space 标注；双击或 Esc 关闭。识别后可滑选文字并复制"
+    annotateRequested = Signal(object)
 
     def __init__(self, pixmap: QPixmap, document=None):
         super().__init__()
@@ -464,6 +466,13 @@ class PinWindow(_PinBase):
         if document is not None:
             self._ensure_ocr_controller()
             self._ocr_controller.adopt_document(document, self._base)
+
+    def keyPressEvent(self, event):
+        # 同 PixPin：在贴图上按 Space 打开标注。
+        if event.key() == Qt.Key_Space and not event.modifiers():
+            self.annotateRequested.emit(self)
+        else:
+            super().keyPressEvent(event)
 
     def _content_size(self):
         self._content.resetTransform()

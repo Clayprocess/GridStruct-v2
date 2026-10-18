@@ -4,7 +4,7 @@
 #   1. 子类化 MarkTool，实现 on_press / on_move / on_release；
 #   2. on_press 建图元（items.py）并 scene.addItem（拖拽时可见）；
 #   3. on_release 收尾：合法则 undo.push(AddMarkCommand)，非法则 scene.removeItem；
-#   4. 在 TOOL_CLASSES 注册 id（id 必须与 annotate/toolbar.py 的 TOOLS 一致）。
+#   4. 在 TOOL_CLASSES 注册 id，并加进 annotate/toolbar.py 的主区、次区或 GEO_SHAPES。
 
 from PySide6.QtCore import QRect, QRectF, QPointF, Qt
 from PySide6.QtWidgets import QGraphicsScene, QApplication
@@ -323,7 +323,7 @@ def _next_serial_index(scene, style) -> int:
     return int(nxt)
 
 
-# id -> 工具类。id 必须与 toolbar.py 的 TOOLS 一致。
+# id -> 工具类。id 必须出现在 toolbar.py 的主区、次区或 GEO_SHAPES 里。
 TOOL_CLASSES: dict[str, type[MarkTool]] = {
     "rect": RectTool,
     "ellipse": EllipseTool,

@@ -68,7 +68,9 @@ class AnnotationWindow(QWidget):
             QTimer.singleShot(0, self, self._scroll_to_start)
 
     def _tool_changed(self, tool_id):
-        if not tool_id:
+        if tool_id:
+            self._toolbar.mark_tool(tool_id)
+        else:
             self._toolbar.clear_selection()
 
     def _options_changed(self, tool_id):

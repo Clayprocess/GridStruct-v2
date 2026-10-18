@@ -456,7 +456,7 @@ QToolButton#Segment:checked {{
 QToolButton#MoreOptions {{
     padding: 5px;
 }}
-QToolButton#MoreOptions::menu-indicator {{
+QToolButton#MoreOptions::menu-indicator, QToolButton#MoreTools::menu-indicator {{
     image: none;
     width: 0;
 }}
