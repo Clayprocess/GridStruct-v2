@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QApplication
 from annotate import AnnotationCanvas
 from annotate.items import SerialMarkItem, TextMarkItem
 from capture.longshot import ImageStitcher
-from ocr import OCREngine
+from ocr import OCREngine, add_text_layer
 from pin import PinWindow
 from settings import SettingsDialog
 from styles import tokens as T
@@ -166,11 +166,16 @@ def remove_undo_order():
         c._tool.on_release(QPointF(x + 80, 120), c._undo)
     before = c.render_to_pixmap().toImage()
     marks = [i for i in c.scene().items(Qt.AscendingOrder) if hasattr(i, "style_keys")]
-    for removed in ([marks[0]], [marks[0], marks[1]], [marks[0], marks[2]]):
+    for removed in ([marks[0]], [marks[0], marks[1]], [marks[0], marks[2]], [marks[2]]):
+        # OCR 失效会单独销毁文字层；撤销时它已不在，不能被当成叠放邻居。
+        layer = add_text_layer(c.scene(), [])
         c.scene().clearSelection()
         for item in removed:
             item.setSelected(True)
         QTest.keyClick(c, Qt.Key_Delete)
+        c.scene().removeItem(layer)
+        layer.deleteLater()
+        flush()
         c.undo()
         assert c.render_to_pixmap().toImage() == before, "undo delete changed stacking order"
     c.deleteLater()
@@ -184,19 +189,22 @@ def text_live_style():
     c.setFocus()
     c.set_tool_by_id("text")
     flush()
+    QTest.mouseClick(c.viewport(), Qt.LeftButton, pos=c.mapFromScene(QPointF(40, 200)))
+    QTest.keyClicks(c.viewport(), "first")
     QTest.mouseClick(c.viewport(), Qt.LeftButton, pos=c.mapFromScene(QPointF(40, 40)))
     QTest.keyClicks(c.viewport(), "hi")
     c.update_style("font_size", 48)
     c.update_style("text_background", True)
     QTest.keyClicks(c.viewport(), "!")
-    item = next(i for i in c.scene().items() if isinstance(i, TextMarkItem))
+    first, item = sorted((i for i in c.scene().items() if isinstance(i, TextMarkItem)), key=lambda i: -i.y())
     assert item.font().pointSize() == 48 and item.style.text_background, "style ignored while typing"
+    assert first.font().pointSize() == 16 and c._tool._item is item, "style went to the previous text"
     cursor = QTextCursor(item.document())
     cursor.movePosition(QTextCursor.End)
     assert cursor.charFormat().font().pointSize() == 48 and item.toPlainText() == "hi!"
     c.set_tool_by_id("rect")
     c.undo()
-    assert item.scene() is None
+    assert item.scene() is None and first.scene() is c.scene()
     c.redo()
     assert item.scene() is c.scene() and item.font().pointSize() == 48
     c.close()
