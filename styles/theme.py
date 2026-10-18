@@ -2,9 +2,28 @@
 # 用法：apply_theme(app, "light" | "dark" | "system")
 # 业务代码不许手写 setStyleSheet，一律走这里。
 
+import tempfile
+from pathlib import Path
+
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from . import tokens as T
+
+_ICON_DIR = Path(__file__).resolve().parents[1] / "assets" / "icons"
+# QSS 的 image: url() 只认文件，Lucide 的 currentColor 又不被 Qt SVG 支持，
+# 所以按主题色写出染色副本供样式表引用。
+_TINTED_DIR = Path(tempfile.gettempdir()) / "gridstruct-v2-icons"
+
+
+def _icon_url(name: str, color: str, stroke: int = 2) -> str:
+    path = _TINTED_DIR / f"{name}-{color.lstrip('#')}-{stroke}.svg"
+    if not path.exists():
+        svg = (_ICON_DIR / f"{name}.svg").read_text(encoding="utf-8")
+        svg = svg.replace("currentColor", color).replace('stroke-width="2"', f'stroke-width="{stroke}"')
+        _TINTED_DIR.mkdir(exist_ok=True)
+        path.write_text(svg, encoding="utf-8")
+    # QSS url() 要正斜杠，Windows 路径需转换。
+    return path.as_posix()
 
 
 def build_qss(t: dict) -> str:
@@ -20,59 +39,64 @@ QLabel {{
     background: transparent;
 }}
 
-/* ===== 按钮：class=primary（默认主按钮）===== */
+/* ===== 按钮 =====
+   裸 QPushButton 默认是 outline：一个窗口只应有一个主按钮，必须显式声明 class=primary。
+   所有按钮常驻 1px 边框（填充类为透明），hover 时尺寸不跳。 */
 QPushButton {{
-    background-color: {t['primary']};
-    color: {t['primary_foreground']};
-    border: none;
+    background-color: transparent;
+    color: {t['foreground']};
+    border: 1px solid {t['border']};
     border-radius: {r}px;
-    padding: 8px 16px;
+    padding: 7px 15px;
     font-weight: 500;
 }}
 QPushButton:hover {{
     background-color: {t['accent']};
     color: {t['accent_foreground']};
-    border: 1px solid {t['border']};
-    padding: 7px 15px;
 }}
 QPushButton:pressed {{
-    background-color: {t['secondary']};
-    color: {t['secondary_foreground']};
+    background-color: {t['secondary_hover']};
 }}
 QPushButton:disabled {{
-    background-color: {t['muted']};
+    background-color: transparent;
     color: {t['muted_foreground']};
+    border-color: {t['border']};
 }}
-
-/* secondary：浅底深字 */
+QPushButton[class="primary"] {{
+    background-color: {t['primary']};
+    color: {t['primary_foreground']};
+    border-color: transparent;
+}}
+QPushButton[class="primary"]:hover, QPushButton[class="primary"]:pressed {{
+    background-color: {t['primary_hover']};
+    color: {t['primary_foreground']};
+}}
 QPushButton[class="secondary"] {{
     background-color: {t['secondary']};
     color: {t['secondary_foreground']};
+    border-color: transparent;
 }}
-/* outline：描边按钮 */
-QPushButton[class="outline"] {{
-    background-color: transparent;
-    color: {t['foreground']};
-    border: 1px solid {t['border']};
+QPushButton[class="secondary"]:hover, QPushButton[class="secondary"]:pressed {{
+    background-color: {t['secondary_hover']};
+    color: {t['secondary_foreground']};
 }}
-QPushButton[class="outline"]:hover {{
-    background-color: {t['accent']};
-    border: 1px solid {t['border']};
-    padding: 8px 16px;
-}}
-/* ghost：无框 */
 QPushButton[class="ghost"] {{
-    background-color: transparent;
-    color: {t['foreground']};
+    border-color: transparent;
 }}
-QPushButton[class="ghost"]:hover {{
-    background-color: {t['accent']};
-    color: {t['accent_foreground']};
-}}
-/* destructive：危险 */
 QPushButton[class="destructive"] {{
     background-color: {t['destructive']};
     color: {t['destructive_foreground']};
+    border-color: transparent;
+}}
+QPushButton[class="destructive"]:hover, QPushButton[class="destructive"]:pressed {{
+    background-color: {t['destructive_hover']};
+    color: {t['destructive_foreground']};
+}}
+QPushButton[class="primary"]:disabled, QPushButton[class="secondary"]:disabled,
+QPushButton[class="destructive"]:disabled {{
+    background-color: {t['muted']};
+    color: {t['muted_foreground']};
+    border-color: transparent;
 }}
 
 /* ===== 工具条按钮（标注工具条用）===== */
@@ -111,14 +135,14 @@ QToolButton[class="primary"] {{
     border-radius: {T.RADIUS_SM}px;
 }}
 QToolButton[class="primary"]:hover {{
-    background-color: {t['primary']};
+    background-color: {t['primary_hover']};
 }}
 QToolButton[class="destructive"] {{
     background-color: {t['destructive']};
     border-radius: {T.RADIUS_SM}px;
 }}
 QToolButton[class="destructive"]:hover {{
-    background-color: {t['destructive']};
+    background-color: {t['destructive_hover']};
 }}
 
 /* ===== 输入框 ===== */
@@ -130,8 +154,24 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
     selection-background-color: {t['primary']};
     selection-color: {t['primary_foreground']};
 }}
-QLineEdit:focus, QComboBox:focus {{
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus {{
     border: 1px solid {t['ring']};
+}}
+QComboBox:hover, QSpinBox:hover {{
+    border-color: {t['muted_foreground']};
+}}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
+    color: {t['muted_foreground']};
+    background-color: {t['muted']};
+}}
+/* 数字框不显示上下按钮（Qt 默认箭头在自定义边框下会画残），改用滚轮或直接输入。
+   Qt 坑：只写 width: 0 会把输入区一起压成 1px，必须同时指定 origin 和 height。 */
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    width: 0px;
+    height: 0px;
+    border: none;
 }}
 QGraphicsView {{
     background-color: {t['background']};
@@ -139,9 +179,32 @@ QGraphicsView {{
     border: none;
     padding: 0;
 }}
+QComboBox {{
+    padding-right: 28px;
+}}
 QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
     border: none;
     width: 24px;
+}}
+QComboBox::down-arrow {{
+    image: url({_icon_url("chevron-down", t["muted_foreground"])});
+    width: 14px;
+    height: 14px;
+}}
+QComboBox::down-arrow:disabled {{
+    image: url({_icon_url("chevron-down", t["border"])});
+}}
+QComboBox QAbstractItemView {{
+    background-color: {t['popover']};
+    color: {t['popover_foreground']};
+    border: 1px solid {t['border']};
+    border-radius: {r}px;
+    padding: 4px;
+    outline: none;
+    selection-background-color: {t['accent']};
+    selection-color: {t['accent_foreground']};
 }}
 QProgressBar {{
     border: 1px solid {t['border']};
@@ -198,14 +261,25 @@ QCheckBox, QRadioButton {{
     spacing: 8px;
 }}
 QCheckBox::indicator {{
-    width: 14px; height: 14px;
-    border: 1px solid {t['border']};
-    border-radius: 3px;
+    width: 16px; height: 16px;
+    border: 1px solid {t['muted_foreground']};
+    border-radius: {T.RADIUS_SM}px;
     background: {t['background']};
+}}
+QCheckBox::indicator:hover {{
+    border-color: {t['foreground']};
 }}
 QCheckBox::indicator:checked {{
     background: {t['primary']};
     border-color: {t['primary']};
+    image: url({_icon_url("check", t["primary_foreground"], stroke=3)});
+}}
+QCheckBox::indicator:disabled {{
+    border-color: {t['border']};
+    background: {t['muted']};
+}}
+QCheckBox:disabled {{
+    color: {t['muted_foreground']};
 }}
 
 /* ===== 滑杆 ===== */
@@ -305,6 +379,110 @@ QGroupBox::title {{
     padding: 0 4px;
     color: {t['foreground']};
     background: transparent;
+}}
+
+/* ===== 标注二级面板（annotate/options.py）===== */
+QWidget#ToolOptions {{
+    background: transparent;
+    border-top: 1px solid {t['border']};
+}}
+QWidget#ToolOptions QLabel {{
+    color: {t['muted_foreground']};
+    font-size: {T.FONT_SM}px;
+    min-height: 29px;
+}}
+/* 输入类控件统一 26px 高，换工具时面板高度不跳。 */
+QWidget#ToolOptions QSpinBox, QWidget#ToolOptions QComboBox {{
+    min-height: 18px;
+    max-height: 18px;
+}}
+QWidget#ToolOptions QSpinBox {{
+    padding: 3px 4px;
+    min-width: 36px;
+    max-width: 48px;
+}}
+QWidget#ToolOptions QComboBox {{
+    padding: 3px 26px 3px 8px;
+}}
+QWidget#ToolOptions QFontComboBox {{
+    min-width: 100px;
+}}
+QFrame#OptionSeparator {{
+    background-color: {t['border']};
+    border: none;
+    min-width: 1px;
+    max-width: 1px;
+    margin: 6px 2px;
+}}
+/* 色块与粗细圆点：选中态是一圈 ring，不用底色，避免把颜色本身染灰。 */
+QToolButton#Swatch {{
+    padding: 2px;
+    border: 2px solid transparent;
+    border-radius: 12px;
+}}
+QToolButton#Swatch:hover {{
+    background-color: {t['accent']};
+}}
+QToolButton#Swatch:checked {{
+    background-color: transparent;
+    border: 2px solid {t['ring']};
+    padding: 2px;
+}}
+QToolButton#Swatch:disabled, QToolButton#Segment:disabled {{
+    background-color: transparent;
+    color: {t['border']};
+}}
+QFrame#SegmentGroup {{
+    background-color: {t['muted']};
+    border-radius: {r}px;
+}}
+QToolButton#Segment {{
+    color: {t['muted_foreground']};
+    font-size: {T.FONT_SM}px;
+    padding: 3px 8px;
+    border: 1px solid transparent;
+    border-radius: {T.RADIUS_SM}px;
+}}
+QToolButton#Segment:hover {{
+    color: {t['foreground']};
+    background-color: transparent;
+}}
+QToolButton#Segment:checked {{
+    color: {t['foreground']};
+    background-color: {t['background']};
+    border: 1px solid {t['border']};
+    padding: 3px 8px;
+}}
+QToolButton#MoreOptions {{
+    padding: 5px;
+}}
+QToolButton#MoreOptions::menu-indicator {{
+    image: none;
+    width: 0;
+}}
+QMenu::indicator {{
+    width: 14px;
+    height: 14px;
+    left: 6px;
+}}
+QMenu::indicator:checked {{
+    image: url({_icon_url("check", t["popover_foreground"])});
+}}
+
+/* ===== 贴图（pin/window.py）：卡片本体由 paintEvent 画，这里只管浮动提示 ===== */
+/* 提示浮在任意截图内容上，明暗主题都用深底浅字，与截图尺寸提示同源。 */
+QLabel#PinHud {{
+    background-color: rgba{T.CAPTURE_TIP};
+    color: {T.DARK['foreground']};
+    border-radius: 12px;
+    padding: 4px 12px;
+    font-size: {T.FONT_SM}px;
+}}
+QTextEdit#PinText {{
+    background: transparent;
+    border: none;
+    selection-background-color: {t['primary']};
+    selection-color: {t['primary_foreground']};
 }}
 """
 

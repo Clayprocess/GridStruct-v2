@@ -42,6 +42,7 @@ class ColorDialog(BaseDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("确认并复制")
         buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.button(QDialogButtonBox.Ok).setProperty("class", "primary")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)

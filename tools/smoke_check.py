@@ -150,7 +150,7 @@ def pin_geometry():
     p.show()
     flush()
     assert p._content.width() == 200 and p._content.height() == 100, "pin uses physical size as logical size"
-    assert p.height() == p._content.height() + p._status.height()
+    assert p.height() - p._content.height() == p.width() - p._content.width(), "pin frame is not uniform"
     p.zoom(2)
     assert p._content.width() == 400 and p._content.height() == 200
     p._allow_close = True
