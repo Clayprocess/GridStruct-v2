@@ -290,8 +290,11 @@ class ScreenShotWindow(QObject):
         square = bool(event.modifiers() & Qt.ShiftModifier)
         if self._drag_mode == "create":
             if square:
-                # 同 PixPin：按住 Shift 锁定 1:1，以按下点为锚点。
-                side = max(abs(dx), abs(dy))
+                # 同 PixPin：按住 Shift 锁定 1:1，以按下点为锚点。边长先按锚点到屏幕边缘的
+                # 距离收住，否则末尾的 intersected 会把正方形裁成长方形。
+                room_x = self._vg.right() - self._drag_start.x() if dx >= 0 else self._drag_start.x() - self._vg.left()
+                room_y = self._vg.bottom() - self._drag_start.y() if dy >= 0 else self._drag_start.y() - self._vg.top()
+                side = min(max(abs(dx), abs(dy)), room_x, room_y)
                 pos = self._drag_start + QPoint(side if dx >= 0 else -side, side if dy >= 0 else -side)
             self._sel = QRect(self._drag_start, pos).normalized()
         elif self._drag_mode == "move":
@@ -482,6 +485,10 @@ class ScreenShotWindow(QObject):
         # 以拖动手柄对面的角或边为锚点补成正方形；拖边时以该边的长度为准。
         s = self._sel
         side = s.height() if h in (1, 5) else s.width() if h in (3, 7) else max(s.width(), s.height())
+        # 同框选：按锚点到屏幕边缘的距离限边长，免得随后的裁剪破坏 1:1。
+        side = min(side,
+                   s.right() - self._vg.left() + 1 if h in (0, 6, 7) else self._vg.right() - s.left() + 1,
+                   s.bottom() - self._vg.top() + 1 if h in (0, 1, 2) else self._vg.bottom() - s.top() + 1)
         left = s.right() - side + 1 if h in (0, 6, 7) else s.left()
         top = s.bottom() - side + 1 if h in (0, 1, 2) else s.top()
         self._sel = QRect(left, top, side, side)

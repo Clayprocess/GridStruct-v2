@@ -13,7 +13,7 @@ from copy import copy
 
 from .items import MarkStyle, SerialMarkItem, TextMarkItem, MosaicMarkItem, ArrowMarkItem, EraseMarkItem
 from .tools import create_tool
-from .tools import TOOL_CLASSES
+from .tools import TOOL_CLASSES, TextTool
 from .commands import (RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand,
                        ArrowCommentCommand, ArrowCurveCommand, StyleMarksCommand)
 from .pipette import PipettePopup
@@ -217,6 +217,8 @@ class AnnotationCanvas(QGraphicsView):
                 QApplication.instance().setProperty("serial_counter", value)
         elif key == "serial_auto_renumber":
             self._scene.setProperty("serial_auto_renumber", value)
+        if isinstance(self._tool, TextTool):
+            self._tool.restyle()
         self._selection_changed()
 
     def adjust_serial(self, delta):
