@@ -58,6 +58,9 @@ class _PinBase(QWidget):
         self._scale = 1.0
         self._opacity = 1.0
         self._topmost = True
+        self._locked = False
+        # 中键在原始大小和上一次缩放/透明度之间切换，记住切换前的值。
+        self._before_reset = None
         self._click_through = False
         self._allow_close = False
         self._closed = False
@@ -112,6 +115,8 @@ class _PinBase(QWidget):
         # 参照 PixPin：阴影颜色表达贴图状态，多张贴图并排时一眼看出哪张在操作、哪张已穿透。
         if self._click_through:
             return QColor(T.PIN_STATE_COLORS["click_through"])
+        if self._locked:
+            return QColor(T.PIN_STATE_COLORS["locked"])
         if self.isActiveWindow():
             return QColor(T.PIN_STATE_COLORS["active"])
         return None
@@ -157,9 +162,53 @@ class _PinBase(QWidget):
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
-        if delta:
-            self.zoom(1.1 ** (delta / 120), self.mapFromGlobal(event.globalPosition().toPoint()))
+        if delta and not self._locked:
+            if event.modifiers() & Qt.ControlModifier:
+                self.set_opacity(self._opacity + 0.1 * delta / 120)
+            else:
+                self.zoom(1.1 ** (delta / 120), self.mapFromGlobal(event.globalPosition().toPoint()))
         event.accept()
+
+    def toggle_original(self, anchor: QPoint | None = None):
+        """中键：回到 100% 大小和不透明度；再按一次恢复之前的值（同 PixPin）。"""
+        if self._locked:
+            return
+        if (self._scale, self._opacity) != (1.0, 1.0):
+            self._before_reset = (self._scale, self._opacity)
+            target = (1.0, 1.0)
+        elif self._before_reset is not None:
+            target, self._before_reset = self._before_reset, None
+        else:
+            return
+        self.zoom(target[0] / self._scale, anchor)
+        self.set_opacity(target[1])
+        self._show_hud(f"{self._scale:.0%} · 不透明度 {self._opacity:.0%}")
+
+    def set_locked(self, enabled: bool):
+        self._locked = enabled
+        self._show_hud("已锁定" if enabled else "已解锁")
+        self.update()
+        self.stateChanged.emit()
+
+    def keyPressEvent(self, event):
+        key, modifiers = event.key(), event.modifiers()
+        arrows = {Qt.Key_Left: (-1, 0), Qt.Key_Right: (1, 0), Qt.Key_Up: (0, -1), Qt.Key_Down: (0, 1)}
+        if key == Qt.Key_Escape or (key == Qt.Key_W and modifiers & Qt.ControlModifier):
+            self.close()
+        elif key in arrows and not modifiers:
+            if not self._locked:
+                self.move(self.pos() + QPoint(*arrows[key]))
+        elif key == Qt.Key_T and not modifiers:
+            self.set_topmost(not self._topmost)
+            self._show_hud("已置顶" if self._topmost else "已取消置顶")
+        elif key == Qt.Key_L and not modifiers:
+            self.set_locked(not self._locked)
+        else:
+            super().keyPressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.close()
 
     def set_opacity(self, opacity: float):
         if self._closing:
@@ -217,8 +266,10 @@ class _PinBase(QWidget):
             self.close()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton and not self._locked:
             self._drag_off = event.globalPosition().toPoint() - self.pos()
+        elif event.button() == Qt.MiddleButton:
+            self.toggle_original(self.mapFromGlobal(event.globalPosition().toPoint()))
 
     def mouseMoveEvent(self, event):
         if self._drag_off is not None and event.buttons() & Qt.LeftButton:
@@ -265,6 +316,8 @@ class _PinBase(QWidget):
         menu.addAction(_fg_icon("copy"), "复制图片" if self.kind == "image" else "复制全部文字", self.copy)
         if self.kind == "text" and self._content.textCursor().hasSelection():
             menu.addAction("复制选中文字", self._content.copy)
+        if self.kind == "text":
+            menu.addAction(_fg_icon("pencil"), "编辑文字", self._edit_text)
         if self.kind == "image":
             menu.addAction(_fg_icon("scan-text"), "复核识别结果" if self._document is not None else "文本识别", self._recognize)
             if self._document is not None:
@@ -272,9 +325,15 @@ class _PinBase(QWidget):
         menu.addAction(_fg_icon("save"), "保存为文件", self._save)
         menu.addSeparator()
         top = menu.addAction(_fg_icon("pin"), "窗口置顶")
+        top.setShortcut("T")
         top.setCheckable(True)
         top.setChecked(self._topmost)
         top.triggered.connect(self.set_topmost)
+        lock = menu.addAction(_fg_icon("lock"), "锁定")
+        lock.setShortcut("L")
+        lock.setCheckable(True)
+        lock.setChecked(self._locked)
+        lock.triggered.connect(self.set_locked)
         through = menu.addAction("鼠标穿透（从托盘退出）")
         through.setCheckable(True)
         through.setChecked(self._click_through)
@@ -289,7 +348,7 @@ class _PinBase(QWidget):
             action.setChecked(round(self._opacity * 100) == percent)
             action.triggered.connect(lambda checked=False, value=percent: self.set_opacity(value / 100))
         menu.addSeparator()
-        menu.addAction(_fg_icon("x"), "关闭贴图", self.close)
+        menu.addAction(_fg_icon("x"), "关闭贴图", "Esc", self.close)
         menu.exec(pos)
         menu.deleteLater()
 
@@ -298,7 +357,7 @@ class _PinBase(QWidget):
             "id": self.pin_id, "kind": self.kind,
             "x": self.x() + self._origin.x(), "y": self.y() + self._origin.y(), "scale": self._scale,
             "opacity": self._opacity, "topmost": self._topmost,
-            "click_through": self._click_through,
+            "click_through": self._click_through, "locked": self._locked,
         }
 
     def restore_state(self, state):
@@ -312,6 +371,8 @@ class _PinBase(QWidget):
         self._opacity = state["opacity"]
         self._topmost = state["topmost"]
         self._click_through = state["click_through"]
+        # 旧会话没有锁定字段。
+        self._locked = state.get("locked", False)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, self._topmost)
         self.setWindowFlag(Qt.WindowTransparentForInput, self._click_through)
         self.setWindowOpacity(self._opacity * (0.5 if self._click_through else 1.0))
@@ -334,13 +395,30 @@ class _PinImageView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.NoAnchor)
         self._moving_pin = False
 
+    def _on_text(self, pos):
+        return isinstance(self.itemAt(pos), QGraphicsTextItem)
+
     def mousePressEvent(self, event):
-        if (event.button() == Qt.LeftButton
-                and not isinstance(self.itemAt(event.position().toPoint()), QGraphicsTextItem)):
+        if event.button() == Qt.MiddleButton:
+            self.parentWidget().mousePressEvent(event)
+        elif event.button() == Qt.LeftButton and not self._on_text(event.position().toPoint()):
             self._moving_pin = True
             self.parentWidget().mousePressEvent(event)
         else:
             super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # 识别出的文字上双击仍是选词，其余位置双击关闭贴图。
+        if self._on_text(event.position().toPoint()):
+            super().mouseDoubleClickEvent(event)
+        else:
+            self.parentWidget().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        if isinstance(self.scene().focusItem(), QGraphicsTextItem):
+            super().keyPressEvent(event)
+        else:
+            self.parentWidget().keyPressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._moving_pin:
@@ -367,7 +445,7 @@ class _PinImageView(QGraphicsView):
 
 class PinWindow(_PinBase):
     kind = "image"
-    _HINT = "拖动移动；滚轮缩放；右键打开菜单。识别后可滑选文字并复制"
+    _HINT = "拖动移动；滚轮缩放，Ctrl+滚轮调透明度；中键复原；双击或 Esc 关闭。识别后可滑选文字并复制"
 
     def __init__(self, pixmap: QPixmap, document=None):
         super().__init__()
@@ -475,9 +553,26 @@ class PinWindow(_PinBase):
 
 
 class _PinTextEdit(QTextEdit):
+    # 只读时双击、中键、快捷键都交给贴图窗口，行为与图片贴图一致；编辑中保留文本框原生操作。
     def mouseDoubleClickEvent(self, event):
-        self.setReadOnly(False)
-        super().mouseDoubleClickEvent(event)
+        if self.isReadOnly():
+            self.parentWidget().mouseDoubleClickEvent(event)
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            self.parentWidget().mousePressEvent(event)
+        else:
+            super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        if not self.isReadOnly() and event.key() == Qt.Key_Escape:
+            self.setReadOnly(True)
+        elif self.isReadOnly() and not (event.modifiers() & Qt.ControlModifier and event.key() in (Qt.Key_C, Qt.Key_A)):
+            self.parentWidget().keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
 
     def focusOutEvent(self, event):
         self.setReadOnly(True)
@@ -507,7 +602,7 @@ class PinTextWindow(_PinBase):
         self._content.setAcceptRichText(False)
         self._content.setPlainText(text)
         self._content.setReadOnly(True)
-        self._content.setToolTip("可直接滑选文字，双击编辑；拖动边缘移动贴图")
+        self._content.setToolTip("可直接滑选文字；拖动边缘移动；右键“编辑文字”修改，Esc 结束编辑")
         self._content.textChanged.connect(self.stateChanged.emit)
         # 编辑时贴图随内容伸缩，左上角不动。
         self._content.textChanged.connect(self._resize_content)
@@ -524,6 +619,10 @@ class PinTextWindow(_PinBase):
         document.setTextWidth(width)
         height = min(document.size().height(), _TEXT_MAX_HEIGHT * self._scale)
         return QSize(ceil(width) + 1, ceil(height))
+
+    def _edit_text(self):
+        self._content.setReadOnly(False)
+        self._content.setFocus()
 
     def copy(self):
         QGuiApplication.clipboard().setText(self._content.toPlainText())

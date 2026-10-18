@@ -307,7 +307,7 @@ class HighlightMarkItem(_MarkItemBase):
 
     def paint(self, p: QPainter, _opt, _w):
         color = QColor(self._color)
-        color.setAlphaF(self._opacity / 100)
+        color.setAlphaF(self._color.alphaF() * self._opacity / 100)
         p.setPen(QPen(color, self._highlight_width, Qt.SolidLine,
                       Qt.RoundCap, Qt.RoundJoin))
         p.drawPath(self._path)

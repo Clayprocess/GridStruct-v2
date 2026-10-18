@@ -155,8 +155,9 @@ def _validate_state(state):
         value = state[key]
         if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
             raise ValueError(f"贴图 {key} 超出范围")
-    for key in ("topmost", "click_through"):
-        if type(state[key]) is not bool:
+    for key in ("topmost", "click_through", "locked"):
+        # locked 是后加字段，旧会话里没有。
+        if type(state.get(key, False)) is not bool:
             raise ValueError(f"贴图 {key} 状态无效")
     if state["kind"] == "text":
         if not isinstance(state["text"], str):

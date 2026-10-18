@@ -6,6 +6,7 @@ from PySide6.QtCore import (Qt, QRect, QPoint, Signal, QObject, QTimer, QEvent,
 from styles import tokens as T
 from ui import floating_window_type, ask_confirmation
 from settings import get_settings
+from annotate import shortcut_tool
 from .screen import ScreenManager, capture_virtual_desktop
 from .snap import RegionDetector
 
@@ -268,13 +269,20 @@ class ScreenShotWindow(QObject):
             self.update(dirty | self._hover_region())
             return
         dx, dy = pos.x() - self._drag_start.x(), pos.y() - self._drag_start.y()
+        square = bool(event.modifiers() & Qt.ShiftModifier)
         if self._drag_mode == "create":
+            if square:
+                # 同 PixPin：按住 Shift 锁定 1:1，以按下点为锚点。
+                side = max(abs(dx), abs(dy))
+                pos = self._drag_start + QPoint(side if dx >= 0 else -side, side if dy >= 0 else -side)
             self._sel = QRect(self._drag_start, pos).normalized()
         elif self._drag_mode == "move":
             self._sel = self._sel_start.translated(dx, dy)
             self._clamp_position()
         else:
             self._resize_by_handle(self._sel_start, self._drag_mode, dx, dy)
+            if square:
+                self._square_by_handle(self._drag_mode)
         self._sel = self._sel.intersected(self._vg)
         self.update(dirty | self._selection_region(previous) | self._hover_region())
         self.selectionChanged.emit(QRect(self._sel))
@@ -349,18 +357,20 @@ class ScreenShotWindow(QObject):
             self.actionRequested.emit("copy" if key == Qt.Key_C else "save")
         elif self._keep_open and not self._sel.isNull() and modifiers & Qt.ShiftModifier and key == Qt.Key_O:
             self.actionRequested.emit("ocr")
-        elif (self._keep_open and not self._sel.isNull() and modifiers == Qt.ShiftModifier
-              and Qt.Key_A <= key <= Qt.Key_Z):
-            from annotate import TOOL_SHORTCUTS
-            tool = TOOL_SHORTCUTS.get(chr(key)) if key < 0x110000 else None
-            if tool:
-                self.actionRequested.emit(f"tool:{tool}")
+        elif self._keep_open and not self._sel.isNull() and shortcut_tool(event):
+            self.actionRequested.emit(f"tool:{shortcut_tool(event)}")
         elif not self._sel.isNull() and key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
             previous, dirty = QRect(self._sel), self._hover_region()
-            step = 10 if modifiers & Qt.ShiftModifier else 1
-            delta = {Qt.Key_Left: (-step, 0), Qt.Key_Right: (step, 0), Qt.Key_Up: (0, -step), Qt.Key_Down: (0, step)}[key]
-            self._sel.translate(*delta)
-            self._clamp_position()
+            # 同 PixPin：方向键移动 1px；Shift+方向键把对应那条边向内收 1px，Ctrl+方向键向外扩 1px。
+            dx, dy = {Qt.Key_Left: (-1, 0), Qt.Key_Right: (1, 0), Qt.Key_Up: (0, -1), Qt.Key_Down: (0, 1)}[key]
+            if modifiers & (Qt.ShiftModifier | Qt.ControlModifier):
+                sign = -1 if modifiers & Qt.ShiftModifier else 1
+                edges = self._sel.adjusted(min(dx, 0) * sign, min(dy, 0) * sign, max(dx, 0) * sign, max(dy, 0) * sign)
+                if edges.width() >= _MIN_SIZE and edges.height() >= _MIN_SIZE:
+                    self._sel = edges.intersected(self._vg)
+            else:
+                self._sel.translate(dx, dy)
+                self._clamp_position()
             self.selectionChanged.emit(QRect(self._sel))
             self.update(dirty | self._selection_region(previous) | self._hover_region())
 
@@ -389,6 +399,14 @@ class ScreenShotWindow(QObject):
                 return i
         return None
 
+
+    def _square_by_handle(self, h: int):
+        # 以拖动手柄对面的角或边为锚点补成正方形；拖边时以该边的长度为准。
+        s = self._sel
+        side = s.height() if h in (1, 5) else s.width() if h in (3, 7) else max(s.width(), s.height())
+        left = s.right() - side + 1 if h in (0, 6, 7) else s.left()
+        top = s.bottom() - side + 1 if h in (0, 1, 2) else s.top()
+        self._sel = QRect(left, top, side, side)
 
     def _resize_by_handle(self, s: QRect, h: int, dx: int, dy: int):
         x, y, w, hh = s.x(), s.y(), s.width(), s.height()

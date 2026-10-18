@@ -177,7 +177,7 @@ class ToolOptions(QWidget):
         for name, color in zip(_COLOR_NAMES, T.ANNOTATION_COLORS):
             button = self._swatch_button(row, name)
             button.setIcon(_swatch_icon(color))
-            button.clicked.connect(lambda _=False, c=color: self._canvas.update_style(key, QColor(c)))
+            button.clicked.connect(lambda _=False, c=color: self._pick_preset(key, c))
             group.addButton(button)
             buttons[color] = button
 
@@ -206,7 +206,7 @@ class ToolOptions(QWidget):
         button.setIconSize(QSize(_SWATCH, _SWATCH))
         button.clicked.connect(lambda: self._choose_color(key))
         (row.layout() if row is not None else self._layout).addWidget(button)
-        self._bind(key, button, lambda value: button.setIcon(_swatch_icon(value.name(), current=True)))
+        self._bind(key, button, lambda value: button.setIcon(_swatch_icon(value, current=True)))
         return button
 
     def _width(self):
@@ -344,8 +344,15 @@ class ToolOptions(QWidget):
 
         self._bind(key, menu, refresh)
 
+    def _pick_preset(self, key, name):
+        # 透明度是 Ctrl+滚轮单独调的，换预设色时保留它。
+        color = QColor(name)
+        color.setAlpha(getattr(self._canvas.style, key).alpha())
+        self._canvas.update_style(key, color)
+
     def _choose_color(self, key):
-        color = QColorDialog.getColor(getattr(self._canvas.style, key), self, "选择颜色")
+        color = QColorDialog.getColor(getattr(self._canvas.style, key), self, "选择颜色",
+                                      QColorDialog.ShowAlphaChannel)
         if color.isValid():
             self._canvas.update_style(key, color)
 

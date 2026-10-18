@@ -41,7 +41,7 @@ class AnnotationCanvas(QGraphicsView):
                 default = getattr(style, key)
                 stored_key = f"annotation/{name}/{key}"
                 if isinstance(default, QColor):
-                    value = QColor(self._settings.value(stored_key, default.name()))
+                    value = QColor(self._settings.value(stored_key, default.name(QColor.HexArgb)))
                 else:
                     value = self._settings.value(stored_key, default, type=type(default))
                 setattr(style, key, value)
@@ -201,12 +201,12 @@ class AnnotationCanvas(QGraphicsView):
         if old_preview is not None:
             self.viewport().update(old_preview.united(self._eraser_preview_rect()))
         if key in _REMEMBERED_STYLE and self.options_tool_id:
-            stored = value.name() if isinstance(value, QColor) else value
+            stored = value.name(QColor.HexArgb) if isinstance(value, QColor) else value
             self._settings.setValue(f"annotation/{self.options_tool_id}/{key}", stored)
         if key == "color" and self._settings.value("same_tool_color", False, type=bool):
             for name, style in self.styles.items():
                 style.color = QColor(value)
-                self._settings.setValue(f"annotation/{name}/color", value.name())
+                self._settings.setValue(f"annotation/{name}/color", value.name(QColor.HexArgb))
         if key == "serial_start":
             self._scene.setProperty("serial_next", value)
             if style.serial_global:
@@ -505,6 +505,9 @@ class AnnotationCanvas(QGraphicsView):
         if self._loupe is not None:
             event.ignore()
             return
+        if event.modifiers() & Qt.ControlModifier:
+            self._wheel_color_alpha(event)
+            return
         if not self.options_tool_id or not self.style.wheel_enabled:
             if self.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded:
                 super().wheelEvent(event)
@@ -521,6 +524,18 @@ class AnnotationCanvas(QGraphicsView):
             return
         step = 1 if event.angleDelta().y() > 0 else -1
         self.update_style(key, max(lo, min(hi, getattr(self.style, key) + step)))
+        event.accept()
+
+    def _wheel_color_alpha(self, event):
+        # 同 PixPin：Ctrl+滚轮调当前颜色透明度，每格 10%；下限 10%，免得标注画出来却看不见。
+        if (self.options_tool_id in ("", "mosaic", "eraser", "magnifier")
+                or not self.style_key_enabled("color")):
+            event.ignore()
+            return
+        color = QColor(self.style.color)
+        step = 0.1 if event.angleDelta().y() > 0 else -0.1
+        color.setAlphaF(round(max(0.1, min(1.0, color.alphaF() + step)), 1))
+        self.update_style("color", color)
         event.accept()
 
     def _selection_hit(self, pos):

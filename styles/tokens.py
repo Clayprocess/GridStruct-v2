@@ -86,7 +86,7 @@ PIXEL_GRID = (0, 0, 0, 60)
 FLOAT_PANEL_SHADOW = (0, 0, 0, 42)
 # 贴图阴影：由外向内逐层叠加的 alpha，层数即阴影宽度（px）。
 PIN_SHADOW_ALPHAS = (3, 5, 8, 11, 15, 20)
-# 贴图状态色：操作中为蓝、鼠标穿透为绿，其余时间是普通黑影。
-PIN_STATE_COLORS = {"active": "#3b82f6", "click_through": "#22c55e"}
+# 贴图状态色（同 PixPin）：操作中蓝、锁定橙、鼠标穿透绿，其余时间是普通黑影。
+PIN_STATE_COLORS = {"active": "#3b82f6", "locked": "#f97316", "click_through": "#22c55e"}
 # 贴图缩放/不透明度提示停留时长。
 PIN_HUD_MS = 1200
