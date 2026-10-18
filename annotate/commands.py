@@ -77,7 +77,10 @@ class RemoveMarkCommand(QUndoCommand):
         self._scene = scene
         self._items = list(items)
         # 标注 Z 值相同，叠放靠插入顺序；重新 addItem 会落到最上层，撤销时要放回原位。
-        self._order = [it for it in scene.items(Qt.AscendingOrder) if it.parentItem() is None]
+        # 只记标注本身：OCR 文字层会在识别失效时被单独销毁，不能拿来当邻居。
+        # 不用 parentItem() 判顶层：PySide6 对没有 Python 引用的顶层图元（如背景截图）调用它，
+        # 会把所有权交给临时包装，包装一释放图元就被删掉。
+        self._order = [it for it in scene.items(Qt.AscendingOrder) if hasattr(it, "style_keys")]
         from .items import SerialMarkItem
         self._serials = {it: it.index for it in [*scene.items(), *items]
                          if isinstance(it, SerialMarkItem)}

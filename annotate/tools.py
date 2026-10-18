@@ -100,6 +100,8 @@ class TextTool(MarkTool):
 
     def on_press(self, scene, pos, undo):
         self.finish(undo)
+        # 上一条提交时会被选中；不清掉的话，改样式会落到上一条并结束这次输入。
+        scene.clearSelection()
         self._scene = scene
         self._item = TextMarkItem(self._style)
         self._item.setPos(pos)
