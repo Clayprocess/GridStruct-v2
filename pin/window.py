@@ -3,25 +3,38 @@
 from pathlib import Path
 from uuid import uuid4
 
+from math import ceil
+
 from PySide6.QtWidgets import (
     QWidget, QLabel, QTextEdit, QMenu, QFileDialog,
     QApplication, QGraphicsView, QGraphicsScene,
     QGraphicsTextItem, QFrame,
 )
-from PySide6.QtGui import QPixmap, QGuiApplication, QFont, QPainter
-from PySide6.QtCore import Qt, QPoint, QSize, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QPixmap, QGuiApplication, QFont, QPainter, QColor, QPen
+from PySide6.QtCore import Qt, QEvent, QPoint, QRectF, QSize, Signal, QPropertyAnimation, QEasingCurve, QTimer
 
 from styles import tokens as T
 from ui import floating_window_type, MessageDialog, tinted_icon, show_message
 
 _MIN_SCALE = 0.2
 _MAX_SCALE = 5.0
-_STATUS_HEIGHT = 26
+_SHADOW = len(T.PIN_SHADOW_ALPHAS)
+# 阴影外再留 1px 描边，内容从这里开始；贴图位置、会话坐标都以内容左上角为准。
+_FRAME = _SHADOW + 1
+_TEXT_PADDING = 12
+_TEXT_MIN_WIDTH = 160
+_TEXT_MAX_WIDTH = 480
+_TEXT_MAX_HEIGHT = 360
+# OCR 进行中提示常驻，结束后按较长时长淡出，方便读完结果说明。
+_OCR_FINAL_STATES = {"idle", "completed", "empty", "failed", "timeout", "cancelled"}
+
+
+def _theme():
+    return T.THEMES[QApplication.instance().property("theme_mode") or "light"]
 
 
 def _fg_icon(name):
-    mode = QApplication.instance().property("theme_mode") or "light"
-    return tinted_icon(name, T.THEMES[mode]["foreground"], 16)
+    return tinted_icon(name, _theme()["foreground"], 16)
 
 
 class _ConfirmDialog(MessageDialog):
@@ -33,10 +46,14 @@ class _PinBase(QWidget):
     stateChanged = Signal()
     closed = Signal(object)
     kind = ""
+    _padding = 0
+    _radius = 0
 
     def __init__(self):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | floating_window_type())
         self.setAttribute(Qt.WA_DeleteOnClose)
+        # 阴影需要半透明窗口；卡片和阴影都由 paintEvent 画。
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self.pin_id = uuid4().hex
         self._scale = 1.0
         self._opacity = 1.0
@@ -53,38 +70,89 @@ class _PinBase(QWidget):
         self._fade.finished.connect(self._fade_finished)
         self._drag_off = None
         self._ocr_status = ""
-        self._status = QLabel(self)
-        self._status.setWordWrap(True)
-        self._status.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self._status.setAlignment(Qt.AlignCenter)
-        self._status.setToolTip("按住状态栏拖动贴图；滚轮缩放；右键打开菜单")
-        self._update_status()
+        # 缩放、透明度、OCR 状态只在变化时浮出提示，贴图平时只有图本身。
+        self._hud = QLabel(self)
+        self._hud.setObjectName("PinHud")
+        self._hud.setWordWrap(True)
+        self._hud.setAlignment(Qt.AlignCenter)
+        self._hud.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._hud.hide()
+        self._hud_timer = QTimer(self)
+        self._hud_timer.setSingleShot(True)
+        self._hud_timer.timeout.connect(self._hud.hide)
 
-    def _update_status(self):
-        suffix = " · 鼠标穿透（托盘可退出）" if self._click_through else ""
-        text = f"缩放: {self._scale:.0%}  不透明度: {self.windowOpacity():.0%}{suffix}"
-        if self._ocr_status:
-            text += "\n" + self._ocr_status
-        self._status.setText(text)
-        self._status.setToolTip(text + "\n拖动状态栏移动贴图；滚轮缩放；右键打开菜单")
+    @property
+    def _origin(self):
+        return QPoint(_FRAME + self._padding, _FRAME + self._padding)
+
+    def move_content_to(self, pos: QPoint):
+        """让贴图内容（而不是阴影边缘）落在截图原位置。"""
+        self.move(pos - self._origin)
+
+    def _show_hud(self, text, duration=T.PIN_HUD_MS):
+        card = self.rect().adjusted(_FRAME, _FRAME, -_FRAME, -_FRAME)
+        self._hud.setText(text)
+        self._hud.setFixedWidth(min(self._hud.sizeHint().width(), max(1, card.width() - 16)))
+        self._hud.setFixedHeight(self._hud.heightForWidth(self._hud.width()))
+        self._hud.move(card.center().x() - self._hud.width() // 2,
+                       max(card.top(), card.bottom() - self._hud.height() - 10))
+        self._hud.show()
+        self._hud.raise_()
+        if duration:
+            self._hud_timer.start(duration)
+        else:
+            self._hud_timer.stop()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.ActivationChange:
+            self.update()
+
+    def _state_color(self):
+        # 参照 PixPin：阴影颜色表达贴图状态，多张贴图并排时一眼看出哪张在操作、哪张已穿透。
+        if self._click_through:
+            return QColor(T.PIN_STATE_COLORS["click_through"])
+        if self.isActiveWindow():
+            return QColor(T.PIN_STATE_COLORS["active"])
+        return None
+
+    def paintEvent(self, _event):
+        t = _theme()
+        state = self._state_color()
+        card = QRectF(self.rect()).adjusted(_SHADOW + 0.5, _SHADOW + 0.5, -_SHADOW - 0.5, -_SHADOW - 0.5)
+        with QPainter(self) as p:
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(Qt.NoPen)
+            # 由外向内叠加半透明圆角矩形，近似柔和投影，避免引入图形效果的离屏开销。
+            for inset, alpha in enumerate(T.PIN_SHADOW_ALPHAS):
+                spread = _SHADOW - inset
+                color = QColor(state) if state is not None else QColor(0, 0, 0)
+                # 彩色光晕比黑影淡，需要加倍 alpha 才看得出。
+                color.setAlpha(alpha * 2 if state is not None else alpha)
+                p.setBrush(color)
+                p.drawRoundedRect(card.adjusted(-spread, -spread, spread, spread),
+                                  self._radius + spread, self._radius + spread)
+            p.setBrush(QColor(t["popover"]))
+            p.setPen(QPen(state if state is not None else QColor(t["border"]), 1))
+            p.drawRoundedRect(card, self._radius, self._radius)
 
     def _resize_content(self):
         size = self._content_size()
-        self._content.setGeometry(0, 0, size.width(), size.height())
-        self._update_status()
-        status_height = max(_STATUS_HEIGHT, self._status.heightForWidth(size.width()))
-        self._status.setGeometry(0, size.height(), size.width(), status_height)
-        self.resize(size.width(), size.height() + status_height)
+        self._content.setGeometry(self._origin.x(), self._origin.y(), size.width(), size.height())
+        margin = 2 * (_FRAME + self._padding)
+        self.resize(size.width() + margin, size.height() + margin)
 
     def zoom(self, factor: float, anchor: QPoint | None = None):
         old_scale = self._scale
         self._scale = min(_MAX_SCALE, max(_MIN_SCALE, old_scale * factor))
         if anchor is None:
-            anchor = self._content.rect().center()
+            anchor = self._content.geometry().center()
         screen_anchor = self.mapToGlobal(anchor)
         ratio = self._scale / old_scale
+        offset = anchor - self._origin
         self._resize_content()
-        self.move(screen_anchor - QPoint(round(anchor.x() * ratio), round(anchor.y() * ratio)))
+        self.move(screen_anchor - self._origin - QPoint(round(offset.x() * ratio), round(offset.y() * ratio)))
+        self._show_hud(f"{self._scale:.0%}")
         self.stateChanged.emit()
 
     def wheelEvent(self, event):
@@ -98,7 +166,7 @@ class _PinBase(QWidget):
             return
         self._opacity = min(1.0, max(0.1, opacity))
         self._animate_opacity(self._opacity * (0.5 if self._click_through else 1.0))
-        self._update_status()
+        self._show_hud(f"不透明度 {self._opacity:.0%}")
         self.stateChanged.emit()
 
     def set_topmost(self, enabled: bool):
@@ -122,7 +190,8 @@ class _PinBase(QWidget):
             self.show()
         self.setWindowOpacity(current)
         self._animate_opacity(self._opacity * (0.5 if enabled else 1.0))
-        self._update_status()
+        self._show_hud("鼠标穿透已开启，从托盘菜单退出" if enabled else "鼠标穿透已关闭", T.PIN_HUD_MS * 2)
+        self.update()
         self.stateChanged.emit()
 
     def _animate_opacity(self, target):
@@ -146,8 +215,6 @@ class _PinBase(QWidget):
         if self._closing:
             self._close_ready = True
             self.close()
-        else:
-            self._update_status()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -229,7 +296,7 @@ class _PinBase(QWidget):
     def state(self):
         return {
             "id": self.pin_id, "kind": self.kind,
-            "x": self.x(), "y": self.y(), "scale": self._scale,
+            "x": self.x() + self._origin.x(), "y": self.y() + self._origin.y(), "scale": self._scale,
             "opacity": self._opacity, "topmost": self._topmost,
             "click_through": self._click_through,
         }
@@ -238,7 +305,7 @@ class _PinBase(QWidget):
         self.pin_id = state["id"]
         self._scale = state["scale"]
         self._resize_content()
-        self.move(state["x"], state["y"])
+        self.move_content_to(QPoint(state["x"], state["y"]))
         if not any(screen.geometry().intersects(self.geometry()) for screen in QGuiApplication.screens()):
             self.move(QGuiApplication.primaryScreen().availableGeometry().topLeft())
         # 恢复时先一次性准备窗口属性，由模块注册后统一显示，避免中途重复淡入。
@@ -248,7 +315,6 @@ class _PinBase(QWidget):
         self.setWindowFlag(Qt.WindowStaysOnTopHint, self._topmost)
         self.setWindowFlag(Qt.WindowTransparentForInput, self._click_through)
         self.setWindowOpacity(self._opacity * (0.5 if self._click_through else 1.0))
-        self._update_status()
 
 
 class _PinImageView(QGraphicsView):
@@ -301,6 +367,7 @@ class _PinImageView(QGraphicsView):
 
 class PinWindow(_PinBase):
     kind = "image"
+    _HINT = "拖动移动；滚轮缩放；右键打开菜单。识别后可滑选文字并复制"
 
     def __init__(self, pixmap: QPixmap, document=None):
         super().__init__()
@@ -310,7 +377,7 @@ class PinWindow(_PinBase):
         self._document = None
         self._text_layer = None
         self._content = _PinImageView(self._base, self)
-        self._content.setToolTip("拖动图片空白处或状态栏移动；识别后可滑选文字并复制")
+        self._content.setToolTip(self._HINT)
         self._resize_content()
         if document is not None:
             self._ensure_ocr_controller()
@@ -366,7 +433,10 @@ class PinWindow(_PinBase):
 
     def _show_ocr_status(self, message, has_results):
         self._ocr_status = message + ("；右键查看识别全文" if has_results else "")
-        self._resize_content()
+        # 提示淡出后，最近一次 OCR 状态仍可悬停查看。
+        self._content.setToolTip(f"{self._ocr_status}\n{self._HINT}")
+        running = self._ocr_controller is not None and self._ocr_controller.state not in _OCR_FINAL_STATES
+        self._show_hud(self._ocr_status, 0 if running else T.PIN_HUD_MS * 3)
 
     def _set_document(self, document):
         if self._document is not None:
@@ -422,24 +492,38 @@ class _PinTextEdit(QTextEdit):
 
 class PinTextWindow(_PinBase):
     kind = "text"
+    # 文字区之外的内边距就是拖动把手，文字本身留给滑选和编辑。
+    _padding = _TEXT_PADDING
+    _radius = T.RADIUS_LG
 
     def __init__(self, text: str):
         super().__init__()
         self.setWindowTitle("文字贴图")
         self._content = _PinTextEdit(self)
+        self._content.setObjectName("PinText")
+        self._content.setFrameShape(QFrame.NoFrame)
+        self._content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._content.document().setDocumentMargin(0)
         self._content.setAcceptRichText(False)
         self._content.setPlainText(text)
         self._content.setReadOnly(True)
-        self._content.setToolTip("可直接滑选文字，双击编辑；拖动底部状态栏移动贴图")
+        self._content.setToolTip("可直接滑选文字，双击编辑；拖动边缘移动贴图")
         self._content.textChanged.connect(self.stateChanged.emit)
+        # 编辑时贴图随内容伸缩，左上角不动。
+        self._content.textChanged.connect(self._resize_content)
         self._resize_content()
 
     def _content_size(self):
         font = QFont(self._content.font())
         font.setPixelSize(max(1, round(T.FONT_MD * self._scale)))
         self._content.setFont(font)
-        self._content.document().setDefaultFont(font)
-        return QSize(round(360 * self._scale), round(240 * self._scale))
+        document = self._content.document().clone()
+        document.setDefaultFont(font)
+        document.setTextWidth(-1)
+        width = min(max(document.idealWidth(), _TEXT_MIN_WIDTH * self._scale), _TEXT_MAX_WIDTH * self._scale)
+        document.setTextWidth(width)
+        height = min(document.size().height(), _TEXT_MAX_HEIGHT * self._scale)
+        return QSize(ceil(width) + 1, ceil(height))
 
     def copy(self):
         QGuiApplication.clipboard().setText(self._content.toPlainText())

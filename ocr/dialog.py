@@ -109,7 +109,8 @@ class OCRResultDialog(BaseDialog):
         self._reset.setProperty("class", "outline")
         self._reset.clicked.connect(self._reset_selected)
         self._apply = QPushButton("应用校正")
-        self._apply.setProperty("class", "primary")
+        # 底部"复制校正结果"是本窗口唯一主操作，应用校正降为次按钮。
+        self._apply.setProperty("class", "secondary")
         self._apply.clicked.connect(self._apply_correction)
         actions.addWidget(self._reset)
         actions.addStretch()

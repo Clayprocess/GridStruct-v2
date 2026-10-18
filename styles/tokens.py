@@ -14,9 +14,11 @@ LIGHT = {
     # 主按钮（深底白字）
     "primary":           "#18181b",  # --primary: 240 5.9% 10%
     "primary_foreground":"#fafafa",  # --primary-foreground: 0 0% 98%
+    "primary_hover":     "#27272a",  # 对应 shadcn primary/90：hover 只调亮度，不反转
     # 次按钮 / 柔和背景
     "secondary":         "#f4f4f5",  # --secondary: 240 4.8% 95.9%
     "secondary_foreground": "#18181b",
+    "secondary_hover":   "#e4e4e7",
     "muted":             "#f4f4f5",  # --muted
     "muted_foreground":  "#71717a",  # --muted-foreground: 240 3.8% 46.1%
     "accent":            "#f4f4f5",  # --accent（hover 背景）
@@ -24,6 +26,7 @@ LIGHT = {
     # 危险操作
     "destructive":       "#ef4444",  # --destructive: 0 84.2% 60.2%
     "destructive_foreground": "#fafafa",
+    "destructive_hover": "#dc2626",
     # 边框与输入框
     "border":            "#e4e4e7",  # --border: 240 5.9% 90%
     "input":             "#e4e4e7",  # --input
@@ -39,14 +42,18 @@ DARK = {
     "popover_foreground":"#fafafa",
     "primary":           "#fafafa",  # 深色下主按钮反转为白底黑字
     "primary_foreground":"#18181b",
+    "primary_hover":     "#e4e4e7",
     "secondary":         "#27272a",  # --secondary: 240 3.7% 15.9%
     "secondary_foreground": "#fafafa",
+    "secondary_hover":   "#3f3f46",
     "muted":             "#27272a",
     "muted_foreground":  "#a1a1aa",  # --muted-foreground: 240 5% 64.9%
     "accent":            "#27272a",
     "accent_foreground": "#fafafa",
-    "destructive":       "#7f1d1d",  # --destructive: 0 62.8% 30.6%
+    # shadcn 深色 #7f1d1d 在 Windows 深色背景上像禁用态，提亮到 red-600。
+    "destructive":       "#dc2626",
     "destructive_foreground": "#fafafa",
+    "destructive_hover": "#b91c1c",
     "border":            "#27272a",
     "input":             "#27272a",
     "ring":              "#d4d4d8",  # --ring: 240 4.9% 83.9%
@@ -77,3 +84,9 @@ CAPTURE_TIP = (9, 9, 11, 230)
 CAPTURE_BACKGROUND = (0, 0, 0)
 PIXEL_GRID = (0, 0, 0, 60)
 FLOAT_PANEL_SHADOW = (0, 0, 0, 42)
+# 贴图阴影：由外向内逐层叠加的 alpha，层数即阴影宽度（px）。
+PIN_SHADOW_ALPHAS = (3, 5, 8, 11, 15, 20)
+# 贴图状态色：操作中为蓝、鼠标穿透为绿，其余时间是普通黑影。
+PIN_STATE_COLORS = {"active": "#3b82f6", "click_through": "#22c55e"}
+# 贴图缩放/不透明度提示停留时长。
+PIN_HUD_MS = 1200

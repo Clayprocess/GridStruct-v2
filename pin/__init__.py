@@ -47,7 +47,7 @@ def _closed(window):
 
 def _register(window, pos=None):
     if pos is not None:
-        window.move(pos)
+        window.move_content_to(pos)
     _open_pins.append(window)
     window.stateChanged.connect(_schedule_save)
     window.closed.connect(_closed)
