@@ -88,9 +88,8 @@ class ToolOptions(QWidget):
             self._choice("serial_start", "起点", [("从 0 开始", 0), ("从 1 开始", 1)])
             self._check("serial_auto_renumber", "删除后重排")
             self._check("serial_global", "跨截图连续编号")
-            # TODO：逆向材料未确认其他视觉类型，当前仅实现圆形数字。
-            serial_type = QLabel("圆形数字")
-            self._add("类型", serial_type)
+            self._choice("serial_type", "类型", [("圆形数字", "circle"), ("描边圆形", "circle_outline"),
+                                                  ("方形数字", "square"), ("圆形字母", "letter")])
             adjust = QWidget()
             row = QHBoxLayout(adjust)
             row.setContentsMargins(0, 0, 0, 0)

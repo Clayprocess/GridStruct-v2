@@ -136,6 +136,12 @@ def serial_undo():
     assert [i.index for i in items] == [1, 2, 3], "undo leaves duplicate serial numbers"
     c.redo()
     assert sorted(i.index for i in c.scene().items() if isinstance(i, SerialMarkItem)) == [1, 2]
+    c.scene().clearSelection()
+    items[2].setSelected(True)
+    c.update_style("serial_type", "letter")
+    assert items[2].style.serial_type == "letter" and items[2]._label() == "B"
+    c.undo()
+    assert items[2].style.serial_type == "circle" and items[2]._label() == "2"
     c.deleteLater()
 
 
