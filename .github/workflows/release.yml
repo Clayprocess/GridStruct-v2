@@ -21,9 +21,9 @@ jobs:
       # 构建脚本和 PyInstaller 输出中文，Windows 控制台默认代码页会报编码错误。
       PYTHONUTF8: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -42,7 +42,7 @@ jobs:
           $name = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "pr-${{ github.event.pull_request.number }}" }
           Move-Item dist/release/GridStruct-V2-portable.zip "dist/GridStruct-V2-$name-portable.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: GridStruct-V2-portable
           path: dist/GridStruct-V2-*-portable.zip
