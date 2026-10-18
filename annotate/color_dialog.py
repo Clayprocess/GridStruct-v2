@@ -8,9 +8,15 @@ from ui import BaseDialog
 from settings import get_settings
 
 
+# 同 PixPin：默认 RGB，另有 Hex、HSV、HSL。
+COLOR_FORMATS = ("RGB", "Hex", "HSV", "HSL")
+
+
 def format_color(color, color_format):
     values = {"Hex": color.name().upper(), "RGB": f"rgb({color.red()}, {color.green()}, {color.blue()})",
-              "HSV": f"hsv({max(0, color.hue())}, {round(color.saturationF() * 100)}%, {round(color.valueF() * 100)}%)"}
+              "HSV": f"hsv({max(0, color.hue())}, {round(color.saturationF() * 100)}%, {round(color.valueF() * 100)}%)",
+              "HSL": f"hsl({max(0, color.hslHue())}, {round(color.hslSaturationF() * 100)}%, "
+                     f"{round(color.lightnessF() * 100)}%)"}
     return values[color_format]
 
 
@@ -29,8 +35,8 @@ class ColorDialog(BaseDialog):
         layout.addWidget(preview)
         form = QFormLayout()
         self.format = QComboBox()
-        self.format.addItems(["Hex", "RGB", "HSV"])
-        self.format.setCurrentText(get_settings().value("color_format", "Hex"))
+        self.format.addItems(COLOR_FORMATS)
+        self.format.setCurrentText(get_settings().value("color_format", COLOR_FORMATS[0]))
         self.value = QLineEdit()
         self.value.setReadOnly(True)
         form.addRow("颜色格式", self.format)

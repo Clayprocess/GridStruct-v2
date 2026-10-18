@@ -202,7 +202,7 @@ class FloatPanel(QWidget):
         btn = QToolButton(self)
         shortcut = (f"Shift+{DIGIT_TOOLS.index(btn_id) + 1}" if btn_id in DIGIT_TOOLS else
                     {"undo": "Ctrl+Z", "redo": "Ctrl+Y", "save": "Ctrl+S",
-                     "copy": "Ctrl+C", "ocr": "Shift+O", "pipette": "Tab 切换颜色格式",
+                     "copy": "Ctrl+C", "ocr": "Shift+O", "pipette": "Shift 切换颜色格式",
                      "longshot": "Ctrl+Alt+L", "confirm": "Enter", "cancel": "Esc"}.get(btn_id, ""))
         btn.setToolTip(f"{label} ({shortcut})" if shortcut else label)
         btn.setAccessibleName(label)

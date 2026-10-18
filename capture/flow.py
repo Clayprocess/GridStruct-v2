@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication
 from .screen import capture_virtual_desktop
 from .overlay import ScreenShotWindow
 from annotate import AnnotationWindow, FloatPanel
-from ui import show_message
+from ui import show_message, show_toast
 
 
 class ScreenshotFlow(QObject):
@@ -164,7 +164,7 @@ class ScreenshotFlow(QObject):
 
     def _on_finished(self, pixmap):
         QApplication.clipboard().setPixmap(pixmap)
-        print(f"[截图] 已复制 {pixmap.width()}×{pixmap.height()} 到剪贴板")
+        show_toast("已复制到剪贴板")
         self._cleanup()
 
     def cancel(self):

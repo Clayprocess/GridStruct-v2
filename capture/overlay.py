@@ -1,14 +1,15 @@
 # 每屏保留原生截图，控制器共享全局逻辑选区，避免混合 DPI 跨窗重采样。
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor, QRegion
-from PySide6.QtCore import (Qt, QRect, QPoint, Signal, QObject, QTimer, QEvent,
+from PySide6.QtCore import (Qt, QRect, QPoint, QSize, Signal, QObject, QTimer, QEvent,
                            Property, QPropertyAnimation, QEasingCurve)
 from styles import tokens as T
-from ui import floating_window_type, ask_confirmation
+from ui import floating_window_type, ask_confirmation, show_toast
 from settings import get_settings
 from annotate import shortcut_tool
 from .screen import ScreenManager, capture_virtual_desktop
 from .snap import RegionDetector
+from .size_editor import SizeEditor
 
 _HANDLE = 8
 _MIN_SIZE = 4
@@ -47,6 +48,8 @@ class ScreenShotWindow(QObject):
         self._windows = []
         self._keyboard_windows = []
         self._pipette_mode = False
+        self._shift_alone = False
+        self._size_editor = None
         self._build_windows()
         QApplication.instance().installEventFilter(self)
         self._manager.changed.connect(self._screens_changed)
@@ -154,18 +157,27 @@ class ScreenShotWindow(QObject):
         if (not self._frozen and not self._closed and isinstance(watched, QWidget)
                 and watched.window() in self._windows + self._keyboard_windows):
             if event.type() == QEvent.KeyPress:
+                # 同 PixPin 按 Shift 切换颜色格式；但 Shift 也用于 1:1、收边和切工具，
+                # 所以只在单独按下又松开、中间没有别的键或拖拽时才切换。
+                if event.key() == Qt.Key_Shift:
+                    self._shift_alone = self._shift_alone or not event.isAutoRepeat()
+                    return True
+                self._shift_alone = False
                 # Tab 在 QWidget.event 中先于 keyPressEvent 遍历焦点，必须在这里拦截。
                 if event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
-                    if self._pipette_mode:
-                        color_format = self._windows[0].loupe.cycle_color_format()
-                        for window in self._windows[1:]:
-                            window.loupe.set_color_format(color_format)
                     return True
                 if event.key() in (Qt.Key_Escape, Qt.Key_Return, Qt.Key_Enter,
                                    Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down,
-                                   Qt.Key_C, Qt.Key_S, Qt.Key_O) or event.modifiers() == Qt.ShiftModifier:
+                                   Qt.Key_A, Qt.Key_C, Qt.Key_R, Qt.Key_S, Qt.Key_O) or event.modifiers() == Qt.ShiftModifier:
                     self.key_press(event, watched.window())
                     return True
+            elif event.type() == QEvent.KeyRelease and event.key() == Qt.Key_Shift and not event.isAutoRepeat():
+                if self._shift_alone:
+                    self._shift_alone = False
+                    color_format = self._windows[0].loupe.cycle_color_format()
+                    for window in self._windows[1:]:
+                        window.loupe.set_color_format(color_format)
+                return True
         return super().eventFilter(watched, event)
 
     def _on_snap(self, rect):
@@ -201,6 +213,7 @@ class ScreenShotWindow(QObject):
             return
         # 按下尚未跨屏抓取鼠标，事件坐标可保留队列中的起点而不会被最新光标覆盖。
         pos = event.globalPosition().toPoint()
+        self._shift_alone = False
         if self._pipette_mode:
             window = next(window for window in self._windows if window.frame.geometry.contains(pos))
             color = window.loupe.pick(pos - window.frame.geometry.topLeft(), pos)
@@ -215,6 +228,9 @@ class ScreenShotWindow(QObject):
         self._selection_progress = 1.0
         self._pending_snap = QRect()
         self._pointer_pos = pos
+        if not self._sel.isNull() and self.size_tip()[0].contains(pos):
+            self._edit_size()
+            return
         handle = self._hit_handle(pos)
         if handle is not None:
             self._drag_mode = handle
@@ -256,7 +272,9 @@ class ScreenShotWindow(QObject):
             self._drag_mode = "create"
         if self._drag_mode is None:
             handle = self._hit_handle(pos)
-            if handle is not None:
+            if not self._sel.isNull() and self.size_tip()[0].contains(pos):
+                cursor = Qt.PointingHandCursor
+            elif handle is not None:
                 cursor = [Qt.SizeFDiagCursor, Qt.SizeVerCursor, Qt.SizeBDiagCursor, Qt.SizeHorCursor][handle % 4]
             elif self._sel.contains(pos):
                 cursor = Qt.SizeAllCursor
@@ -336,6 +354,7 @@ class ScreenShotWindow(QObject):
         for window in self._windows:
             window.loupe.hide()
         self.update()
+        get_settings().setValue("capture/last_region", QRect(self._sel))
         self.regionSelected.emit(QRect(self._sel))
         if not self._keep_open:
             self.close()
@@ -355,6 +374,17 @@ class ScreenShotWindow(QObject):
             self._accept_selection()
         elif self._keep_open and not self._sel.isNull() and modifiers & Qt.ControlModifier and key in (Qt.Key_C, Qt.Key_S):
             self.actionRequested.emit("copy" if key == Qt.Key_C else "save")
+        elif key == Qt.Key_C and not modifiers:
+            self._copy_color()
+        elif key == Qt.Key_R and not modifiers:
+            # 同 PixPin：R 复用上一次截图的选区。
+            last = get_settings().value("capture/last_region", QRect())
+            if last.intersects(self._vg):
+                self._set_selection(last)
+        elif key == Qt.Key_A and modifiers == Qt.ControlModifier:
+            # 同 PixPin：Ctrl+A 选中鼠标所在屏幕，再按一次选中全部屏幕。
+            screen = next(w.frame.geometry for w in self._windows if w.frame.geometry.contains(self._pointer_pos))
+            self._set_selection(self._vg if self._sel == screen else screen)
         elif self._keep_open and not self._sel.isNull() and modifiers & Qt.ShiftModifier and key == Qt.Key_O:
             self.actionRequested.emit("ocr")
         elif self._keep_open and not self._sel.isNull() and shortcut_tool(event):
@@ -373,6 +403,54 @@ class ScreenShotWindow(QObject):
                 self._clamp_position()
             self.selectionChanged.emit(QRect(self._sel))
             self.update(dirty | self._selection_region(previous) | self._hover_region())
+
+    def _set_selection(self, rect):
+        previous, dirty = QRect(self._sel), self._hover_region() | self._border_region(self._snap_rect)
+        self._sel = rect.intersected(self._vg)
+        self._snap_rect = QRect()
+        self.update(dirty | self._selection_region(previous) | self._hover_region())
+        self.selectionChanged.emit(QRect(self._sel))
+
+    def size_tip(self):
+        """尺寸提示的全局矩形和文字。"""
+        size = self._shot.pixel_size(self._sel)
+        text = f"{size.width()} × {size.height()} px"
+        fm = self._windows[0].fontMetrics()
+        width, height = fm.horizontalAdvance(text) + 16, fm.height() + 10
+        # 同 PixPin：尺寸固定在选区左上角上方，才点得到；上方放不下就放进选区内侧。
+        area = next((w.frame.geometry for w in self._windows if w.frame.geometry.contains(self._sel.topLeft())), self._vg)
+        top = self._sel.top() - height - 6
+        if top < area.top():
+            top = self._sel.top() + 6
+        left = min(self._sel.left(), area.right() - width + 1)
+        return QRect(left, top, width, height), text
+
+    def _edit_size(self):
+        tip = self.size_tip()[0]
+        self._size_editor = SizeEditor(self._shot.pixel_size(self._sel), self._resize_to)
+        self._size_editor.move(tip.topLeft())
+        self._size_editor.show()
+
+    def _resize_to(self, pixels):
+        # 输入的是物理像素，换回选区左上角所在屏幕的逻辑像素；左上角不动。
+        frame = next(w.frame for w in self._windows if w.frame.geometry.contains(self._sel.topLeft()))
+        dpr = frame.pixmap.width() / frame.geometry.width()
+        size = QSize(max(_MIN_SIZE, round(pixels.width() / dpr)), max(_MIN_SIZE, round(pixels.height() / dpr)))
+        self._set_selection(QRect(self._sel.topLeft(), size))
+
+    def _copy_color(self):
+        # 同 PixPin：按 C 按当前格式复制鼠标处的颜色并结束截图。
+        window = next(w for w in self._windows if w.frame.geometry.contains(self._pointer_pos))
+        window.loupe.pick(self._pointer_pos - window.frame.geometry.topLeft(), self._pointer_pos)
+        text = window.loupe.color_text
+        QApplication.clipboard().setText(text)
+        self.close()
+        show_toast(f"已复制 {text}")
+
+    def wheel(self, event):
+        # 同 PixPin：未框选时滚轮在吸附到的元素和它的父/子元素之间切换。
+        if self._sel.isNull() and self._drag_mode is None and not self._pipette_mode:
+            self._snap.step_level(1 if event.angleDelta().y() > 0 else -1)
 
     def start_pipette(self):
         self._pipette_mode = True
@@ -446,28 +524,13 @@ class _ScreenOverlay(QWidget):
         c = self.controller
         region = QRegion()
         if not c._sel.isNull():
-            if self.frame.geometry.contains(c._pointer_pos):
-                region |= QRegion(self._size_tip()[0].translated(self.frame.geometry.topLeft()).adjusted(-1, -1, 1, 1))
+            region |= QRegion(c.size_tip()[0].adjusted(-1, -1, 1, 1)).intersected(QRegion(self.frame.geometry))
         if not c._guides:
             return region
         geo = self.frame.geometry
         center = c._sel.center() if not c._sel.isNull() else c._pointer_pos
         x, y = center.x(), center.y()
         return region | (QRegion(QRect(x - 1, geo.top(), 3, geo.height())) | QRegion(QRect(geo.left(), y - 1, geo.width(), 3))).intersected(QRegion(geo))
-
-    def _size_tip(self):
-        c = self.controller
-        size = c._shot.pixel_size(c._sel)
-        text = f"{size.width()} × {size.height()} px"
-        fm = self.fontMetrics()
-        width, height = fm.horizontalAdvance(text) + 16, fm.height() + 10
-        pos = c._pointer_pos - self.frame.geometry.topLeft()
-        x, y = pos.x() + 16, pos.y() + 20
-        if x + width > self.width():
-            x = pos.x() - width - 8
-        if y + height > self.height():
-            y = pos.y() - height - 8
-        return QRect(max(0, x), max(0, y), width, height), text
 
     def paintEvent(self, event):
         c = self.controller
@@ -492,8 +555,9 @@ class _ScreenOverlay(QWidget):
                 if not c._frozen:
                     for _, handle in c._handles():
                         painter.drawRect(handle.translated(-offset))
-                    if self.frame.geometry.contains(c._pointer_pos):
-                        tip, text = self._size_tip()
+                    tip, text = c.size_tip()
+                    tip.translate(-offset)
+                    if tip.intersects(self.rect()):
                         painter.setBrush(QColor(*T.CAPTURE_TIP))
                         painter.drawRoundedRect(tip, 6, 6)
                         painter.setPen(QColor(T.DARK["foreground"]))
@@ -528,3 +592,6 @@ class _ScreenOverlay(QWidget):
 
     def keyPressEvent(self, event):
         self.controller.key_press(event, self)
+
+    def wheelEvent(self, event):
+        self.controller.wheel(event)

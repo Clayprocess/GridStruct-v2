@@ -164,7 +164,7 @@ class _PinBase(QWidget):
         delta = event.angleDelta().y()
         if delta and not self._locked:
             if event.modifiers() & Qt.ControlModifier:
-                self.set_opacity(self._opacity + 0.1 * delta / 120)
+                self.set_opacity(self._opacity + T.PIN_OPACITY_STEP * delta / 120)
             else:
                 self.zoom(1.1 ** (delta / 120), self.mapFromGlobal(event.globalPosition().toPoint()))
         event.accept()
@@ -213,10 +213,14 @@ class _PinBase(QWidget):
     def set_opacity(self, opacity: float):
         if self._closing:
             return
-        self._opacity = min(1.0, max(0.1, opacity))
-        self._animate_opacity(self._opacity * (0.5 if self._click_through else 1.0))
+        self._opacity = round(min(1.0, max(0.1, opacity)), 2)
+        self._animate_opacity(self._shown_opacity())
         self._show_hud(f"不透明度 {self._opacity:.0%}")
         self.stateChanged.emit()
+
+    def _shown_opacity(self):
+        # 同 PixPin：穿透时只把高于上限的不透明度压到上限，本来就更透明的保持不变。
+        return min(self._opacity, T.PIN_CLICK_THROUGH_OPACITY) if self._click_through else self._opacity
 
     def set_topmost(self, enabled: bool):
         if self._closing:
@@ -238,7 +242,7 @@ class _PinBase(QWidget):
         if visible:
             self.show()
         self.setWindowOpacity(current)
-        self._animate_opacity(self._opacity * (0.5 if enabled else 1.0))
+        self._animate_opacity(self._shown_opacity())
         self._show_hud("鼠标穿透已开启，从托盘菜单退出" if enabled else "鼠标穿透已关闭", T.PIN_HUD_MS * 2)
         self.update()
         self.stateChanged.emit()
@@ -258,7 +262,7 @@ class _PinBase(QWidget):
         if not self._entered:
             self._entered = True
             self.setWindowOpacity(0)
-            self._animate_opacity(self._opacity * (0.5 if self._click_through else 1.0))
+            self._animate_opacity(self._shown_opacity())
 
     def _fade_finished(self):
         if self._closing:
@@ -375,7 +379,7 @@ class _PinBase(QWidget):
         self._locked = state.get("locked", False)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, self._topmost)
         self.setWindowFlag(Qt.WindowTransparentForInput, self._click_through)
-        self.setWindowOpacity(self._opacity * (0.5 if self._click_through else 1.0))
+        self.setWindowOpacity(self._shown_opacity())
 
 
 class _PinImageView(QGraphicsView):
@@ -468,6 +472,7 @@ class PinWindow(_PinBase):
 
     def copy(self):
         QGuiApplication.clipboard().setPixmap(self._base)
+        self._show_hud("已复制")
 
     def _save(self):
         path, selected = QFileDialog.getSaveFileName(
@@ -476,7 +481,9 @@ class PinWindow(_PinBase):
             suffix = {"PNG (*.png)": ".png", "JPG (*.jpg)": ".jpg", "BMP (*.bmp)": ".bmp"}[selected]
             if not Path(path).suffix:
                 path += suffix
-            if not self._base.save(path):
+            if self._base.save(path):
+                self._show_hud("已保存")
+            else:
                 show_message(self, "保存失败", f"无法写入图片：{path}")
 
     def _ensure_ocr_controller(self):
@@ -626,6 +633,7 @@ class PinTextWindow(_PinBase):
 
     def copy(self):
         QGuiApplication.clipboard().setText(self._content.toPlainText())
+        self._show_hud("已复制")
 
     def _save(self):
         path, _ = QFileDialog.getSaveFileName(self, "保存文字贴图", "贴图.txt", "文本文件 (*.txt)")
@@ -636,6 +644,8 @@ class PinTextWindow(_PinBase):
                 Path(path).write_text(self._content.toPlainText(), encoding="utf-8")
             except OSError as error:
                 show_message(self, "保存失败", str(error))
+            else:
+                self._show_hud("已保存")
 
     def state(self):
         return {**super().state(), "text": self._content.toPlainText()}
