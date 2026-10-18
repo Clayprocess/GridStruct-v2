@@ -35,6 +35,7 @@ class MarkStyle:
         self.background_color = QColor(T.LIGHT["background"])
         self.outline_color = QColor(T.LIGHT["background"])
         self.serial_size = 32
+        self.serial_type = "circle"
         self.serial_start = 1
         self.serial_global = False
         self.serial_auto_renumber = True
@@ -373,18 +374,20 @@ class MosaicMarkItem(QGraphicsItem):
 
 class SerialMarkItem(_MarkItemBase):
     tool_id = "serial"
-    style_keys = ("color", "serial_size")
+    style_keys = ("color", "serial_size", "serial_type")
 
     def __init__(self, style: MarkStyle, index: int):
         super().__init__(style)
         self.index = index
         self._font_size = style.font_size
         self._radius = style.serial_size / 2
+        self._type = style.serial_type
 
     def set_style(self, style):
         super().set_style(style)
         self._font_size = style.font_size
         self._radius = style.serial_size / 2
+        self._type = style.serial_type
 
     def set_index(self, index: int):
         self.index = index
@@ -394,16 +397,39 @@ class SerialMarkItem(_MarkItemBase):
         r = self._radius
         return QRectF(-r, -r, r * 2, r * 2)
 
+    def _label(self):
+        if self._type != "letter" or self.index < 1:
+            return str(self.index)
+        # 字母没有 0 和负数，微调到 1 以下时退回数字；超过 Z 按 AA、AB 续排。
+        label, n = "", self.index
+        while n:
+            n, rest = divmod(n - 1, 26)
+            label = chr(ord("A") + rest) + label
+        return label
+
     def paint(self, p: QPainter, _opt, _w):
         rect = self.boundingRect()
-        p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(self._color))
-        p.drawEllipse(rect)
+        light = QColor(T.LIGHT["background"])
+        text_color = light
+        if self._type == "circle_outline":
+            # 描边宽度随大小变化，内部填白底保证数字在任意截图背景上可读。
+            border = max(2.0, self._radius / 6)
+            p.setPen(QPen(self._color, border))
+            p.setBrush(QBrush(light))
+            p.drawEllipse(rect.adjusted(border / 2, border / 2, -border / 2, -border / 2))
+            text_color = self._color
+        else:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(self._color))
+            if self._type == "square":
+                p.drawRoundedRect(rect, self._radius / 4, self._radius / 4)
+            else:
+                p.drawEllipse(rect)
         font = QFont()
         font.setPixelSize(max(8, int(self._radius * 1.1)))
         p.setFont(font)
-        p.setPen(QColor(T.LIGHT["background"]))
-        p.drawText(rect, Qt.AlignCenter, str(self.index))
+        p.setPen(text_color)
+        p.drawText(rect, Qt.AlignCenter, self._label())
 
 
 class ArrowMarkItem(_MarkItemBase):
