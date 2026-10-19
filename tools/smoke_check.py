@@ -440,28 +440,63 @@ def pin_missing_fields():
     import json
     import pin
     from pin import data_directory
-    session = data_directory() / "pins" / "session.json"
-    session.parent.mkdir(parents=True, exist_ok=True)
+    directory = data_directory() / "pins"
+    session = directory / "session.json"
+    directory.mkdir(parents=True, exist_ok=True)
     state = {"id": "a" * 32, "kind": "text", "text": "recovery sample", "x": 0, "y": 0,
              "scale": 1.0, "opacity": 1.0, "topmost": False, "click_through": False}
+
+    def close_restored():
+        for window in list(pin._open_pins):
+            window._allow_close = True
+            window.close()
+        QTest.qWait(180)
+        flush()
+
     try:
-        with patch("pin.show_message") as warning:
+        with patch("pin.ask_confirmation", return_value=False) as ask:
             for missing in ("topmost", "click_through"):
                 session.write_text(json.dumps({"version": 1, "pins": [{k: v for k, v in state.items() if k != missing}]}))
-                assert not pin.restore_pins() and warning.called, f"missing {missing} accepted"
-                assert not pin._restoring
+                assert not pin.restore_pins() and ask.called, f"missing {missing} accepted"
+                assert not pin._restoring and pin._restore_failed
                 pin._restore_failed = False
             # 旧会话只缺 locked 仍要恢复。
             session.write_text(json.dumps({"version": 1, "pins": [state]}))
-            warning.reset_mock()
-            assert pin.restore_pins() and not warning.called
+            ask.reset_mock()
+            assert pin.restore_pins() and not ask.called
         restored = next(w for w in pin._open_pins if w.pin_id == state["id"])
         assert not restored._locked
-        restored._allow_close = True
-        restored.close()
-        QTest.qWait(180)
+        close_restored()
+
+        # 混合正常、缺图和缺字段记录：正常贴图恢复，坏记录隔离，原会话完整备份。
+        good = {**state, "id": "b" * 32, "text": "good pin"}
+        no_image = {**state, "id": "c" * 32, "kind": "image", "dpr": 1.0}
+        broken = {k: v for k, v in {**state, "id": "d" * 32}.items() if k != "opacity"}
+        original = json.dumps({"version": 1, "pins": [good, no_image, broken]})
+        for choice in (False, True):
+            for old in directory.glob("session-backup-*.json"):
+                old.unlink()
+            session.write_text(original)
+            with patch("pin.ask_confirmation", return_value=choice) as ask:
+                assert not pin.restore_pins()
+            message = ask.call_args.args[2]
+            assert "图片缺失" in message and "opacity" in message, message
+            assert [w.pin_id for w in pin._open_pins] == [good["id"]]
+            backups = list(directory.glob("session-backup-*.json"))
+            assert len(backups) == 1 and backups[0].read_text() == original
+            assert pin._restore_failed is not choice
+            QTest.qWait(350)
+            saved = json.loads(session.read_text())
+            if choice:
+                assert [p["id"] for p in saved["pins"]] == [good["id"]], "continue did not resume autosave"
+            else:
+                assert session.read_text() == original, "paused restore overwrote session"
+            pin._restore_failed = False
+            close_restored()
     finally:
         session.unlink()
+        for old in directory.glob("session-backup-*.json"):
+            old.unlink()
         pin._restore_failed = False
 
 
@@ -549,7 +584,9 @@ def saved_settings():
         destination = str(Path(folder) / "saved.jpg")
         with patch("export.image.get_settings", return_value=s), \
              patch("export.image.QFileDialog.getSaveFileName", return_value=(destination, "JPG (*.jpg)")) as choose:
+            app.clipboard().setText("preserve")
             w.trigger_action("save")
+            assert app.clipboard().text() == "preserve", "save replaced clipboard"
             assert re.search(r"GridStruct-V2_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.jpg$", choose.call_args.args[2])
             assert not QImage(destination).isNull()
         w.close()
