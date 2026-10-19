@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from threading import Event
 from time import monotonic
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
-from PySide6.QtWidgets import QApplication, QLabel, QProgressBar, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout
 from ui import BaseDialog, MessageDialog, show_message
+from styles import tokens as T
 from .engine import OCREngine
 from .dialog import OCRResultDialog
 from .model import OCRDocument
@@ -88,18 +89,32 @@ class _ProgressDialog(BaseDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle("文字识别")
-        self.setMinimumWidth(360)
+        self.setFixedWidth(320)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(T.SPACE_4, T.SPACE_4, T.SPACE_4, T.SPACE_3)
+        layout.setSpacing(T.SPACE_2)
+        title = QLabel("正在识别文字")
+        title.setProperty("class", "title")
+        layout.addWidget(title)
         self.label = QLabel()
+        self.label.setProperty("class", "muted")
         self.label.setWordWrap(True)
         layout.addWidget(self.label)
+        # 不知道总耗时，用细条循环动画表示“在进行”，不伪造百分比。
         progress = QProgressBar()
+        progress.setProperty("class", "slim")
         progress.setRange(0, 0)
+        progress.setTextVisible(False)
+        layout.addSpacing(T.SPACE_1)
         layout.addWidget(progress)
-        cancel = QPushButton("取消识别")
+        layout.addSpacing(T.SPACE_1)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel = QPushButton("取消")
         cancel.setProperty("class", "outline")
         cancel.clicked.connect(self.reject)
-        layout.addWidget(cancel)
+        actions.addWidget(cancel)
+        layout.addLayout(actions)
 
 
 class OCRController(QObject):

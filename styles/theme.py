@@ -38,6 +38,14 @@ QWidget {{
 QLabel {{
     background: transparent;
 }}
+QLabel[class="title"] {{
+    font-size: {T.FONT_LG}px;
+    font-weight: 600;
+}}
+QLabel[class="muted"] {{
+    color: {t['muted_foreground']};
+    font-size: {T.FONT_SM}px;
+}}
 QLabel[class="error"] {{
     color: {t['destructive']};
     font-size: {T.FONT_SM}px;
@@ -220,6 +228,18 @@ QProgressBar {{
 QProgressBar::chunk {{
     background: {t['primary']};
     border-radius: {r}px;
+}}
+/* 等待类细进度条：只表示“在进行”，不抢视线 */
+QProgressBar[class="slim"] {{
+    border: none;
+    border-radius: 2px;
+    background: {t['secondary']};
+    min-height: 4px;
+    max-height: 4px;
+}}
+QProgressBar[class="slim"]::chunk {{
+    background: {t['foreground']};
+    border-radius: 2px;
 }}
 
 /* ===== 菜单 / 浮层 ===== */
