@@ -166,6 +166,9 @@ class SettingsDialog(BaseDialog):
         self._same_color = QCheckBox("所有标注工具使用同一颜色（高亮除外）")
         self._same_color.setChecked(self._s.value("same_tool_color", True, type=bool))
         form.addRow("", self._same_color)
+        self._confirm_exit = QCheckBox("退出截图时，如有未保存的标注先确认")
+        self._confirm_exit.setChecked(self._s.value("capture/confirm_exit", True, type=bool))
+        form.addRow("", self._confirm_exit)
         self._ocr_copy = QCheckBox("OCR 完成后直接复制，不显示复核窗口")
         self._ocr_copy.setChecked(self._s.value("ocr/direct_copy", False, type=bool))
         form.addRow("", self._ocr_copy)
@@ -223,6 +226,7 @@ class SettingsDialog(BaseDialog):
         self._s.setValue("capture_guides", self._guides.isChecked())
         self._s.setValue("same_tool_color", self._same_color.isChecked())
         self._s.setValue("ocr/direct_copy", self._ocr_copy.isChecked())
+        self._s.setValue("capture/confirm_exit", self._confirm_exit.isChecked())
         if sys.platform == "win32":
             self._s.setValue("autostart", self._autostart.isChecked())
         self._s.sync()

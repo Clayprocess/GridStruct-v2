@@ -69,6 +69,10 @@ class ScreenshotFlow(QObject):
         if action == "pipette":
             self._win.start_pipette()
             return
+        if action == "cancel":
+            # 与 Esc 一致：框选阶段直接退出，不先转成标注窗口再问。
+            self._win.close()
+            return
         if action == "longshot":
             self._longshot_requested = True
             if not self._win.confirm():

@@ -15,14 +15,14 @@ import numpy as np
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSettings, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QMouseEvent, QPainter, QPixmap, QTextCursor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from annotate import AnnotationCanvas
 from annotate.items import SerialMarkItem, TextMarkItem
 from capture.longshot import ImageStitcher
 from ocr import OCREngine, add_text_layer
 from pin import PinWindow
-from settings import SettingsDialog
+from settings import SettingsDialog, get_settings
 from styles import tokens as T
 from styles import apply_theme
 
@@ -561,6 +561,32 @@ def save_failure():
     w.deleteLater()
 
 
+def exit_confirmation():
+    from annotate import AnnotationWindow
+    from PySide6.QtGui import QUndoCommand
+    settings = get_settings()
+    settings.setValue("capture/confirm_exit", True)
+    with patch("annotate.window.MessageDialog") as dialog:
+        # 没有标注时直接退出，不打断。
+        w = AnnotationWindow(sample(), QPoint())
+        w.trigger_action("cancel")
+        assert not dialog.called and w._ended
+        # 有未保存的标注时确认；勾选不再提醒后记住。
+        w = AnnotationWindow(sample(), QPoint())
+        w._canvas._undo.push(QUndoCommand("mark"))
+        dialog.return_value.exec.return_value = QDialog.Accepted
+        dialog.return_value.checkbox.isChecked.return_value = True
+        w.trigger_action("cancel")
+        assert dialog.call_count == 1 and w._ended
+        assert not settings.value("capture/confirm_exit", True, type=bool)
+        w = AnnotationWindow(sample(), QPoint())
+        w._canvas._undo.push(QUndoCommand("mark"))
+        w.trigger_action("cancel")
+        assert dialog.call_count == 1 and w._ended, "不再提醒 ignored"
+    settings.setValue("capture/confirm_exit", True)
+    flush()
+
+
 def saved_settings():
     import settings.dialog as settings_module
     with TemporaryDirectory() as folder:
@@ -675,7 +701,7 @@ if __name__ == "__main__":
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, pin_lifecycle, save_failure,
-              longshot_lifecycle, saved_settings, canvas_mouse_events, ocr_copy_text, render_windows]
+              longshot_lifecycle, exit_confirmation, saved_settings, canvas_mouse_events, ocr_copy_text, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)

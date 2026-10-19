@@ -1,6 +1,6 @@
 """截图画布与浮动工具配置，输出与识别通过模块公开接口调用。"""
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QGraphicsTextItem
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QGraphicsTextItem, QDialog
 from PySide6.QtGui import QPixmap, QColor, QKeySequence
 from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QPropertyAnimation, QEasingCurve, QEvent
 
@@ -8,10 +8,25 @@ from .canvas import AnnotationCanvas
 from .toolbar import FloatPanel, shortcut_tool
 from .options import ToolOptions
 from .color_dialog import ColorDialog
-from ui import floating_window_type, ask_confirmation
+from ui import floating_window_type, MessageDialog
+from settings import get_settings
 from styles import tokens as T
 from export import save_image
 from ocr import OCRController, OCRDocument, add_text_layer
+
+
+def _confirm_exit(parent):
+    """有未保存的标注时确认退出；勾选“不再提醒”后直接退出，可在设置里恢复。"""
+    settings = get_settings()
+    if not settings.value("capture/confirm_exit", True, type=bool):
+        return True
+    dialog = MessageDialog(parent, "退出截图", "确认退出截图？未复制或保存的标注将丢失。",
+                           confirm_text="退出", cancel_text="取消", checkbox_text="不再提醒")
+    accepted = dialog.exec() == QDialog.Accepted
+    if accepted and dialog.checkbox.isChecked():
+        settings.setValue("capture/confirm_exit", False)
+    dialog.deleteLater()
+    return accepted
 
 
 class AnnotationWindow(QWidget):
@@ -182,7 +197,9 @@ class AnnotationWindow(QWidget):
         elif action in ("confirm", "copy"):
             self._finish()
         elif action == "save":
-            save_image(self._render(), self)
+            if save_image(self._render(), self):
+                # 已保存的标注退出时不会丢，不必再确认；之后再改又会变回未保存。
+                self._canvas._undo.setClean()
         elif action == "ocr":
             self._toggle_pipette(False)
             self._ocr.start(self._render())
@@ -211,7 +228,8 @@ class AnnotationWindow(QWidget):
         self.close()
 
     def _request_cancel(self):
-        if ask_confirmation(self, "退出截图", "确认退出截图？未复制或保存的标注将丢失。"):
+        self._canvas.finish_editing()
+        if self._canvas._undo.isClean() or _confirm_exit(self):
             self.close()
 
     def eventFilter(self, obj, event):
