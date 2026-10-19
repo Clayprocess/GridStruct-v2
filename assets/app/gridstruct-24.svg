@@ -1,22 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <defs>
-    <radialGradient id="glow" cx="0.72" cy="0.22" r="0.95">
-      <stop offset="0" stop-color="#2b2d5c"/>
-      <stop offset="0.55" stop-color="#11122a"/>
-      <stop offset="1" stop-color="#06070f"/>
-    </radialGradient>
-  </defs>
-  <rect width="24" height="24" rx="5" fill="url(#glow)"/>
-  <g fill="#ffffff">
-    <rect x="3" y="3" width="4" height="4" rx="1"/>
-    <rect x="8" y="3" width="4" height="4" rx="1"/>
-    <rect x="13" y="3" width="3" height="3" rx="0.8"/>
-    <rect x="18" y="3" width="2" height="2" rx="0.5"/>
-    <rect x="3" y="8" width="4" height="4" rx="1"/>
-    <rect x="8" y="8" width="3" height="3" rx="0.8"/>
-    <rect x="13" y="8" width="2" height="2" rx="0.5"/>
-    <rect x="3" y="13" width="3" height="3" rx="0.8"/>
-    <rect x="8" y="13" width="2" height="2" rx="0.5"/>
-    <rect x="3" y="18" width="2" height="2" rx="0.5"/>
+  <g fill="currentColor">
+    <rect x="1" y="1" width="5" height="5" rx="1.5"/>
+    <rect x="7" y="1" width="5" height="5" rx="1.5"/>
+    <rect x="13" y="1" width="4" height="4" rx="1"/>
+    <rect x="19" y="1" width="3" height="3" rx="0.8"/>
+    <rect x="1" y="7" width="5" height="5" rx="1.5"/>
+    <rect x="7" y="7" width="4" height="4" rx="1"/>
+    <rect x="13" y="7" width="3" height="3" rx="0.8"/>
+    <rect x="19" y="7" width="2" height="2" rx="1"/>
+    <rect x="1" y="13" width="4" height="4" rx="1"/>
+    <rect x="7" y="13" width="3" height="3" rx="0.8"/>
+    <rect x="13" y="13" width="2" height="2" rx="1"/>
+    <rect x="1" y="19" width="3" height="3" rx="0.8"/>
+    <rect x="7" y="19" width="2" height="2" rx="1"/>
   </g>
 </svg>

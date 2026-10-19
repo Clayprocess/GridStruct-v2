@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QGuiApplication
 
+from styles import tokens as T
 from ui.icons import APP_ICON_SIZES, app_icon_pixmap
 
 ICO = Path(__file__).resolve().parents[1] / "assets" / "app" / "gridstruct.ico"
@@ -18,7 +19,7 @@ ICO = Path(__file__).resolve().parents[1] / "assets" / "app" / "gridstruct.ico"
 def png_bytes(size):
     buffer = QBuffer()
     buffer.open(QIODevice.WriteOnly)
-    app_icon_pixmap(size).save(buffer, "PNG")
+    app_icon_pixmap(size, T.APP_ICON_COLOR).save(buffer, "PNG")
     return bytes(buffer.data())
 
 

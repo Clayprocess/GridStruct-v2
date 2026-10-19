@@ -90,7 +90,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setProperty("desktop_check", desktop_check)
     app.setApplicationName(APP_NAME)
-    app.setWindowIcon(app_icon())
+    app.setWindowIcon(app_icon(T.APP_ICON_COLOR))
     app.setQuitOnLastWindowClosed(False)  # 常驻托盘：无窗口时不退出
     ScreenManager.instance()
 
@@ -114,6 +114,7 @@ def main() -> int:
 
     def _open_settings():
         SettingsDialog(apply_hotkeys=_apply_hotkeys).exec()
+        tray_icon.setIcon(app_icon(T.THEMES[app.property("theme_mode")]["foreground"]))
 
     def _exit():
         if shutdown_pins():

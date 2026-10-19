@@ -1,9 +1,10 @@
 # 系统托盘图标与右键菜单（P0-A）。
-# 图标：应用标识（深底白点），浅色、深色任务栏上都能看清，不随主题换色。
+# 图标：应用标识点阵，按当前主题前景色染色（ui/icons.py）。
 # 样式：QMenu 的 QSS 由 styles/theme.py 全局提供，这里不写任何样式。
 
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 
+from styles import tokens as T
 from ui import app_icon
 
 TRAY_TOOLTIP = "GridStruct-V2"
@@ -36,7 +37,7 @@ def create_tray(app, callbacks: dict | None) -> QSystemTrayIcon:
     截图菜单项约定用 callbacks["screenshot"]。
     """
     callbacks = callbacks or {}
-    tray = QSystemTrayIcon(app_icon(), app)
+    tray = QSystemTrayIcon(app_icon(T.THEMES[app.property("theme_mode")]["foreground"]), app)
     tray.setToolTip(TRAY_TOOLTIP)
 
     menu = QMenu()
