@@ -479,12 +479,28 @@ QFrame#SizeEditor {{
 
 /* ===== 贴图（pin/window.py）：卡片本体由 paintEvent 画，这里只管浮动提示 ===== */
 /* 提示浮在任意截图内容上，明暗主题都用深底浅字，与截图尺寸提示同源。 */
-QLabel#PinHud, QLabel#Toast {{
+QLabel#PinHud, QFrame#Toast {{
     background-color: rgba{T.CAPTURE_TIP};
     color: {T.DARK['foreground']};
     border-radius: 12px;
     padding: 4px 12px;
     font-size: {T.FONT_SM}px;
+}}
+QFrame#Toast QLabel {{
+    color: {T.DARK['foreground']};
+    font-size: {T.FONT_SM}px;
+}}
+QPushButton#ToastAction {{
+    background: transparent;
+    color: {T.DARK['foreground']};
+    border: none;
+    padding: 0;
+    font-size: {T.FONT_SM}px;
+    font-weight: 600;
+    text-decoration: underline;
+}}
+QPushButton#ToastAction:hover {{
+    color: {T.DARK['muted_foreground']};
 }}
 QTextEdit#PinText {{
     background: transparent;

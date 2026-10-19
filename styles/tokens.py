@@ -95,3 +95,5 @@ PIN_OPACITY_STEP = 0.05
 PIN_CLICK_THROUGH_OPACITY = 0.5
 # 复制、保存等结果提示的停留时长。
 TOAST_MS = 1600
+# 带操作按钮的提示要留出移动鼠标去点的时间。
+TOAST_ACTION_MS = 4000
