@@ -1,15 +1,11 @@
 # 系统托盘图标与右键菜单（P0-A）。
-# 图标：Lucide `pin`，按当前主题前景色染色（ui/icons.py）。
+# 图标：应用标识（深底白点），浅色、深色任务栏上都能看清，不随主题换色。
 # 样式：QMenu 的 QSS 由 styles/theme.py 全局提供，这里不写任何样式。
 
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtCore import Qt
 
-from styles import tokens as T
-from ui import tinted_icon
+from ui import app_icon
 
-TRAY_ICON_NAME = "pin"
 TRAY_TOOLTIP = "GridStruct-V2"
 
 # 右键菜单项：(callbacks key, 显示文本)，按显示顺序
@@ -27,15 +23,6 @@ MENU_ITEMS: list[tuple[str, str]] = [
 _SEPARATOR_AFTER = {"longshot", "update"}
 
 
-def _current_theme() -> str:
-    """跟 styles/theme.py 同样的跟随系统逻辑（tray 不能改 theme.py，只能本地判）。"""
-    try:
-        scheme = QGuiApplication.styleHints().colorScheme()
-        return "dark" if scheme == Qt.ColorScheme.Dark else "light"
-    except Exception:
-        return "light"
-
-
 def _placeholder(text: str):
     def _cb():
         print(f"[托盘] {text}：占位回调，未实现")
@@ -49,11 +36,7 @@ def create_tray(app, callbacks: dict | None) -> QSystemTrayIcon:
     截图菜单项约定用 callbacks["screenshot"]。
     """
     callbacks = callbacks or {}
-    theme = app.property("theme_mode") or _current_theme()
-    color = T.THEMES[theme]["foreground"]
-    icon = tinted_icon(TRAY_ICON_NAME, color, 16)
-
-    tray = QSystemTrayIcon(icon, app)
+    tray = QSystemTrayIcon(app_icon(), app)
     tray.setToolTip(TRAY_TOOLTIP)
 
     menu = QMenu()

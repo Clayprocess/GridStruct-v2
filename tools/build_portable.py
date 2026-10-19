@@ -34,6 +34,8 @@ def check_requirements():
             raise RuntimeError(f"缺少本地 OCR 模型：{path}")
     if not any((ROOT / "assets" / "icons").glob("*.svg")):
         raise RuntimeError("assets/icons/ 中没有 SVG 图标。")
+    if not (ROOT / "assets" / "app" / "gridstruct.ico").is_file():
+        raise RuntimeError("缺少应用图标 assets/app/gridstruct.ico，请先运行 tools/build_app_icon.py。")
 
 
 def sha256(path):
@@ -50,7 +52,7 @@ def verify_bundle(bundle):
     runtime = bundle / "_internal"
     if any(runtime.rglob("icuuc.dll")):
         raise RuntimeError("包内第三方 icuuc.dll 会遮蔽 Qt 所需的 Windows 系统 ICU。")
-    resources = list((ROOT / "assets" / "icons").glob("*.svg"))
+    resources = list((ROOT / "assets" / "icons").glob("*.svg")) + list((ROOT / "assets" / "app").glob("*.svg"))
     resources += [ROOT / "assets" / "models" / name for name in MODELS]
     hashes = {}
     for source in resources:

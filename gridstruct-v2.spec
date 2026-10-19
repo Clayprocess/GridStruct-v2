@@ -23,6 +23,7 @@ optional_engines = (
 
 datas = [
     (str(root / "assets" / "icons"), "assets/icons"),
+    (str(root / "assets" / "app"), "assets/app"),
     (str(root / "assets" / "models"), "assets/models"),
 ]
 # RapidOCR 懒加载入口和 YAML 配置不在静态 import 链中；模型只打包仓库版本。
@@ -60,6 +61,7 @@ exe = EXE(
     upx=False,
     console=False,
     manifest=str(root / "app.manifest"),
+    icon=str(root / "assets" / "app" / "gridstruct.ico"),
     contents_directory="_internal",
 )
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="GridStruct-V2")

@@ -64,7 +64,7 @@ from PySide6.QtGui import QDesktopServices
 
 from styles import apply_theme
 from styles import tokens as T
-from ui import tinted_icon, show_desktop_check, show_message
+from ui import app_icon, tinted_icon, show_desktop_check, show_message
 from tray import create_tray, GlobalHotkey, MOD_CONTROL, MOD_ALT
 from capture import ScreenshotFlow, ScreenManager
 
@@ -90,6 +90,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setProperty("desktop_check", desktop_check)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)  # 常驻托盘：无窗口时不退出
     ScreenManager.instance()
 
@@ -113,7 +114,6 @@ def main() -> int:
 
     def _open_settings():
         SettingsDialog().exec()
-        tray_icon.setIcon(tinted_icon("pin", T.THEMES[app.property("theme_mode")]["foreground"], 16))
 
     def _exit():
         if shutdown_pins():
