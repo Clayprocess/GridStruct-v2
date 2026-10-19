@@ -698,6 +698,33 @@ def ocr_copy_text():
     dialog.deleteLater()
 
 
+def ocr_selection_paint():
+    from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
+    from PySide6.QtGui import QTextCursor
+    from ocr import OCRResult
+    plain = QPixmap(240, 60)
+    plain.fill(QColor(128, 128, 128))
+    scene = QGraphicsScene()
+    scene.addPixmap(plain)
+    layer = add_text_layer(scene, [OCRResult(QRect(10, 10, 200, 30), "Recognized text", .9)])
+    view = QGraphicsView(scene)
+    view.setFrameShape(QGraphicsView.NoFrame)
+    view.resize(240, 60)
+    view.show()
+    item = layer.childItems()[0]
+    cursor = item.textCursor()
+    cursor.select(QTextCursor.Document)
+    item.setTextCursor(cursor)
+    item.setFocus()
+    flush()
+    image = view.grab().toImage()
+    colors = {image.pixel(x, y) for x in range(12, 200) for y in range(14, 36)}
+    # 只叠半透明底色时选区内是均匀色块；重画了识别文字就会出现字形的抗锯齿像素。
+    assert len(colors) <= 2, f"selection repainted glyphs: {len(colors)} colors"
+    view.close()
+    view.deleteLater()
+
+
 def render_windows():
     from annotate import AnnotationWindow, ColorDialog
     from ocr import OCRResult, OCRResultDialog
@@ -732,7 +759,7 @@ if __name__ == "__main__":
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, pin_lifecycle, save_failure,
-              longshot_lifecycle, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, ocr_copy_text, render_windows]
+              longshot_lifecycle, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, ocr_copy_text, ocr_selection_paint, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)
