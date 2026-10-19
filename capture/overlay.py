@@ -525,7 +525,7 @@ class _ScreenOverlay(QWidget):
         self.setScreen(frame.screen)
         self.setGeometry(frame.geometry)
         from annotate import PipettePopup
-        self.loupe = PipettePopup(frame.pixmap, grid=True)
+        self.loupe = PipettePopup(frame.pixmap, grid=True, hint="C 复制 · Shift 切换格式")
 
     def hover_region(self):
         c = self.controller
