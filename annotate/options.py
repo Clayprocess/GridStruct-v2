@@ -140,7 +140,7 @@ class ToolOptions(QWidget):
             self._label("填充")
             self._color_button("background_color")
         elif tool_id == "magnifier":
-            self._label("像素预览 11 × 11 · 8 倍，滚轮调节倍率")
+            self._label("像素预览 11 × 11，移动鼠标查看")
         if tool_id != "magnifier":
             more.append(("wheel_enabled", "滚轮调节大小"))
         self._layout.addStretch()

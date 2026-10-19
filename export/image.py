@@ -22,6 +22,6 @@ def save_image(pixmap, parent=None):
     if not pixmap.save(path):
         show_message(parent, "保存失败", f"无法写入图片：{path}")
         return None
-    QApplication.clipboard().setText(path)
-    show_toast("已保存，文件路径已复制")
+    # 保存不动剪贴板：用户可能刚复制了别的内容，路径只在明确点“复制路径”时写入。
+    show_toast("已保存", ("复制路径", lambda: QApplication.clipboard().setText(path)))
     return path

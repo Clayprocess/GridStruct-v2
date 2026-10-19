@@ -4,7 +4,7 @@ from PySide6.QtGui import QPainter, QPen, QColor, QCursor, QRegion
 from PySide6.QtCore import (Qt, QRect, QPoint, QSize, Signal, QObject, QTimer, QEvent,
                            Property, QPropertyAnimation, QEasingCurve)
 from styles import tokens as T
-from ui import floating_window_type, ask_confirmation, show_toast
+from ui import floating_window_type, show_toast
 from settings import get_settings
 from annotate import shortcut_tool
 from .screen import ScreenManager, capture_virtual_desktop
@@ -371,8 +371,8 @@ class ScreenShotWindow(QObject):
             if self._pipette_mode:
                 self._pipette_mode = False
                 return
-            if ask_confirmation(window, "退出截图", "确认退出截图？"):
-                self.close()
+            # 框选阶段还没有标注，退出不会丢东西，不打断。
+            self.close()
         elif key in (Qt.Key_Return, Qt.Key_Enter) and not self._sel.isNull():
             self._accept_selection()
         elif self._keep_open and not self._sel.isNull() and modifiers & Qt.ControlModifier and key in (Qt.Key_C, Qt.Key_S):
@@ -525,7 +525,7 @@ class _ScreenOverlay(QWidget):
         self.setScreen(frame.screen)
         self.setGeometry(frame.geometry)
         from annotate import PipettePopup
-        self.loupe = PipettePopup(frame.pixmap, grid=True)
+        self.loupe = PipettePopup(frame.pixmap, grid=True, hint="C 复制 · Shift 切换格式")
 
     def hover_region(self):
         c = self.controller

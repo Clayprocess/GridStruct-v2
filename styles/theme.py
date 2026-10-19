@@ -38,6 +38,18 @@ QWidget {{
 QLabel {{
     background: transparent;
 }}
+QLabel[class="title"] {{
+    font-size: {T.FONT_LG}px;
+    font-weight: 600;
+}}
+QLabel[class="muted"] {{
+    color: {t['muted_foreground']};
+    font-size: {T.FONT_SM}px;
+}}
+QLabel[class="error"] {{
+    color: {t['destructive']};
+    font-size: {T.FONT_SM}px;
+}}
 
 /* ===== 按钮 =====
    裸 QPushButton 默认是 outline：一个窗口只应有一个主按钮，必须显式声明 class=primary。
@@ -217,6 +229,18 @@ QProgressBar::chunk {{
     background: {t['primary']};
     border-radius: {r}px;
 }}
+/* 等待类细进度条：只表示“在进行”，不抢视线 */
+QProgressBar[class="slim"] {{
+    border: none;
+    border-radius: 2px;
+    background: {t['secondary']};
+    min-height: 4px;
+    max-height: 4px;
+}}
+QProgressBar[class="slim"]::chunk {{
+    background: {t['foreground']};
+    border-radius: 2px;
+}}
 
 /* ===== 菜单 / 浮层 ===== */
 QMenu {{
@@ -386,6 +410,10 @@ QWidget#ToolOptions {{
     background: transparent;
     border-top: 1px solid {t['border']};
 }}
+QWidget#ToolOptions[above="true"] {{
+    border-top: none;
+    border-bottom: 1px solid {t['border']};
+}}
 QWidget#ToolOptions QLabel {{
     color: {t['muted_foreground']};
     font-size: {T.FONT_SM}px;
@@ -479,12 +507,28 @@ QFrame#SizeEditor {{
 
 /* ===== 贴图（pin/window.py）：卡片本体由 paintEvent 画，这里只管浮动提示 ===== */
 /* 提示浮在任意截图内容上，明暗主题都用深底浅字，与截图尺寸提示同源。 */
-QLabel#PinHud, QLabel#Toast {{
+QLabel#PinHud, QFrame#Toast {{
     background-color: rgba{T.CAPTURE_TIP};
     color: {T.DARK['foreground']};
     border-radius: 12px;
     padding: 4px 12px;
     font-size: {T.FONT_SM}px;
+}}
+QFrame#Toast QLabel {{
+    color: {T.DARK['foreground']};
+    font-size: {T.FONT_SM}px;
+}}
+QPushButton#ToastAction {{
+    background: transparent;
+    color: {T.DARK['foreground']};
+    border: none;
+    padding: 0;
+    font-size: {T.FONT_SM}px;
+    font-weight: 600;
+    text-decoration: underline;
+}}
+QPushButton#ToastAction:hover {{
+    color: {T.DARK['muted_foreground']};
 }}
 QTextEdit#PinText {{
     background: transparent;

@@ -1,7 +1,7 @@
 """共享校正文字的原图覆盖层；四点几何映射至截图逻辑坐标。"""
 
-from PySide6.QtCore import QPointF, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPen, QPolygonF, QTransform
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, Slot
+from PySide6.QtGui import QColor, QFont, QPolygonF, QTransform
 from PySide6.QtWidgets import QApplication, QGraphicsObject, QGraphicsTextItem, QMenu
 from styles import tokens as T
 from .model import OCRDocument
@@ -55,15 +55,34 @@ class _SelectableTextItem(QGraphicsTextItem):
         # 视图定位和选字反馈不写入 scene.render 的图片导出。
         if widget is None:
             return
+        # 不调用 QGraphicsTextItem.paint：Qt 会用不透明的 HighlightedText 重画选中的识别文字，
+        # 盖住原图字形；这里只画半透明的选区和悬停底色，原图像素始终可见。
+        painter.save()
+        painter.setPen(Qt.NoPen)
         if self._hovered or self._focused:
-            painter.save()
-            color = QColor(T.THEMES[self._layer.mode]["accent"])
-            color.setAlpha(160)
-            painter.setBrush(color)
-            painter.setPen(QPen(QColor(T.THEMES[self._layer.mode]["ring"]), 1) if self._focused else Qt.NoPen)
+            painter.setBrush(QColor(*T.OCR_HOVER))
             painter.drawRect(self.boundingRect())
-            painter.restore()
-        super().paint(painter, option, widget)
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            painter.setBrush(QColor(*T.OCR_SELECTION))
+            for rect in self._selection_rects(cursor.selectionStart(), cursor.selectionEnd()):
+                painter.drawRect(rect)
+        painter.restore()
+
+    def _selection_rects(self, start, end):
+        layout = self.document().documentLayout()
+        block = self.document().begin()
+        while block.isValid():
+            origin = layout.blockBoundingRect(block).topLeft()
+            lines = block.layout()
+            for index in range(lines.lineCount()):
+                line = lines.lineAt(index)
+                first = max(start, block.position() + line.textStart()) - block.position()
+                last = min(end, block.position() + line.textStart() + line.textLength()) - block.position()
+                if first < last:
+                    left, right = line.cursorToX(first)[0], line.cursorToX(last)[0]
+                    yield QRectF(origin.x() + left, origin.y() + line.y(), right - left, line.height())
+            block = block.next()
 
     def _emit_selection(self):
         self.selectionChanged.emit(self, self.textCursor().selectedText().replace("\u2029", "\n"))
