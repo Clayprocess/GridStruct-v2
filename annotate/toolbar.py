@@ -114,8 +114,11 @@ class FloatPanel(QWidget):
         self._root_layout.setContentsMargins(8, 6, 8, 10)
         self._root_layout.setSpacing(0)
         self._options = None
+        self._options_above = False
         buttons = QWidget(self)
-        self._root_layout.addWidget(buttons)
+        self._button_row = buttons
+        # 按钮行按自身宽度居中：二级面板比按钮行宽时，按钮行仍在原位，不随工具切换左右跳。
+        self._root_layout.addWidget(buttons, 0, Qt.AlignHCenter)
         layout = QHBoxLayout(buttons)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(2)
@@ -131,13 +134,12 @@ class FloatPanel(QWidget):
             btn.clicked.connect(lambda _checked=False, tid=tool_id: self._pick(tid))
         self._set_geo_shape(self._geo_shape)
 
-        # 次区浮动按钮：没用过次区工具时隐藏。
-        self._floating_tool = ""
+        # 次区浮动按钮：始终占位，默认显示上次用过的次区工具，首次使用时工具条不会变宽。
         self._floating = self._make_button("floating", "", "minus", checkable=True)
         self._tool_group.addButton(self._floating)
         self._floating.clicked.connect(lambda: self._pick(self._floating_tool))
-        self._floating.hide()
         layout.addWidget(self._floating)
+        self._set_floating_tool(get_settings().value("annotation/floating_tool", SECONDARY_TOOLS[0][0]))
 
         self._more = self._make_button("more", "更多工具", "chevron-down")
         self._more.setObjectName("MoreTools")
@@ -205,6 +207,13 @@ class FloatPanel(QWidget):
 
     def _pick(self, tool_id):
         self.toolSelected.emit(self._geo_shape if tool_id == "geo" else tool_id)
+
+    def _set_floating_tool(self, tool_id):
+        self._floating_tool = tool_id
+        label, icon_name = next(tool[1:] for tool in SECONDARY_TOOLS if tool[0] == tool_id)
+        self._floating.setToolTip(label)
+        self._floating.setAccessibleName(label)
+        self._icon_names["floating"] = icon_name
 
     def _set_geo_shape(self, shape):
         self._geo_shape = shape
@@ -303,14 +312,9 @@ class FloatPanel(QWidget):
             button = self._buttons["geo"]
         elif any(tool_id == tool[0] for tool in SECONDARY_TOOLS):
             if tool_id != self._floating_tool:
-                self._floating_tool = tool_id
-                label, icon_name = next(tool[1:] for tool in SECONDARY_TOOLS if tool[0] == tool_id)
-                self._floating.setToolTip(label)
-                self._floating.setAccessibleName(label)
-                self._icon_names["floating"] = icon_name
-                self._floating.show()
+                self._set_floating_tool(tool_id)
+                get_settings().setValue("annotation/floating_tool", tool_id)
                 self.refresh_icons(self._mode)
-                self.adjustSize()
             button = self._floating
         else:
             button = self._buttons[tool_id]
@@ -340,24 +344,50 @@ class FloatPanel(QWidget):
     def set_options_widget(self, widget):
         """工具配置跟随浮动面板，避免挤占截图画布。"""
         self._options = widget
-        self._root_layout.addWidget(widget)
+        self._root_layout.insertWidget(1, widget)
         widget.setVisible(bool(self.selected_tool()))
 
+    def _set_options_above(self, above):
+        """工具条在选区上方时把二级面板和识别状态移到按钮行上面：贴着选区的始终是按钮行，展开收起不挪动它。"""
+        if above == self._options_above:
+            return
+        self._options_above = above
+        if self._options is not None:
+            # 分隔线要落在二级面板和按钮行之间，QSS 按这个属性换到下边。
+            self._options.setProperty("above", above)
+            self._options.style().unpolish(self._options)
+            self._options.style().polish(self._options)
+        rows = [self._button_row, self._options, self._ocr_feedback]
+        for row in rows:
+            if row is not None:
+                self._root_layout.removeWidget(row)
+        for row in reversed(rows) if above else rows:
+            if row is not None:
+                self._root_layout.addWidget(row, 0, Qt.AlignHCenter if row is self._button_row else Qt.Alignment())
+
     def set_position_near(self, rect: QRect) -> None:
-        """把工具条放到选区附近：下方优先，放不下放上方；始终不超出屏幕。"""
+        """把工具条放到选区附近：下方优先，放不下放上方；始终不超出屏幕。
+
+        上下按“按钮行 + 二级面板”都展开的高度来选，切换工具时不会在上下之间翻；
+        在下方时顶边贴选区，在上方时底边贴选区，按钮行都不动。
+        """
         self._slide.stop()
-        size = self.sizeHint()
         screen = QGuiApplication.screenAt(rect.center()) or QGuiApplication.primaryScreen()
         geo = screen.availableGeometry()
+        margins = self._root_layout.contentsMargins()
+        tallest = self._button_row.sizeHint().height() + margins.top() + margins.bottom()
+        if self._options is not None:
+            tallest += self._options.sizeHint().height()
+        below = rect.bottom() + _GAP
+        self._set_options_above(below + tallest > geo.bottom() + 1)
+        size = self.sizeHint()
 
         x = rect.center().x() - size.width() // 2
         x = max(geo.left(), min(x, geo.right() - size.width() + 1))
-
-        below = rect.bottom() + _GAP
-        if below + size.height() <= geo.bottom() + 1:
-            y = below
-        else:
+        if self._options_above:
             y = max(geo.top(), rect.top() - size.height() - _GAP)
+        else:
+            y = below
 
         self.setGeometry(QRect(QPoint(x, y), size))
 

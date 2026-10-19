@@ -561,6 +561,27 @@ def save_failure():
     w.deleteLater()
 
 
+def toolbar_stability():
+    from annotate import AnnotationWindow
+    # 选区在屏幕上部（工具条在下）和底部（工具条在上）各测一次：切工具时按钮行不能挪位。
+    for y in (40, app.primaryScreen().availableGeometry().bottom() - 120):
+        w = AnnotationWindow(sample(300, 100), QPoint(250, y))
+        w.show()
+        flush()
+        spots = set()
+        for tool in ("arrow", "serial", "pencil", "mosaic", "eraser", "line", "arrow"):
+            w.select_tool(tool)
+            flush()
+            w._toolbar._slide.stop()
+            w._position_toolbar()
+            flush()
+            spots.add(w._toolbar._buttons["geo"].mapToGlobal(QPoint()).toTuple())
+        assert len(spots) == 1, f"toolbar buttons moved: {spots}"
+        w.close()
+        w.deleteLater()
+    flush()
+
+
 def exit_confirmation():
     from annotate import AnnotationWindow
     from PySide6.QtGui import QUndoCommand
@@ -759,7 +780,7 @@ if __name__ == "__main__":
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, pin_lifecycle, save_failure,
-              longshot_lifecycle, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, ocr_copy_text, ocr_selection_paint, render_windows]
+              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, ocr_copy_text, ocr_selection_paint, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)
