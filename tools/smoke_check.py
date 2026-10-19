@@ -587,6 +587,37 @@ def exit_confirmation():
     flush()
 
 
+def hotkey_settings():
+    from tray import parse_hotkey
+    assert parse_hotkey("Ctrl+Alt+S") == (0x2 | 0x1, 0x53)
+    assert parse_hotkey("F1") == (0, 0x70) and parse_hotkey("Print") == (0, 0x2C)
+    for bad in ("S", "Shift+S", "Ctrl+Alt+Space", ""):
+        try:
+            parse_hotkey(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} accepted")
+    with TemporaryDirectory() as folder:
+        s = QSettings(str(Path(folder) / "settings.ini"), QSettings.IniFormat)
+        with patch("settings.dialog.get_settings", return_value=s), \
+             patch("settings.dialog._write_autostart"), patch("settings.dialog.show_message") as warning:
+            # 新组合被占用：设置窗口不关，配置保持原值。
+            dialog = SettingsDialog(apply_hotkeys=lambda texts: "占用")
+            dialog._hotkeys["screenshot"].setKeySequence("Ctrl+Shift+A")
+            dialog._save()
+            assert warning.called and dialog.result() == 0 and s.value("hotkey/screenshot") is None
+            # 两个功能撞键：确定前就拦下。
+            dialog._hotkeys["longshot"].setKeySequence("Ctrl+Shift+A")
+            assert not dialog._check_hotkeys() and dialog._hotkey_error.text()
+            applied = []
+            dialog._apply_hotkeys = lambda texts: applied.append(texts)
+            dialog._hotkeys["longshot"].setKeySequence("F1")
+            dialog._save()
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": "F1"}]
+            assert s.value("hotkey/screenshot") == "Ctrl+Shift+A" and s.value("hotkey/longshot") == "F1"
+            dialog.deleteLater()
+
+
 def saved_settings():
     import settings.dialog as settings_module
     with TemporaryDirectory() as folder:
@@ -701,7 +732,7 @@ if __name__ == "__main__":
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, pin_lifecycle, save_failure,
-              longshot_lifecycle, exit_confirmation, saved_settings, canvas_mouse_events, ocr_copy_text, render_windows]
+              longshot_lifecycle, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, ocr_copy_text, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)

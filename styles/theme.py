@@ -38,6 +38,10 @@ QWidget {{
 QLabel {{
     background: transparent;
 }}
+QLabel[class="error"] {{
+    color: {t['destructive']};
+    font-size: {T.FONT_SM}px;
+}}
 
 /* ===== 按钮 =====
    裸 QPushButton 默认是 outline：一个窗口只应有一个主按钮，必须显式声明 class=primary。

@@ -126,7 +126,7 @@ from PySide6.QtGui import QPainter, QColor
 from PySide6.QtTest import QTest
 from capture.wheelhook import WheelHook
 from tray import GlobalHotkey
-from tray.hotkey import WM_HOTKEY, MOD_CONTROL, MOD_ALT, MOD_SHIFT
+from tray.hotkey import WM_HOTKEY
 from capture.longshot import LongShotBar
 from styles import tokens as T
 from styles import apply_theme
@@ -140,10 +140,10 @@ assert hook._hook is None
 print("PASS: native wheel hook install/uninstall")
 
 manager = GlobalHotkey(app)
-manager.set_hotkey(MOD_CONTROL | MOD_ALT | MOD_SHIFT, 0x87)  # F24，避免占用运行中的截图快捷键。
 received = []
 try:
-    assert manager.register(lambda: received.append(True))
+    # F24 组合避免占用运行中的截图快捷键。
+    assert manager.register("Ctrl+Alt+Shift+F24", lambda: received.append(True)) == 1
     post = ctypes.windll.user32.PostThreadMessageW
     post.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     assert post(ctypes.windll.kernel32.GetCurrentThreadId(), WM_HOTKEY, 1, 0)

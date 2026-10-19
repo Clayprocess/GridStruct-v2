@@ -8,14 +8,14 @@ from subprocess import list2cmdline
 from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
     QComboBox, QCheckBox, QLineEdit, QPushButton, QFileDialog,
-    QDialogButtonBox, QWidget, QApplication,
+    QDialogButtonBox, QWidget, QApplication, QKeySequenceEdit,
 )
 from PySide6.QtCore import QSettings, Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QKeySequence
 
 from ui import BaseDialog, ask_confirmation, show_message
 from styles import apply_theme
-from tray import GlobalHotkey
+from tray import HOTKEY_DEFAULTS, parse_hotkey
 from .storage import get_settings
 
 _ORG, _APP = "GridStruct", "GridStruct"
@@ -69,9 +69,14 @@ def _autostart_command() -> str:
     return list2cmdline([str(pythonw), "-X", "utf8", str(Path(__file__).resolve().parents[1] / "main.py")])
 
 
+_HOTKEY_LABELS = {"screenshot": "截图", "longshot": "长截图"}
+
+
 class SettingsDialog(BaseDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, apply_hotkeys=None):
+        """apply_hotkeys(texts) 在确认时注册新热键，失败返回原因；不传时只保存配置。"""
         super().__init__(parent)
+        self._apply_hotkeys = apply_hotkeys
         # 模态设置会禁用贴图输入，必须位于已有置顶贴图之上。
         self.setWindowFlag(Qt.WindowStaysOnTopHint)
         self.setWindowTitle("设置")
@@ -184,11 +189,53 @@ class SettingsDialog(BaseDialog):
     def _hotkey_tab(self) -> QWidget:
         w = QWidget()
         form = QFormLayout(w)
-        le = QLineEdit(GlobalHotkey.hotkey_name())
-        le.setReadOnly(True)
-        form.addRow("截图", le)
-        form.addRow("", QLabel("P0 暂不支持修改热键"))
+        self._hotkeys = {}
+        for name, label in _HOTKEY_LABELS.items():
+            edit = QKeySequenceEdit(QKeySequence(self._s.value(f"hotkey/{name}", HOTKEY_DEFAULTS[name]),
+                                                 QKeySequence.PortableText))
+            edit.setMaximumSequenceLength(1)
+            edit.keySequenceChanged.connect(self._check_hotkeys)
+            self._hotkeys[name] = edit
+            form.addRow(label, edit)
+        self._hotkey_error = QLabel()
+        self._hotkey_error.setProperty("class", "error")
+        self._hotkey_error.setWordWrap(True)
+        form.addRow("", self._hotkey_error)
+        hint = QLabel("点击输入框后按下新组合键。确定后立即生效；新组合被占用时保留原热键。")
+        hint.setWordWrap(True)
+        form.addRow("", hint)
+        defaults = QPushButton("恢复默认")
+        defaults.setProperty("class", "outline")
+        defaults.clicked.connect(self._reset_hotkeys)
+        row = QHBoxLayout()
+        row.addWidget(defaults)
+        row.addStretch()
+        form.addRow("", row)
+        self._check_hotkeys()
         return w
+
+    def _reset_hotkeys(self):
+        for name, edit in self._hotkeys.items():
+            edit.setKeySequence(QKeySequence(HOTKEY_DEFAULTS[name], QKeySequence.PortableText))
+
+    def _hotkey_texts(self):
+        return {name: edit.keySequence().toString(QKeySequence.PortableText) for name, edit in self._hotkeys.items()}
+
+    def _check_hotkeys(self) -> bool:
+        """边录边校验，确定前就把非法组合和两键重复指出来。"""
+        texts = self._hotkey_texts()
+        problem = ""
+        for name, text in texts.items():
+            try:
+                parse_hotkey(text)
+            except ValueError as error:
+                problem = f"{_HOTKEY_LABELS[name]}：{error}"
+                break
+        if not problem and len(set(texts.values())) < len(texts):
+            problem = "截图和长截图不能用同一个组合"
+        self._hotkey_error.setText(problem)
+        self._hotkey_error.setVisible(bool(problem))
+        return not problem
 
     # ---------- 关于 ----------
 
@@ -212,12 +259,22 @@ class SettingsDialog(BaseDialog):
     # ---------- 保存 ----------
 
     def _save(self):
+        if not self._check_hotkeys():
+            show_message(self, "热键无效", self._hotkey_error.text())
+            return
         if sys.platform == "win32":
             try:
                 _write_autostart(self._autostart.isChecked())
             except OSError as exc:
                 show_message(self, "无法保存设置", f"开机自启设置失败：{exc}")
                 return
+        texts = self._hotkey_texts()
+        problem = self._apply_hotkeys(texts) if self._apply_hotkeys is not None else None
+        if problem:
+            show_message(self, "快捷键冲突", problem)
+            return
+        for name, text in texts.items():
+            self._s.setValue(f"hotkey/{name}", text)
         self._s.setValue("theme", self._theme.currentData())
         self._s.setValue("language", self._language.currentData())
         self._s.setValue("screenshot_dir", self._shot_dir.text())
