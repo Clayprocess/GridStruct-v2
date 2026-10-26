@@ -80,6 +80,8 @@ _END_BUTTONS: dict[str, tuple[str, str]] = {
 
 _ICON_SIZE = 16
 _GAP = 8  # 工具条与选区之间的间距
+# 主工具条与二级面板是两张独立卡片，中间留缝（同 PixPin：二级面板在主条下方、左缘对齐、宽度随工具变化）。
+_CARD_GAP = 6
 
 
 class FloatPanel(QWidget):
@@ -112,13 +114,13 @@ class FloatPanel(QWidget):
 
         self._root_layout = QVBoxLayout(self)
         self._root_layout.setContentsMargins(8, 6, 8, 10)
-        self._root_layout.setSpacing(0)
+        self._root_layout.setSpacing(_CARD_GAP)
         self._options = None
         self._options_above = False
         buttons = QWidget(self)
         self._button_row = buttons
-        # 按钮行按自身宽度居中：二级面板比按钮行宽时，按钮行仍在原位，不随工具切换左右跳。
-        self._root_layout.addWidget(buttons, 0, Qt.AlignHCenter)
+        # 各行按自身宽度靠左：二级面板变宽变窄时，主条始终在原位。
+        self._root_layout.addWidget(buttons, 0, Qt.AlignLeft)
         layout = QHBoxLayout(buttons)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(2)
@@ -223,17 +225,20 @@ class FloatPanel(QWidget):
 
     def paintEvent(self, _event) -> None:
         # 圆角卡片背景：WA_TranslucentBackground 下 QSS 不绘制自身背景，
-        # 这里用 QPainter 手绘（颜色取自 tokens，与 QSS 同源）。
+        # 这里用 QPainter 手绘（颜色取自 tokens，与 QSS 同源）。主条、二级面板、识别状态各一张卡片。
         t = T.THEMES[self._mode]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(6.5, 4.5, -6.5, -8.5)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(*T.FLOAT_PANEL_SHADOW))
-        painter.drawRoundedRect(rect.translated(0, 3).adjusted(-1, -1, 1, 1), T.RADIUS_LG + 1, T.RADIUS_LG + 1)
-        painter.setBrush(QColor(t["popover"]))
-        painter.setPen(QPen(QColor(t["border"]), 1))
-        painter.drawRoundedRect(rect, T.RADIUS_LG, T.RADIUS_LG)
+        for row in (self._button_row, self._options, self._ocr_feedback):
+            if row is None or row.isHidden():
+                continue
+            rect = QRectF(row.geometry()).adjusted(-1.5, -1.5, 1.5, 1.5)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(*T.FLOAT_PANEL_SHADOW))
+            painter.drawRoundedRect(rect.translated(0, 3).adjusted(-1, -1, 1, 1), T.RADIUS_LG + 1, T.RADIUS_LG + 1)
+            painter.setBrush(QColor(t["popover"]))
+            painter.setPen(QPen(QColor(t["border"]), 1))
+            painter.drawRoundedRect(rect, T.RADIUS_LG, T.RADIUS_LG)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -344,7 +349,7 @@ class FloatPanel(QWidget):
     def set_options_widget(self, widget):
         """工具配置跟随浮动面板，避免挤占截图画布。"""
         self._options = widget
-        self._root_layout.insertWidget(1, widget)
+        self._root_layout.insertWidget(1, widget, 0, Qt.AlignLeft)
         widget.setVisible(bool(self.selected_tool()))
 
     def _set_options_above(self, above):
@@ -352,18 +357,13 @@ class FloatPanel(QWidget):
         if above == self._options_above:
             return
         self._options_above = above
-        if self._options is not None:
-            # 分隔线要落在二级面板和按钮行之间，QSS 按这个属性换到下边。
-            self._options.setProperty("above", above)
-            self._options.style().unpolish(self._options)
-            self._options.style().polish(self._options)
         rows = [self._button_row, self._options, self._ocr_feedback]
         for row in rows:
             if row is not None:
                 self._root_layout.removeWidget(row)
         for row in reversed(rows) if above else rows:
             if row is not None:
-                self._root_layout.addWidget(row, 0, Qt.AlignHCenter if row is self._button_row else Qt.Alignment())
+                self._root_layout.addWidget(row, 0, Qt.Alignment() if row is self._ocr_feedback else Qt.AlignLeft)
 
     def set_position_near(self, rect: QRect) -> None:
         """把工具条放到选区附近：下方优先，放不下放上方；始终不超出屏幕。
@@ -377,12 +377,14 @@ class FloatPanel(QWidget):
         margins = self._root_layout.contentsMargins()
         tallest = self._button_row.sizeHint().height() + margins.top() + margins.bottom()
         if self._options is not None:
-            tallest += self._options.sizeHint().height()
+            tallest += self._options.sizeHint().height() + _CARD_GAP
         below = rect.bottom() + _GAP
         self._set_options_above(below + tallest > geo.bottom() + 1)
         size = self.sizeHint()
 
-        x = rect.center().x() - size.width() // 2
+        # 按主条宽度居中：二级面板比主条宽时向右伸出，主条不随工具切换左右跳。
+        bar_width = self._button_row.sizeHint().width() + margins.left() + margins.right()
+        x = rect.center().x() - bar_width // 2
         x = max(geo.left(), min(x, geo.right() - size.width() + 1))
         if self._options_above:
             y = max(geo.top(), rect.top() - size.height() - _GAP)

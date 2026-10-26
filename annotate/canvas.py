@@ -127,7 +127,7 @@ class AnnotationCanvas(QGraphicsView):
     def set_pipette_mode(self, on: bool):
         if on:
             self.clear_tool()
-            self._pipette = PipettePopup(self._bg_pixmap, hint="点击取色 · Shift 切换格式")
+            self._pipette = PipettePopup(self._bg_pixmap, hint="点击: 取色 · Shift: 切换颜色格式")
             self.viewport().setCursor(Qt.CrossCursor)
         else:
             if self._pipette is not None:

@@ -456,11 +456,6 @@ QLabel[class="grouptitle"] {{
 /* ===== 标注二级面板（annotate/options.py）===== */
 QWidget#ToolOptions {{
     background: transparent;
-    border-top: 1px solid {t['border']};
-}}
-QWidget#ToolOptions[above="true"] {{
-    border-top: none;
-    border-bottom: 1px solid {t['border']};
 }}
 QWidget#ToolOptions QLabel {{
     color: {t['muted_foreground']};

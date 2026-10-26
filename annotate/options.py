@@ -55,11 +55,9 @@ class ToolOptions(QWidget):
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
         self.setObjectName("ToolOptions")
-        # 顶部分隔线由 QSS 画，需要样式背景。
-        self.setAttribute(Qt.WA_StyledBackground)
         self._canvas = canvas
         self._layout = QHBoxLayout(self)
-        self._layout.setContentsMargins(8, 6, 8, 4)
+        self._layout.setContentsMargins(8, 6, 8, 6)
         self._layout.setSpacing(4)
         self._bindings = []
         self._tool_id = ""
@@ -140,7 +138,7 @@ class ToolOptions(QWidget):
             self._label("填充")
             self._color_button("background_color")
         elif tool_id == "magnifier":
-            self._label("像素预览 11 × 11，移动鼠标查看")
+            self._label("像素预览 15 × 7，移动鼠标查看")
         if tool_id != "magnifier":
             more.append(("wheel_enabled", "滚轮调节大小"))
         self._layout.addStretch()
