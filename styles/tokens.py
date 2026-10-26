@@ -31,6 +31,9 @@ LIGHT = {
     "border":            "#e4e4e7",  # --border: 240 5.9% 90%
     "input":             "#e4e4e7",  # --input
     "ring":              "#18181b",  # --ring（focus 环）
+    # 设置窗口：右侧内容底色比导航和卡片暗一档，分组卡片浮在上面（同 PixPin 配置窗口的层次）。
+    "settings_surface":  "#f4f4f5",
+    "settings_card":     "#ffffff",
 }
 
 DARK = {
@@ -57,7 +60,15 @@ DARK = {
     "border":            "#27272a",
     "input":             "#27272a",
     "ring":              "#d4d4d8",  # --ring: 240 4.9% 83.9%
+    # 深色下卡片要比底色亮一档才分得出层次。
+    "settings_surface":  "#111113",
+    "settings_card":     "#1c1c1f",
 }
+
+# 设置窗口：导航列宽、导航项高度（PixPin 实测约 154 / 35 逻辑像素），右侧控件列宽。
+SETTINGS_NAV_WIDTH = 168
+SETTINGS_NAV_ITEM = 36
+SETTINGS_CONTROL_WIDTH = 220
 
 # 圆角（--radius: 0.5rem = 8px）
 RADIUS_SM = 4
@@ -74,6 +85,7 @@ SPACE_4 = 16
 FONT_SM = 12
 FONT_MD = 13
 FONT_LG = 15
+FONT_XL = 20
 
 THEMES = {"light": LIGHT, "dark": DARK}
 

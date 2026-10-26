@@ -1,4 +1,4 @@
-# 设置窗口：QTabWidget 四个 tab，QSettings 持久化。
+# 设置窗口：左侧纵向导航、右侧分组卡片（对齐 PixPin 配置窗口），QSettings 持久化。
 # organization/app 名按任务约定为 GridStruct/GridStruct。
 
 import sys
@@ -6,15 +6,17 @@ from pathlib import Path
 from subprocess import list2cmdline
 
 from PySide6.QtWidgets import (
-    QTabWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
-    QComboBox, QCheckBox, QLineEdit, QPushButton, QFileDialog,
-    QDialogButtonBox, QWidget, QApplication, QKeySequenceEdit,
+    QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QCheckBox, QLineEdit, QPushButton,
+    QFileDialog, QWidget, QApplication, QKeySequenceEdit, QListWidget, QListWidgetItem,
+    QStackedWidget, QScrollArea, QFrame,
 )
-from PySide6.QtCore import QSettings, Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QKeySequence
+from PySide6.QtCore import QSettings, Qt, QUrl, QSize
+from PySide6.QtGui import QDesktopServices, QKeySequence, QIcon
 
 from ui import BaseDialog, ask_confirmation, show_message
+from ui.icons import tinted_icon
 from styles import apply_theme
+from styles import tokens as T
 from tray import HOTKEY_DEFAULTS, parse_hotkey
 from .storage import get_settings
 
@@ -70,6 +72,94 @@ def _autostart_command() -> str:
 
 
 _HOTKEY_LABELS = {"screenshot": "截图", "longshot": "长截图"}
+# 导航顺序：页面名、Lucide 图标、构建方法名。
+_PAGES = (("通用", "settings", "_general_page"), ("截图", "scan", "_shot_page"),
+          ("保存", "save", "_save_page"), ("文字识别", "scan-text", "_ocr_page"),
+          ("快捷键", "keyboard", "_hotkey_page"), ("关于", "info", "_about_page"))
+
+
+def _divider() -> QFrame:
+    line = QFrame()
+    line.setObjectName("SettingsDivider")
+    return line
+
+
+class _Card(QFrame):
+    """一组设置：圆角卡片，行与行之间一条细线；名称在左、控件在右侧对齐列。"""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("SettingsCard")
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(T.SPACE_4 + T.SPACE_1, T.SPACE_1, T.SPACE_4 + T.SPACE_1, T.SPACE_1)
+        self._layout.setSpacing(0)
+
+    def _add(self, layout, hint: str):
+        # 卡片内不套 QWidget：全局 QWidget 底色会盖住卡片色，只用布局排版。
+        if self._layout.count():
+            self._layout.addWidget(_divider())
+        box = QVBoxLayout()
+        box.setContentsMargins(0, T.SPACE_3, 0, T.SPACE_3)
+        box.setSpacing(T.SPACE_1)
+        box.addLayout(layout)
+        if hint:
+            note = QLabel(hint)
+            note.setProperty("class", "muted")
+            note.setWordWrap(True)
+            box.addWidget(note)
+        self._layout.addLayout(box)
+
+    def row(self, name: str, control, hint: str = ""):
+        line = QHBoxLayout()
+        line.setSpacing(T.SPACE_4)
+        line.addWidget(QLabel(name), 1)
+        if isinstance(control, QWidget):
+            control.setFixedWidth(T.SETTINGS_CONTROL_WIDTH)
+            line.addWidget(control)
+        else:
+            line.addLayout(control, 2)
+        self._add(line, hint)
+
+    def check(self, box: QCheckBox, hint: str = ""):
+        line = QHBoxLayout()
+        line.addWidget(box)
+        self._add(line, hint)
+
+    def widget(self, widget: QWidget, hint: str = ""):
+        line = QHBoxLayout()
+        line.addWidget(widget, 0, Qt.AlignLeft)
+        self._add(line, hint)
+
+
+class _Page(QScrollArea):
+    """一个导航页：标题、组标题在卡片外上方；内容超长时只滚动右侧。"""
+
+    def __init__(self, title: str):
+        super().__init__()
+        self.setObjectName("SettingsScroll")
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        inner = QWidget()
+        inner.setObjectName("SettingsPage")
+        self._layout = QVBoxLayout(inner)
+        self._layout.setContentsMargins(T.SPACE_4 + T.SPACE_2, T.SPACE_4, T.SPACE_4 + T.SPACE_2, T.SPACE_4)
+        self._layout.setSpacing(T.SPACE_2)
+        heading = QLabel(title)
+        heading.setProperty("class", "pagetitle")
+        self._layout.addWidget(heading)
+        self._layout.addStretch()
+        self.setWidget(inner)
+
+    def group(self, title: str) -> _Card:
+        stretch = self._layout.count() - 1
+        label = QLabel(title)
+        label.setProperty("class", "grouptitle")
+        self._layout.insertSpacing(stretch, T.SPACE_2)
+        self._layout.insertWidget(stretch + 1, label)
+        card = _Card()
+        self._layout.insertWidget(stretch + 2, card)
+        return card
 
 
 class SettingsDialog(BaseDialog):
@@ -80,34 +170,66 @@ class SettingsDialog(BaseDialog):
         # 模态设置会禁用贴图输入，必须位于已有置顶贴图之上。
         self.setWindowFlag(Qt.WindowStaysOnTopHint)
         self.setWindowTitle("设置")
-        self.resize(420, 360)
+        self.resize(760, 540)
+        self.setMinimumSize(640, 440)
         self._s = get_settings()
         self._original_theme = self._s.value("theme", "system")
         self._original_language = self._s.value("language", "system")
 
-        tabs = QTabWidget()
-        tabs.addTab(self._general_tab(), "通用")
-        tabs.addTab(self._shot_tab(), "截图")
-        tabs.addTab(self._hotkey_tab(), "热键")
-        tabs.addTab(self._about_tab(), "关于")
+        self._nav = QListWidget()
+        self._nav.setObjectName("SettingsNav")
+        self._nav.setFixedWidth(T.SETTINGS_NAV_WIDTH)
+        self._nav.setIconSize(QSize(18, 18))
+        self._nav.setFocusPolicy(Qt.NoFocus)
+        self._pages = QStackedWidget()
+        for title, _icon, build in _PAGES:
+            self._nav.addItem(QListWidgetItem(title))
+            self._pages.addWidget(getattr(self, build)(title))
+        self._nav.currentRowChanged.connect(self._pages.setCurrentIndex)
+        self._nav.setCurrentRow(0)
+        self._tint_nav()
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("确定")
-        buttons.button(QDialogButtonBox.Cancel).setText("取消")
-        buttons.accepted.connect(self._save)
-        buttons.rejected.connect(self.reject)
-        buttons.button(QDialogButtonBox.Ok).setProperty("class", "primary")
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("确定")
+        ok.setProperty("class", "primary")
+        ok.setDefault(True)
+        ok.clicked.connect(self._save)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(T.SPACE_4 + T.SPACE_2, T.SPACE_3, T.SPACE_4 + T.SPACE_2, T.SPACE_3)
+        buttons.setSpacing(T.SPACE_2)
+        buttons.addStretch()
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(tabs)
-        layout.addWidget(buttons)
+        body = QWidget()
+        body.setObjectName("SettingsBody")
+        right = QVBoxLayout(body)
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(0)
+        right.addWidget(self._pages, 1)
+        right.addWidget(_divider())
+        right.addLayout(buttons)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._nav)
+        layout.addWidget(body, 1)
+
+    def _tint_nav(self):
+        """导航图标随主题和选中态换色：选中项是主色底，图标要反白。"""
+        t = T.THEMES[QApplication.instance().property("theme_mode") or "light"]
+        for row, (_title, name, _build) in enumerate(_PAGES):
+            icon = QIcon()
+            icon.addPixmap(tinted_icon(name, t["foreground"], 36).pixmap(36, 36), QIcon.Normal)
+            icon.addPixmap(tinted_icon(name, t["primary_foreground"], 36).pixmap(36, 36), QIcon.Selected)
+            self._nav.item(row).setIcon(icon)
 
     # ---------- 通用 ----------
 
-    def _general_tab(self) -> QWidget:
-        w = QWidget()
-        form = QFormLayout(w)
+    def _general_page(self, title) -> QWidget:
+        page = _Page(title)
         self._theme = QComboBox()
         self._theme.addItem("浅色", "light")
         self._theme.addItem("深色", "dark")
@@ -115,29 +237,28 @@ class SettingsDialog(BaseDialog):
         cur = self._s.value("theme", "system")
         self._theme.setCurrentIndex(max(0, self._theme.findData(cur)))
         self._theme.currentIndexChanged.connect(self._on_theme_changed)
-        form.addRow("主题", self._theme)
+        page.group("外观").row("主题", self._theme)
 
         self._language = QComboBox()
         self._language.addItem("跟随系统", "system")
         self._language.addItem("简体中文", "zh_CN")
         self._language.setCurrentIndex(max(0, self._language.findData(self._original_language)))
-        form.addRow("语言", self._language)
-        language_hint = QLabel("当前界面支持简体中文；其他系统语言使用中文。更改后需重启。")
-        language_hint.setWordWrap(True)
-        form.addRow("", language_hint)
+        page.group("语言").row("界面语言", self._language,
+                               "当前界面支持简体中文；其他系统语言使用中文。更改后需重启。")
 
-        self._autostart = QCheckBox("开机自启")
+        self._autostart = QCheckBox("开机后自动启动")
         if sys.platform != "win32":
             self._autostart.setEnabled(False)
             self._autostart.setToolTip("仅 Windows 支持")
         else:
             self._autostart.setChecked(_read_autostart())
-        form.addRow("", self._autostart)
-        return w
+        page.group("启动").check(self._autostart)
+        return page
 
     def _on_theme_changed(self, _idx: int):
         mode = self._theme.currentData()
         apply_theme(QApplication.instance(), mode)
+        self._tint_nav()
 
     def reject(self):
         apply_theme(QApplication.instance(), self._original_theme)
@@ -145,10 +266,29 @@ class SettingsDialog(BaseDialog):
 
     # ---------- 截图 ----------
 
-    def _shot_tab(self) -> QWidget:
-        w = QWidget()
-        form = QFormLayout(w)
+    def _shot_page(self, title) -> QWidget:
+        page = _Page(title)
+        self._snap_only = QCheckBox("仅吸附窗口")
+        self._snap_only.setChecked(self._s.value("snap_only_window", False, type=bool))
+        self._guides = QCheckBox("显示十字辅助线")
+        self._guides.setChecked(self._s.value("capture_guides", True, type=bool))
+        detect = page.group("自动识别")
+        detect.check(self._snap_only, "开启后只框选整个窗口，不再识别按钮、输入框等控件。")
+        detect.check(self._guides)
+        self._same_color = QCheckBox("所有标注工具使用同一颜色")
+        self._same_color.setChecked(self._s.value("same_tool_color", True, type=bool))
+        page.group("标注").check(self._same_color, "高亮笔保留自己的颜色。")
+        self._confirm_exit = QCheckBox("退出截图时，如有未保存的标注先确认")
+        self._confirm_exit.setChecked(self._s.value("capture/confirm_exit", True, type=bool))
+        page.group("退出").check(self._confirm_exit, "按 Esc 或点关闭时生效；没有标注时直接退出。")
+        return page
+
+    # ---------- 保存 ----------
+
+    def _save_page(self, title) -> QWidget:
+        page = _Page(title)
         row = QHBoxLayout()
+        row.setSpacing(T.SPACE_2)
         self._shot_dir = QLineEdit(self._s.value("screenshot_dir", ""))
         self._shot_dir.setPlaceholderText("默认：图片文件夹")
         browse = QPushButton("浏览")
@@ -156,39 +296,33 @@ class SettingsDialog(BaseDialog):
         browse.clicked.connect(self._browse_dir)
         row.addWidget(self._shot_dir, 1)
         row.addWidget(browse)
-        form.addRow("保存目录", row)
-
         self._img_fmt = QComboBox()
         self._img_fmt.addItems(["png", "jpg"])
         self._img_fmt.setCurrentText(self._s.value("image_format", "png"))
-        form.addRow("图片格式", self._img_fmt)
-        self._snap_only = QCheckBox("仅吸附窗口（关闭控件级吸附）")
-        self._snap_only.setChecked(self._s.value("snap_only_window", False, type=bool))
-        form.addRow("", self._snap_only)
-        self._guides = QCheckBox("显示十字辅助线")
-        self._guides.setChecked(self._s.value("capture_guides", True, type=bool))
-        form.addRow("", self._guides)
-        self._same_color = QCheckBox("所有标注工具使用同一颜色（高亮除外）")
-        self._same_color.setChecked(self._s.value("same_tool_color", True, type=bool))
-        form.addRow("", self._same_color)
-        self._confirm_exit = QCheckBox("退出截图时，如有未保存的标注先确认")
-        self._confirm_exit.setChecked(self._s.value("capture/confirm_exit", True, type=bool))
-        form.addRow("", self._confirm_exit)
-        self._ocr_copy = QCheckBox("OCR 完成后直接复制，不显示复核窗口")
-        self._ocr_copy.setChecked(self._s.value("ocr/direct_copy", False, type=bool))
-        form.addRow("", self._ocr_copy)
-        return w
+        card = page.group("保存")
+        card.row("保存目录", row)
+        card.row("图片格式", self._img_fmt, "PNG 无损；JPG 文件更小，适合照片类截图。")
+        return page
 
     def _browse_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择保存目录")
         if d:
             self._shot_dir.setText(d)
 
-    # ---------- 热键 ----------
+    # ---------- 文字识别 ----------
 
-    def _hotkey_tab(self) -> QWidget:
-        w = QWidget()
-        form = QFormLayout(w)
+    def _ocr_page(self, title) -> QWidget:
+        page = _Page(title)
+        self._ocr_copy = QCheckBox("识别完成后直接复制文字")
+        self._ocr_copy.setChecked(self._s.value("ocr/direct_copy", False, type=bool))
+        page.group("识别结果").check(self._ocr_copy, "开启后不显示复核窗口。识别在本机完成，不上传图片。")
+        return page
+
+    # ---------- 快捷键 ----------
+
+    def _hotkey_page(self, title) -> QWidget:
+        page = _Page(title)
+        card = page.group("全局快捷键")
         self._hotkeys = {}
         for name, label in _HOTKEY_LABELS.items():
             edit = QKeySequenceEdit(QKeySequence(self._s.value(f"hotkey/{name}", HOTKEY_DEFAULTS[name]),
@@ -196,23 +330,16 @@ class SettingsDialog(BaseDialog):
             edit.setMaximumSequenceLength(1)
             edit.keySequenceChanged.connect(self._check_hotkeys)
             self._hotkeys[name] = edit
-            form.addRow(label, edit)
+            card.row(label, edit)
+        defaults = QPushButton("恢复默认")
+        defaults.clicked.connect(self._reset_hotkeys)
+        card.widget(defaults, "点击输入框后按下新组合键。确定后立即生效；新组合被占用时保留原热键。")
         self._hotkey_error = QLabel()
         self._hotkey_error.setProperty("class", "error")
         self._hotkey_error.setWordWrap(True)
-        form.addRow("", self._hotkey_error)
-        hint = QLabel("点击输入框后按下新组合键。确定后立即生效；新组合被占用时保留原热键。")
-        hint.setWordWrap(True)
-        form.addRow("", hint)
-        defaults = QPushButton("恢复默认")
-        defaults.setProperty("class", "outline")
-        defaults.clicked.connect(self._reset_hotkeys)
-        row = QHBoxLayout()
-        row.addWidget(defaults)
-        row.addStretch()
-        form.addRow("", row)
+        page._layout.insertWidget(page._layout.count() - 1, self._hotkey_error)
         self._check_hotkeys()
-        return w
+        return page
 
     def _reset_hotkeys(self):
         for name, edit in self._hotkeys.items():
@@ -239,27 +366,24 @@ class SettingsDialog(BaseDialog):
 
     # ---------- 关于 ----------
 
-    def _about_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.addWidget(QLabel("GridStruct-V2"))
-        layout.addWidget(QLabel(f"版本 {_VERSION} · Windows 便携版"))
+    def _about_page(self, title) -> QWidget:
+        page = _Page(title)
+        card = page.group("GridStruct-V2")
+        card.row("当前版本", QLabel(f"{_VERSION} · Windows 便携版"))
         links = QLabel('<a href="https://github.com/Clayprocess/GridStruct-v2#readme">使用说明</a> · '
                        '<a href="https://github.com/Clayprocess/GridStruct-v2/issues">反馈问题</a>')
         links.setOpenExternalLinks(True)
-        layout.addWidget(links)
-        layout.addWidget(QLabel("截图、贴图与中英文 OCR 均在本机处理。"))
+        card.row("帮助", links)
         updates = QPushButton("检查更新")
-        updates.setProperty("class", "outline")
         updates.clicked.connect(lambda: check_updates(self))
-        layout.addWidget(updates, alignment=Qt.AlignLeft)
-        layout.addStretch()
-        return w
+        card.widget(updates, "截图、贴图与中英文 OCR 均在本机处理。")
+        return page
 
     # ---------- 保存 ----------
 
     def _save(self):
         if not self._check_hotkeys():
+            self._nav.setCurrentRow(4)
             show_message(self, "热键无效", self._hotkey_error.text())
             return
         if sys.platform == "win32":
@@ -271,6 +395,7 @@ class SettingsDialog(BaseDialog):
         texts = self._hotkey_texts()
         problem = self._apply_hotkeys(texts) if self._apply_hotkeys is not None else None
         if problem:
+            self._nav.setCurrentRow(4)
             show_message(self, "快捷键冲突", problem)
             return
         for name, text in texts.items():

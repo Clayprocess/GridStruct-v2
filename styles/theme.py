@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPalette
 from . import tokens as T
 
 _ICON_DIR = Path(__file__).resolve().parents[1] / "assets" / "icons"
@@ -405,6 +406,53 @@ QGroupBox::title {{
     background: transparent;
 }}
 
+/* ===== 设置窗口（settings/dialog.py）：左侧导航 + 右侧分组卡片 ===== */
+QListWidget#SettingsNav {{
+    background: {t['background']};
+    border: none;
+    border-right: 1px solid {t['border']};
+    border-radius: 0;
+    padding: {T.SPACE_3}px {T.SPACE_2}px;
+    outline: none;
+}}
+QListWidget#SettingsNav::item {{
+    min-height: {T.SETTINGS_NAV_ITEM}px;
+    padding: 0 {T.SPACE_2}px;
+    margin-bottom: {T.SPACE_1}px;
+    border-radius: {r}px;
+    color: {t['foreground']};
+}}
+QListWidget#SettingsNav::item:hover {{
+    background: {t['accent']};
+}}
+QListWidget#SettingsNav::item:selected {{
+    background: {t['primary']};
+    color: {t['primary_foreground']};
+}}
+QWidget#SettingsBody, QScrollArea#SettingsScroll, QWidget#SettingsPage {{
+    background: {t['settings_surface']};
+    border: none;
+}}
+QFrame#SettingsCard {{
+    background: {t['settings_card']};
+    border: 1px solid {t['border']};
+    border-radius: {T.RADIUS_LG}px;
+}}
+QFrame#SettingsDivider {{
+    background: {t['border']};
+    border: none;
+    max-height: 1px;
+    min-height: 1px;
+}}
+QLabel[class="pagetitle"] {{
+    font-size: {T.FONT_XL}px;
+    font-weight: 600;
+}}
+QLabel[class="grouptitle"] {{
+    font-size: {T.FONT_LG}px;
+    font-weight: 600;
+}}
+
 /* ===== 标注二级面板（annotate/options.py）===== */
 QWidget#ToolOptions {{
     background: transparent;
@@ -551,6 +599,10 @@ def apply_theme(app: QApplication, mode: str = "system") -> str:
     if mode not in T.THEMES:
         raise ValueError(f"unknown theme mode: {mode}")
     t = T.THEMES[mode]
+    # QSS 管不到富文本链接色，只能走调色板；链接跟正文同色，靠下划线区分。
+    palette = app.palette()
+    palette.setColor(QPalette.Link, QColor(t["foreground"]))
+    app.setPalette(palette)
     app.setStyleSheet(build_qss(t))
     app.setProperty("theme_mode", mode)
     return mode
