@@ -87,8 +87,10 @@ window_rect = target.geometry()
 button_rect = QRect(window_rect.topLeft() + QPoint(30, 30), QSize(50, 40))
 native_window = physical(window_rect, dpr)
 fake = _FakeUIA(physical(button_rect, dpr))
-original_try = snap._try_init_uia
+original_try, original_msaa = snap._try_init_uia, snap._try_init_msaa
 snap._try_init_uia = lambda: fake
+# 这里只验证整窗遍历缓存；点命中另由 tools/check_snap_hit.py 用假树覆盖。
+snap._try_init_msaa = lambda: None
 detector = snap.RegionDetector(only_window=False)
 # 保留真实 HWND 校验，只隔离桌面其他窗口及周期刷新对缓存用例的影响。
 detector._snapshot_timer.stop()
@@ -116,9 +118,29 @@ try:
     print(f"PASS: per-window UIA cache, button/background transitions, one UIA query, DPR={dpr}")
 finally:
     detector.shutdown()
-    snap._try_init_uia = original_try
+    snap._try_init_uia, snap._try_init_msaa = original_try, original_msaa
     target.close()
 print("PASS: detector thread shutdown and worker deletion")
+
+from PySide6.QtWidgets import QPushButton
+target = QWidget()
+target.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+target.setGeometry(QRect(app.primaryScreen().availableGeometry().topLeft() + QPoint(100, 100), QSize(300, 200)))
+button = QPushButton("x", target)
+button.setGeometry(40, 40, 16, 16)  # 标签页关闭按钮大小的小控件
+target.show()
+app.processEvents()
+msaa = snap._try_init_msaa()
+try:
+    dpr = target.devicePixelRatioF()
+    centre = physical(QRect(button.mapToGlobal(QPoint(8, 8)), QSize(1, 1)), dpr).topLeft()
+    path = msaa.hit_path(int(target.winId()), centre.x(), centre.y())
+    expected = physical(QRect(button.mapToGlobal(QPoint()), button.size()), dpr)
+    assert path and path[-1] == expected, (path, expected)
+    print(f"PASS: MSAA hit path reaches a 16px button, depth={len(path)}, DPR={dpr}")
+finally:
+    msaa.close()
+    target.close()
 
 import ctypes
 from ctypes import wintypes
