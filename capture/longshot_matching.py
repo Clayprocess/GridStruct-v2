@@ -77,3 +77,65 @@ def find_viewport_end(stitched: QPixmap, frame: QPixmap) -> int:
             return 0
         match = start + rows
     return match
+
+
+# ---------- 容差匹配（精确重叠找不到时的后备） ----------
+# 参照 PixPin 3.5.5.1 反编译的位移评分：灰度差 >10 记为不一致，只统计有细节的像素，
+# 取不一致比例最小的位移；位移超过 2/3 帧视为不可信。与 PixPin 不同的是这里还要求
+# 最优位移唯一，重复内容宁可不拼也不重复（PixPin 在 Word 回滚时出现过行号回跳）。
+_GRAY_TOLERANCE = 10
+_MAX_ERROR = 0.1
+_AMBIGUOUS_MARGIN = 0.05
+_MIN_DETAIL = 200
+
+
+def _gray(pixmap):
+    _image, pixels = _pixels(pixmap)
+    r, g, b = (pixels >> 16) & 0xff, (pixels >> 8) & 0xff, pixels & 0xff
+    return ((r * 77 + g * 150 + b * 29) >> 8).astype(np.int16)
+
+
+def _static_rows(a, b, limit):
+    """两帧逐行比较：返回顶部、底部原地不动的行数（吸顶栏、底部工具栏），各不超过 limit。"""
+    still = np.all(np.abs(a - b) <= _GRAY_TOLERANCE, axis=1)
+    top = int(np.argmin(still)) if not still.all() else len(still)
+    bottom = int(np.argmin(still[::-1])) if not still.all() else len(still)
+    return min(top, limit), min(bottom, limit)
+
+
+def _error(a, b):
+    detail = (np.abs(np.diff(a, axis=1, prepend=a[:, :1])) > _GRAY_TOLERANCE) | \
+             (np.abs(np.diff(b, axis=1, prepend=b[:, :1])) > _GRAY_TOLERANCE)
+    count = int(detail.sum())
+    if count < _MIN_DETAIL:
+        return 1.0
+    return float((np.abs(a - b)[detail] > _GRAY_TOLERANCE).sum()) / count
+
+
+def find_shift(previous: QPixmap, new: QPixmap):
+    """向前滚动的容差定位，返回 (cut, footer)：new[cut:] 是新内容（含底栏），
+    已拼接结果需先去掉末尾 footer 行旧底栏；无法唯一确认时返回 (0, 0)。"""
+    if previous.size() != new.size():
+        return 0, 0
+    a, b = _gray(previous), _gray(new)
+    height = a.shape[0]
+    top, bottom = _static_rows(a, b, height // 3)
+    rows = height - top - bottom
+    if rows < 16:
+        return 0, 0
+    # 先用抽样列的逐行均值粗筛位移，再在抽样列上算误差，最后全分辨率确认。
+    step = max(1, a.shape[1] // 256)
+    sa, sb = a[top:height - bottom, ::step], b[top:height - bottom, ::step]
+    profile_a, profile_b = sa.mean(axis=1), sb.mean(axis=1)
+    limit = rows * 2 // 3
+    distances = np.array([np.mean((profile_a[s:] - profile_b[:rows - s]) ** 2) for s in range(1, limit + 1)])
+    candidates = np.argsort(distances)[:16] + 1
+    scored = sorted((_error(sa[s:], sb[:rows - s]), int(s)) for s in candidates)
+    best_error, shift = scored[0]
+    rivals = [error for error, s in scored[1:] if abs(s - shift) > 2]
+    if best_error > _MAX_ERROR or (rivals and rivals[0] < best_error + _AMBIGUOUS_MARGIN):
+        return 0, 0
+    full_a, full_b = a[top:height - bottom], b[top:height - bottom]
+    if _error(full_a[shift:], full_b[:rows - shift]) > _MAX_ERROR:
+        return 0, 0
+    return height - bottom - shift, bottom

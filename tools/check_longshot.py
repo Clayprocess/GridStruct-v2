@@ -192,6 +192,7 @@ def check_flow():
         saved = pixels(flow._stitcher.result)
         flow._scroll_target = 123
         with patch("capture.longshot.QApplication.platformName", return_value="windows"), \
+                patch("capture.longshot._IS_WIN", True), \
                 patch("capture.longshot._check_capture_target", side_effect=OSError("window changed")), \
                 patch.object(flow, "_grab", side_effect=AssertionError("captured changed target")):
             flow._sample_frame()
