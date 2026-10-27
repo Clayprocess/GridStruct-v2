@@ -377,6 +377,8 @@ class FloatPanel(QWidget):
         geo = screen.availableGeometry()
         margins = self._root_layout.contentsMargins()
         self._button_layout.setContentsMargins(0, 0, 0, 0)
+        # 改子布局边距不会让外层布局的尺寸缓存失效，不刷新就会沿用上一个工具的留白宽度。
+        self._button_container.updateGeometry()
         size = self.sizeHint()
         bar = self._button_row.sizeHint()
         bar_width = bar.width() + margins.left() + margins.right()
@@ -384,6 +386,7 @@ class FloatPanel(QWidget):
         x = max(geo.left(), min(anchor_x, geo.right() - size.width() + 1))
         # 宽面板把整个窗口向左推时，用主条行的留白抵消位移。
         self._button_layout.setContentsMargins(anchor_x - x, 0, 0, 0)
+        self._button_container.updateGeometry()
         bar_y = rect.bottom() + _GAP + margins.top()
         if bar_y + bar.height() + margins.bottom() > geo.bottom() + 1:
             bar_y = max(geo.top() + margins.top(), rect.top() - _GAP - margins.bottom() - bar.height())

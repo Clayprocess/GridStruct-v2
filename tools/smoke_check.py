@@ -659,7 +659,12 @@ def toolbar_stability():
             w._toolbar._slide.stop()
             w._position_toolbar()
             flush()
+            bar = w._toolbar._button_row
             spots.add(w._toolbar._buttons["geo"].mapToGlobal(QPoint()).toTuple())
+            options = w._toolbar._options
+            if not options.isHidden() and bar.mapToGlobal(QPoint()).x() + options.width() - 1 <= geo.right():
+                # 放得下时二级面板贴主条左缘；宽面板之后不能残留上一次的左移。
+                assert options.mapToGlobal(QPoint()).x() == bar.mapToGlobal(QPoint()).x(), (tool, pos)
         assert len(spots) == 1, f"toolbar buttons moved: {spots}"
         assert geo.contains(w._toolbar.geometry()), (w._toolbar.geometry(), geo)
         w.close()
