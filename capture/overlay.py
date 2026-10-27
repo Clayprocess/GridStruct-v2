@@ -365,7 +365,7 @@ class ScreenShotWindow(QObject):
 
     def key_press(self, event, window):
         if self._frozen:
-            # 标注时选区外遮罩仍能获得焦点，Esc 必须交给标注窗口处理编辑和退出确认。
+            # 标注时选区外遮罩仍能获得焦点，Esc 必须交给标注窗口走退出确认。
             if event.key() == Qt.Key_Escape:
                 self.actionRequested.emit("escape")
             return
@@ -373,10 +373,7 @@ class ScreenShotWindow(QObject):
             return
         key, modifiers = event.key(), event.modifiers()
         if key == Qt.Key_Escape:
-            if self._pipette_mode:
-                self._pipette_mode = False
-                return
-            # 框选阶段还没有标注，退出不会丢东西，不打断。
+            # 框选阶段还没有标注，退出不会丢东西，不打断；取色中也一样直接退出。
             self.close()
         elif key in (Qt.Key_Return, Qt.Key_Enter) and not self._sel.isNull():
             self._accept_selection()

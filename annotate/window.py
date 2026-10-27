@@ -229,13 +229,9 @@ class AnnotationWindow(QWidget):
                 document = None
             show_pin(pixmap, self._capture_position, document=document)
             self.close()
-        elif action == "cancel":
+        elif action in ("cancel", "escape"):
+            # 同 PixPin：Esc 在任何状态下都是关闭截图；正在输入的文字、折线先提交，再按有无未保存标注决定是否确认。
             self._request_cancel()
-        elif action == "escape":
-            if self._canvas.pipette_active:
-                self._toggle_pipette(False)
-            elif not self._canvas.finish_editing():
-                self._request_cancel()
 
     def _finish(self):
         self._canvas.finish_editing()
@@ -253,6 +249,11 @@ class AnnotationWindow(QWidget):
             return False
         if obj.window() not in (self, self._toolbar):
             return False
+        if event.key() == Qt.Key_Escape:
+            # 文字框、取色和面板控件都会先吃掉 Esc，统一在这里截下。
+            self._on_action("escape")
+            event.accept()
+            return True
         text = self._canvas.scene().focusItem()
         if (isinstance(text, QGraphicsTextItem) and text.textInteractionFlags() & Qt.TextEditable
                 and (obj is self._canvas or obj is self._canvas.viewport())):

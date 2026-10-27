@@ -493,11 +493,16 @@ def frozen_overlay_escape():
                     canvas._tool.on_press(canvas.scene(), QPointF(90, 70), canvas._undo)
                 dialog.reset_mock()
                 dialog.return_value.exec.return_value = QDialog.Rejected
-                escape_from_overlay()
-                assert flow._ann is window and canvas._tool._item is None and not dialog.called
+                if tool_id == "text":
+                    # 同 PixPin：输入中的 Esc 也是关闭，不能被文字框吃掉只结束编辑。
+                    canvas._tool._item.setFocus()
+                    QTest.keyClick(canvas.viewport(), Qt.Key_Escape)
+                    flush()
+                else:
+                    escape_from_overlay()
+                # 一次 Esc 就进入退出确认；正在编辑的内容先提交，取消确认后仍在。
+                assert flow._ann is window and canvas._tool._item is None and dialog.call_count == 1
                 assert not canvas._undo.isClean(), f"{tool_id}: Escape discarded the edit"
-                escape_from_overlay()
-                assert dialog.call_count == 1 and flow._ann is window
                 dialog.return_value.exec.return_value = QDialog.Accepted
                 escape_from_overlay()
                 assert flow._win is None and flow._ann is None
