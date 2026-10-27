@@ -388,9 +388,13 @@ class FloatPanel(QWidget):
         self._button_layout.setContentsMargins(anchor_x - x, 0, 0, 0)
         self._button_container.updateGeometry()
         bar_y = rect.bottom() + _GAP + margins.top()
-        if bar_y + bar.height() + margins.bottom() > geo.bottom() + 1:
+        bar_above = bar_y + bar.height() + margins.bottom() > geo.bottom() + 1
+        if bar_above:
             bar_y = max(geo.top() + margins.top(), rect.top() - _GAP - margins.bottom() - bar.height())
-        self._set_options_above(bar_y - margins.top() + size.height() > geo.bottom() + 1)
+        # 二级面板放在主条背向选区的一侧，不遮住截图；那一侧放不下才换到另一侧。
+        fits_below = bar_y - margins.top() + size.height() <= geo.bottom() + 1
+        fits_above = bar_y - (size.height() - bar.height() - margins.bottom()) >= geo.top()
+        self._set_options_above(fits_above if bar_above else not fits_below)
         self.resize(size)
         self._root_layout.activate()
         self.move(x, bar_y - self._button_row.mapTo(self, QPoint()).y())

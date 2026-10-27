@@ -665,6 +665,9 @@ def toolbar_stability():
             if not options.isHidden() and bar.mapToGlobal(QPoint()).x() + options.width() - 1 <= geo.right():
                 # 放得下时二级面板贴主条左缘；宽面板之后不能残留上一次的左移。
                 assert options.mapToGlobal(QPoint()).x() == bar.mapToGlobal(QPoint()).x(), (tool, pos)
+            if not options.isHidden() and bar.mapToGlobal(QPoint()).y() < w.y():
+                # 主条在选区上方时，二级面板应在主条上方，不能盖住截图。
+                assert not QRect(options.mapToGlobal(QPoint()), options.size()).intersects(w.geometry()), (tool, pos)
         assert len(spots) == 1, f"toolbar buttons moved: {spots}"
         assert geo.contains(w._toolbar.geometry()), (w._toolbar.geometry(), geo)
         w.close()
