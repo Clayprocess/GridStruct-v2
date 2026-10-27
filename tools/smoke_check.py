@@ -851,6 +851,47 @@ def ocr_selection_paint():
     view.deleteLater()
 
 
+def ocr_confirm_selection():
+    from capture import ScreenshotFlow, DesktopCapture, ScreenFrame
+    from ocr import OCRResult
+
+    source = sample(800, 600)
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(0, 0, 800, 600), source, QPoint())])
+    flow = ScreenshotFlow(app)
+    with patch("capture.flow.capture_virtual_desktop", return_value=shot):
+        for action, select, change_tool in (("confirm", True, False), ("confirm", False, False),
+                                            ("copy", True, False), ("confirm", True, True)):
+            flow.start()
+            flow._win._sel = QRect(30, 30, 300, 200)
+            flow._win.confirm()
+            window = flow._ann
+            window._show_text_layer([OCRResult(QRect(20, 20, 220, 30), "Recognized text 123", .99)])
+            flush()
+            if select:
+                item = window._text_layer.childItems()[0]
+                cursor = item.textCursor()
+                cursor.setPosition(0)
+                cursor.setPosition(10, QTextCursor.KeepAnchor)
+                item.setTextCursor(cursor)
+                window._canvas.setFocus()
+                item.setFocus()
+                QTest.keyClick(window._canvas.viewport(), Qt.Key_C, Qt.ControlModifier)
+                assert app.clipboard().text() == "Recognized"
+            if change_tool:
+                window.select_tool("arrow")
+            # 必须走真实完成按钮和 ScreenshotFlow 回调，才能抓到随后复制图片覆盖文字的问题。
+            window._toolbar._buttons[action].click()
+            flush()
+            mime = app.clipboard().mimeData()
+            if action == "confirm" and select and not change_tool:
+                assert app.clipboard().text() == "Recognized" and not mime.hasImage(), "对号覆盖了 OCR 选中文字"
+            else:
+                assert mime.hasImage(), "普通确认或明确复制图片动作被改成了文字复制"
+            assert flow._win is None and flow._ann is None, "确认后截图会话未清理"
+    flow.deleteLater()
+    flush()
+
+
 def render_windows():
     from annotate import AnnotationWindow, ColorDialog
     from ocr import OCRResult, OCRResultDialog
@@ -885,7 +926,7 @@ if __name__ == "__main__":
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,
-              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, ocr_copy_text, ocr_selection_paint, render_windows]
+              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)

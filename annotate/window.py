@@ -8,7 +8,7 @@ from .canvas import AnnotationCanvas
 from .toolbar import FloatPanel, shortcut_tool
 from .options import ToolOptions
 from .color_dialog import ColorDialog
-from ui import floating_window_type, MessageDialog
+from ui import floating_window_type, MessageDialog, show_toast
 from settings import get_settings
 from styles import tokens as T
 from export import save_image
@@ -48,6 +48,7 @@ class AnnotationWindow(QWidget):
         self.setWindowTitle("GridStruct-V2 截图标注")
         self._ended = False
         self._text_layer = None
+        self._ocr_selected_text = ""
         self._pipette_tool = ""
         self.setAttribute(Qt.WA_DeleteOnClose)
         self._canvas = AnnotationCanvas(pixmap)
@@ -154,6 +155,7 @@ class AnnotationWindow(QWidget):
         dialog.deleteLater()
 
     def _remove_text_layer(self):
+        self._ocr_selected_text = ""
         if self._text_layer is not None:
             self._canvas.scene().removeItem(self._text_layer)
             self._text_layer.deleteLater()
@@ -175,6 +177,10 @@ class AnnotationWindow(QWidget):
             self._canvas.clear_tool()
             self._text_layer = add_text_layer(self._canvas.scene(), results, self._mode,
                                               on_show_results=self._ocr.show_results)
+            self._text_layer.selectionChanged.connect(self._select_ocr_text)
+
+    def _select_ocr_text(self, _item, text):
+        self._ocr_selected_text = text
 
     def _show_ocr_status(self, message, has_results):
         self._toolbar.set_ocr_status(message, has_results)
@@ -194,6 +200,11 @@ class AnnotationWindow(QWidget):
             self._canvas.undo()
         elif action == "redo":
             self._canvas.redo()
+        elif action == "confirm" and self._ocr_selected_text:
+            # 完成原图选字时不能再发图片输出信号，否则会覆盖刚复制的文字。
+            QApplication.clipboard().setText(self._ocr_selected_text)
+            show_toast("已复制选中文字")
+            self.close()
         elif action in ("confirm", "copy"):
             self._finish()
         elif action == "save":
