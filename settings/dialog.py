@@ -385,8 +385,15 @@ class SettingsDialog(BaseDialog):
             self._nav.setCurrentRow(4)
             show_message(self, "热键无效", self._hotkey_error.text())
             return
-        # 先换热键（冲突时整组保留原热键，没有副作用），再写自启；自启失败把热键换回去，
-        # 保证保存失败时什么都没改。
+        previous_hotkeys = {}
+        for name, default in HOTKEY_DEFAULTS.items():
+            text = self._s.value(f"hotkey/{name}", default)
+            try:
+                parse_hotkey(text)
+            except ValueError:
+                # 与启动时的配置回退一致，回滚必须恢复实际使用的组合。
+                text = default
+            previous_hotkeys[name] = text
         texts = self._hotkey_texts()
         problem = self._apply_hotkeys(texts) if self._apply_hotkeys is not None else None
         if problem:
@@ -397,10 +404,12 @@ class SettingsDialog(BaseDialog):
             try:
                 _write_autostart(self._autostart.isChecked())
             except OSError as exc:
-                if self._apply_hotkeys is not None:
-                    self._apply_hotkeys({name: self._s.value(f"hotkey/{name}", HOTKEY_DEFAULTS[name])
-                                         for name in texts})
-                show_message(self, "无法保存设置", f"开机自启设置失败：{exc}")
+                # 自启写入失败不能留下尚未保存的新热键。
+                problem = self._apply_hotkeys(previous_hotkeys) if self._apply_hotkeys is not None else None
+                message = f"开机自启设置失败：{exc}"
+                if problem:
+                    message += f"\n原快捷键恢复失败：{problem}，请重新设置快捷键。"
+                show_message(self, "无法保存设置", message)
                 return
         for name, text in texts.items():
             self._s.setValue(f"hotkey/{name}", text)

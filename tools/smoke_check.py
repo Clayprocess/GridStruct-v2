@@ -563,14 +563,18 @@ def save_failure():
 
 def toolbar_stability():
     from annotate import AnnotationWindow
-    # 选区在屏幕上部（工具条在下）、底部（工具条在上）和贴右边各测一次：切工具时按钮行不能挪位。
     geo = app.primaryScreen().availableGeometry()
-    for x, y in ((250, 40), (250, geo.bottom() - 120), (geo.right() - 300, 40)):
-        w = AnnotationWindow(sample(300, 100), QPoint(x, y))
+    # 右缘宽面板和上下换侧的临界位置，能发现只测屏幕上下两端遗漏的主条跳位。
+    positions = (QPoint(geo.left() + 250, geo.top() + 40),
+                 QPoint(geo.left() + 250, geo.bottom() - 120),
+                 QPoint(geo.right() - 249, geo.top() + 300),
+                 QPoint(geo.left() + 300, geo.bottom() - 194))
+    for pos in positions:
+        w = AnnotationWindow(sample(200, 100), pos)
         w.show()
         flush()
         spots = set()
-        for tool in ("arrow", "rect", "text", "serial", "pencil", "mosaic", "eraser", "line", "arrow"):
+        for tool in ("rect", "text", "arrow", "serial", "pencil", "mosaic", "eraser", "line", "magnifier", "rect"):
             w.select_tool(tool)
             flush()
             w._toolbar._slide.stop()
@@ -578,8 +582,7 @@ def toolbar_stability():
             flush()
             spots.add(w._toolbar._buttons["geo"].mapToGlobal(QPoint()).toTuple())
         assert len(spots) == 1, f"toolbar buttons moved: {spots}"
-        toolbar = w._toolbar.geometry()
-        assert geo.contains(toolbar), (toolbar, geo)
+        assert geo.contains(w._toolbar.geometry()), (w._toolbar.geometry(), geo)
         w.close()
         w.deleteLater()
     flush()
@@ -623,23 +626,21 @@ def hotkey_settings():
         raise AssertionError(f"{bad!r} accepted")
     with TemporaryDirectory() as folder:
         s = QSettings(str(Path(folder) / "settings.ini"), QSettings.IniFormat)
-        # 按 Windows 路径走，自启写入也在保存流程里。
         with patch("settings.dialog.get_settings", return_value=s), \
              patch("settings.dialog.sys", SimpleNamespace(platform="win32")), \
              patch("settings.dialog._write_autostart") as autostart, patch("settings.dialog.show_message") as warning:
-            # 新组合被占用：设置窗口不关，配置保持原值，自启也不写。
+            # 新组合被占用：设置窗口不关，配置保持原值。
             dialog = SettingsDialog(apply_hotkeys=lambda texts: "占用")
-            dialog._autostart.setChecked(True)
             dialog._hotkeys["screenshot"].setKeySequence("Ctrl+Shift+A")
+            dialog._autostart.setChecked(True)
             dialog._save()
             assert warning.called and dialog.result() == 0 and s.value("hotkey/screenshot") is None
-            assert not autostart.called, "热键冲突时不应已写入自启"
-            # 自启写入失败：热键换回原组合，配置不变。
+            assert not autostart.called, "热键冲突不能提前写入自启设置"
             applied = []
             dialog._apply_hotkeys = lambda texts: applied.append(dict(texts))
             autostart.side_effect = OSError("denied")
             dialog._save()
-            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": HOTKEY_DEFAULTS["longshot"]}, HOTKEY_DEFAULTS], applied
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": HOTKEY_DEFAULTS["longshot"]}, HOTKEY_DEFAULTS]
             assert s.value("hotkey/screenshot") is None
             autostart.side_effect = None
             # 两个功能撞键：确定前就拦下。
@@ -652,6 +653,16 @@ def hotkey_settings():
             assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": "F1"}]
             assert s.value("hotkey/screenshot") == "Ctrl+Shift+A" and s.value("hotkey/longshot") == "F1"
             dialog.deleteLater()
+            if sys.platform == "win32":
+                applied.clear()
+                autostart.side_effect = OSError("synthetic registry failure")
+                dialog = SettingsDialog(apply_hotkeys=lambda texts: applied.append(texts))
+                dialog._hotkeys["screenshot"].setKeySequence("Ctrl+Shift+B")
+                dialog._save()
+                assert applied == [{"screenshot": "Ctrl+Shift+B", "longshot": "F1"},
+                                   {"screenshot": "Ctrl+Shift+A", "longshot": "F1"}]
+                assert dialog.result() == 0 and s.value("hotkey/screenshot") == "Ctrl+Shift+A"
+                dialog.deleteLater()
 
 
 def saved_settings():

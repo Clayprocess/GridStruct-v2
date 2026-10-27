@@ -117,10 +117,15 @@ class FloatPanel(QWidget):
         self._root_layout.setSpacing(_CARD_GAP)
         self._options = None
         self._options_above = False
-        buttons = QWidget(self)
+        self._button_container = QWidget(self)
+        self._button_layout = QHBoxLayout(self._button_container)
+        self._button_layout.setContentsMargins(0, 0, 0, 0)
+        self._button_layout.setSpacing(0)
+        buttons = QWidget(self._button_container)
         self._button_row = buttons
-        # 各行按自身宽度靠左：二级面板变宽变窄时，主条始终在原位。
-        self._root_layout.addWidget(buttons, 0, Qt.AlignLeft)
+        self._button_layout.addWidget(buttons, 0, Qt.AlignLeft)
+        self._button_layout.addStretch()
+        self._root_layout.addWidget(self._button_container)
         layout = QHBoxLayout(buttons)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(2)
@@ -232,8 +237,7 @@ class FloatPanel(QWidget):
         for row in (self._button_row, self._options, self._ocr_feedback):
             if row is None or row.isHidden():
                 continue
-            # 主条的左缩进（contentsMargins）是两张卡片的水平错位，不属于卡片本身。
-            rect = QRectF(row.contentsRect().translated(row.pos())).adjusted(-1.5, -1.5, 1.5, 1.5)
+            rect = QRectF(QRect(row.mapTo(self, QPoint()), row.size())).adjusted(-1.5, -1.5, 1.5, 1.5)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(*T.FLOAT_PANEL_SHADOW))
             painter.drawRoundedRect(rect.translated(0, 3).adjusted(-1, -1, 1, 1), T.RADIUS_LG + 1, T.RADIUS_LG + 1)
@@ -358,51 +362,36 @@ class FloatPanel(QWidget):
         if above == self._options_above:
             return
         self._options_above = above
-        rows = [self._button_row, self._options, self._ocr_feedback]
+        rows = [self._button_container, self._options, self._ocr_feedback]
         for row in rows:
             if row is not None:
                 self._root_layout.removeWidget(row)
         for row in reversed(rows) if above else rows:
             if row is not None:
-                self._root_layout.addWidget(row, 0, Qt.Alignment() if row is self._ocr_feedback else Qt.AlignLeft)
+                self._root_layout.addWidget(row, 0, Qt.AlignLeft if row is self._options else Qt.Alignment())
 
     def set_position_near(self, rect: QRect) -> None:
-        """把工具条放到选区附近：下方优先，放不下放上方；始终不超出屏幕。
-
-        上下按“按钮行 + 二级面板”都展开的高度来选，切换工具时不会在上下之间翻；
-        在下方时顶边贴选区，在上方时底边贴选区，按钮行都不动。
-        """
+        """主条只按自身尺寸锚定选区，二级面板靠屏幕边缘时独立换侧或横移。"""
         self._slide.stop()
         screen = QGuiApplication.screenAt(rect.center()) or QGuiApplication.primaryScreen()
         geo = screen.availableGeometry()
         margins = self._root_layout.contentsMargins()
-        tallest = self._button_row.sizeHint().height() + margins.top() + margins.bottom()
-        if self._options is not None:
-            tallest += self._options.sizeHint().height() + _CARD_GAP
-        below = rect.bottom() + _GAP
-        self._set_options_above(below + tallest > geo.bottom() + 1)
-
-        # 主条只按自身宽度居中并夹在屏幕内，与二级面板宽度无关，切换工具时不左右跳；
-        # 二级面板与主条左缘对齐，右边放不下时单独左移，此时主条用左缩进留在原位。
-        self._button_row.setContentsMargins(0, 0, 0, 0)
-        bar_width = self._button_row.sizeHint().width()
-        bar_x = rect.center().x() - bar_width // 2
-        bar_x = max(geo.left() + margins.left(), min(bar_x, geo.right() - margins.right() - bar_width + 1))
-        options_x = bar_x
-        if self._options is not None and not self._options.isHidden():
-            options_right = geo.right() - margins.right() - self._options.sizeHint().width() + 1
-            options_x = max(geo.left() + margins.left(), min(bar_x, options_right))
-        self._button_row.setContentsMargins(bar_x - options_x, 0, 0, 0)
-        # 立即重算布局：否则窗口最小宽度还是上一次的，setGeometry 会被撑宽。
-        self._root_layout.activate()
-        x = options_x - margins.left()
+        self._button_layout.setContentsMargins(0, 0, 0, 0)
         size = self.sizeHint()
-        if self._options_above:
-            y = max(geo.top(), rect.top() - size.height() - _GAP)
-        else:
-            y = below
-
-        self.setGeometry(QRect(QPoint(x, y), size))
+        bar = self._button_row.sizeHint()
+        bar_width = bar.width() + margins.left() + margins.right()
+        anchor_x = max(geo.left(), min(rect.center().x() - bar_width // 2, geo.right() - bar_width + 1))
+        x = max(geo.left(), min(anchor_x, geo.right() - size.width() + 1))
+        # 宽面板把整个窗口向左推时，用主条行的留白抵消位移。
+        self._button_layout.setContentsMargins(anchor_x - x, 0, 0, 0)
+        bar_y = rect.bottom() + _GAP + margins.top()
+        if bar_y + bar.height() + margins.bottom() > geo.bottom() + 1:
+            bar_y = max(geo.top() + margins.top(), rect.top() - _GAP - margins.bottom() - bar.height())
+        self._set_options_above(bar_y - margins.top() + size.height() > geo.bottom() + 1)
+        self.resize(size)
+        self._root_layout.activate()
+        self.move(x, bar_y - self._button_row.mapTo(self, QPoint()).y())
+        self.update()
 
 
 if __name__ == "__main__":
