@@ -2,7 +2,8 @@
 
 1. _Accessibility.hit_path 逐层 accHitTest 的路径、简单子元素、越界停止、引用释放；
 2. RegionDetector 把整窗遍历缓存和点命中路径合并成由内到外的层级链，
-   命中矩形内移动不再查询，慢窗口降级，滚轮能切到点命中补出的父层。
+   命中矩形内移动不再查询，慢窗口降级，滚轮能切到点命中补出的父层；
+3. 查询卡死时按超时收尾、拉黑该窗口，并把名额让给别的窗口。
 用法：QT_QPA_PLATFORM=offscreen python tools/check_snap_hit.py
 """
 
@@ -175,9 +176,76 @@ def check_detector():
          snap._win32_api, snap._snapshot_windows) = original
 
 
+def check_hung_query():
+    """点命中卡死：超时后该窗口降级，迟到结果被丢弃，名额让给别的窗口。"""
+    import threading
+    app = QApplication.instance() or QApplication([])
+    release = threading.Event()
+    other = QRect(0, 620, 400, 150)  # 离屏屏幕 800×800，放在 WINDOW 下方
+    seen = []
+
+    class Hanging:
+        def hit_path(self, hwnd, x, y):
+            seen.append(hwnd)
+            if hwnd == 7:
+                release.wait(5)
+            return [TOOLBAR] if hwnd == 7 else []
+
+        def close(self):
+            pass
+
+    class FakeUser32:
+        @staticmethod
+        def IsWindow(_hwnd):
+            return True
+
+        IsWindowVisible = IsWindow
+
+    class NoUIA:
+        def window_rectangles(self, _hwnd):
+            return []
+
+        def close(self):
+            pass
+
+    original = (snap._IS_WIN, snap._try_init_uia, snap._try_init_msaa, snap._win32_api,
+                snap._snapshot_windows, snap._HUNG_S)
+    snap._IS_WIN, snap._win32_api, snap._HUNG_S = True, FakeUser32, 0.3
+    snap._try_init_uia, snap._try_init_msaa = NoUIA, Hanging
+    snap._snapshot_windows = lambda _ignored: [(7, WINDOW), (8, other)]
+    detector = snap.RegionDetector(only_window=False)
+    detector._snapshot_timer.stop()
+    try:
+        detector.detect(QPoint(115, 18))
+        deadline = time.monotonic() + 2
+        while detector._point_inflight and time.monotonic() < deadline:
+            app.processEvents()
+        assert not detector._point_inflight, "卡死的点命中没有按超时收尾"
+        assert (7, WINDOW.getRect()) in detector._slow, "卡死窗口应降级为窗口吸附"
+        detector.detect(QPoint(100, 650))
+        deadline = time.monotonic() + 2
+        while 8 not in seen and time.monotonic() < deadline:
+            app.processEvents()
+        assert 8 in seen, "卡死线程不应永久占住名额"
+        assert 7 in snap._hung_hwnds
+        release.set()
+        deadline = time.monotonic() + 2
+        while snap._abandoned["point"] and time.monotonic() < deadline:
+            app.processEvents()
+        assert snap._abandoned["point"] == 0, "卡死线程返回后应归还计数"
+        app.processEvents()
+        print("PASS: hung point query times out, demotes its window, frees the slot and drops the late result")
+    finally:
+        release.set()
+        detector.shutdown()
+        snap._hung_hwnds.discard(7)
+        (snap._IS_WIN, snap._try_init_uia, snap._try_init_msaa, snap._win32_api,
+         snap._snapshot_windows, snap._HUNG_S) = original
+
+
 if __name__ == "__main__":
     failures = []
-    for check in (check_hit_path, check_detector):
+    for check in (check_hit_path, check_detector, check_hung_query):
         try:
             check()
         except AssertionError as error:

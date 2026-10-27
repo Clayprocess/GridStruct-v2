@@ -15,18 +15,23 @@
 import ctypes
 from queue import SimpleQueue
 import sys
-from threading import Semaphore, Thread
+from threading import Lock, Thread
 import time
 from PySide6.QtCore import QObject, QTimer, Signal, QRect, QPoint, Slot
 
 _IS_WIN = sys.platform == "win32"
 
 
-# 外部 COM 调用可能不返回。每种查询全进程只允许一个在途任务，旧截图卡住时新截图退回窗口吸附。
-_QUERY_SLOTS = {"uia": Semaphore(1), "point": Semaphore(1)}
+# 外部 COM 调用可能不返回。每种查询全进程只允许一个在途任务；超过 _HUNG_S 视为卡死：
+# 线程留给它自己结束，拉黑那个窗口（本次运行只用窗口吸附），名额让给别的窗口。
+# 卡死线程最多容忍 _MAX_ABANDONED 条，再多才整类停用，避免无限堆积。
+_query_lock = Lock()
+_running = {"uia": None, "point": None}  # kind -> (token, hwnd, started)
+_abandoned = {"uia": 0, "point": 0}
+_hung_hwnds = set()
 
 
-def _run_query(kind, request_id, args, factory, results, slot):
+def _run_query(kind, token, request_id, args, factory, results):
     started = time.perf_counter()
     rects = []
     try:
@@ -41,7 +46,11 @@ def _run_query(kind, request_id, args, factory, results, slot):
         print(f"[GridStruct-V2] {kind} 查询失败：{error}", flush=True)
     finally:
         elapsed = (time.perf_counter() - started) * 1000
-        slot.release()
+        with _query_lock:
+            if _running[kind] is not None and _running[kind][0] is token:
+                _running[kind] = None
+            else:
+                _abandoned[kind] -= 1
         # 队列只携带值，不引用 detector、窗口或 Qt 信号；旧会话可以立即销毁。
         results.put((kind, request_id, rects, elapsed))
 
@@ -50,15 +59,25 @@ def _start_query(kind, request_id, args, factory, results):
     if not _IS_WIN:
         results.put((kind, request_id, [], 0.0))
         return True
-    slot = _QUERY_SLOTS[kind]
-    if not slot.acquire(blocking=False):
-        return False
-    thread = Thread(target=_run_query, args=(kind, request_id, args, factory, results, slot),
+    hwnd, now = args[0], time.monotonic()
+    with _query_lock:
+        current = _running[kind]
+        if current is not None and now - current[2] >= _HUNG_S and _abandoned[kind] < _MAX_ABANDONED:
+            _abandoned[kind] += 1
+            _hung_hwnds.add(current[1])
+            print(f"[GridStruct-V2] {kind} 查询超过 {_HUNG_S:.0f}s 未返回，窗口 {current[1]} 改用窗口吸附", flush=True)
+            current = _running[kind] = None
+        if current is not None or hwnd in _hung_hwnds:
+            return False
+        token = object()
+        _running[kind] = (token, hwnd, now)
+    thread = Thread(target=_run_query, args=(kind, token, request_id, args, factory, results),
                     name=f"GridStruct-snap-{kind}", daemon=True)
     try:
         thread.start()
     except RuntimeError:
-        slot.release()
+        with _query_lock:
+            _running[kind] = None
         raise
     return True
 
@@ -102,6 +121,9 @@ class RegionDetector(QObject):
         self._point_queued = None
         self._point_id = 0
         self._point_requests = {}
+        # 在途请求 (request_id, 派发时刻)：超过 _HUNG_S 不再等，按空结果收尾并降级该窗口。
+        self._sent = None
+        self._point_sent = None
 
     def detect(self, pos: QPoint):
         from .screen import ScreenManager
@@ -183,6 +205,7 @@ class RegionDetector(QObject):
     def _dispatch_point(self, request_id, hwnd, x, y):
         self._point_inflight = _start_query("point", request_id, (hwnd, x, y), _try_init_msaa, self._results)
         if self._point_inflight:
+            self._point_sent = (request_id, time.monotonic())
             self._reply_timer.start()
         else:
             self._point_requests.pop(request_id)
@@ -194,9 +217,18 @@ class RegionDetector(QObject):
                 return
             kind, request_id, rects, elapsed = self._results.get_nowait()
             if kind == "point":
-                self._on_point_done(request_id, rects, elapsed)
-            else:
+                # 已按超时收尾的请求，迟到的结果直接丢弃。
+                if self._point_sent is not None and self._point_sent[0] == request_id:
+                    self._on_point_done(request_id, rects, elapsed)
+            elif self._sent is not None and self._sent[0] == request_id:
                 self._on_done(request_id, rects)
+        now = time.monotonic()
+        if self._point_sent is not None and now - self._point_sent[1] >= _HUNG_S:
+            # 耗时远超 _SLOW_POINT_MS，_on_point_done 会把该窗口降级为窗口吸附。
+            self._on_point_done(self._point_sent[0], [], (now - self._point_sent[1]) * 1000)
+        if self._sent is not None and now - self._sent[1] >= _HUNG_S:
+            # 空结果写入缓存，本次截图不再遍历这个窗口。
+            self._on_done(self._sent[0], [])
         if not self._inflight and not self._point_inflight:
             self._reply_timer.stop()
 
@@ -204,6 +236,7 @@ class RegionDetector(QObject):
     def _on_point_done(self, request_id, rects, elapsed_ms):
         key, revision = self._point_requests.pop(request_id)
         self._point_inflight = False
+        self._point_sent = None
         if not self._stopping and revision == self._mode_revision:
             if elapsed_ms > _SLOW_POINT_MS:
                 self._slow.add(key)
@@ -241,6 +274,7 @@ class RegionDetector(QObject):
     def _dispatch(self, request_id, hwnd):
         self._inflight = _start_query("uia", request_id, (hwnd,), _try_init_uia, self._results)
         if self._inflight:
+            self._sent = (request_id, time.monotonic())
             self._reply_timer.start()
         else:
             self._requests.pop(request_id)
@@ -253,6 +287,7 @@ class RegionDetector(QObject):
     @Slot(int, object)
     def _on_done(self, request_id, rects):
         key, revision = self._requests.pop(request_id)
+        self._sent = None
         alive = any((hwnd, rect.getRect()) == key for hwnd, rect in self._windows)
         if not self._stopping and revision == self._mode_revision and alive:
             window_rect = QRect(*key[1])
@@ -292,6 +327,7 @@ class RegionDetector(QObject):
         self._requests.clear()
         self._point_requests.clear()
         self._inflight = self._point_inflight = False
+        self._sent = self._point_sent = None
 
 
 # ---------- Windows API 边界 ----------
@@ -411,6 +447,9 @@ _MIN_ELEMENT = 4
 _SLOW_POINT_MS = 300
 # 点命中结果的沿用时长（秒）。
 _HIT_REUSE_S = 1.0
+# 单次外部查询超过它视为卡死（UIA 自带 200ms 超时，正常不会到这里）。
+_HUNG_S = 2.0
+_MAX_ABANDONED = 2
 
 
 def _valid_rect(rect, x, y, minimum=8):
