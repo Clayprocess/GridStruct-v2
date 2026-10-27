@@ -563,13 +563,14 @@ def save_failure():
 
 def toolbar_stability():
     from annotate import AnnotationWindow
-    # 选区在屏幕上部（工具条在下）和底部（工具条在上）各测一次：切工具时按钮行不能挪位。
-    for y in (40, app.primaryScreen().availableGeometry().bottom() - 120):
-        w = AnnotationWindow(sample(300, 100), QPoint(250, y))
+    # 选区在屏幕上部（工具条在下）、底部（工具条在上）和贴右边各测一次：切工具时按钮行不能挪位。
+    geo = app.primaryScreen().availableGeometry()
+    for x, y in ((250, 40), (250, geo.bottom() - 120), (geo.right() - 300, 40)):
+        w = AnnotationWindow(sample(300, 100), QPoint(x, y))
         w.show()
         flush()
         spots = set()
-        for tool in ("arrow", "serial", "pencil", "mosaic", "eraser", "line", "arrow"):
+        for tool in ("arrow", "rect", "text", "serial", "pencil", "mosaic", "eraser", "line", "arrow"):
             w.select_tool(tool)
             flush()
             w._toolbar._slide.stop()
@@ -577,6 +578,8 @@ def toolbar_stability():
             flush()
             spots.add(w._toolbar._buttons["geo"].mapToGlobal(QPoint()).toTuple())
         assert len(spots) == 1, f"toolbar buttons moved: {spots}"
+        toolbar = w._toolbar.geometry()
+        assert geo.contains(toolbar), (toolbar, geo)
         w.close()
         w.deleteLater()
     flush()
@@ -609,7 +612,7 @@ def exit_confirmation():
 
 
 def hotkey_settings():
-    from tray import parse_hotkey
+    from tray import HOTKEY_DEFAULTS, parse_hotkey
     assert parse_hotkey("Ctrl+Alt+S") == (0x2 | 0x1, 0x53)
     assert parse_hotkey("F1") == (0, 0x70) and parse_hotkey("Print") == (0, 0x2C)
     for bad in ("S", "Shift+S", "Ctrl+Alt+Space", ""):
@@ -620,13 +623,25 @@ def hotkey_settings():
         raise AssertionError(f"{bad!r} accepted")
     with TemporaryDirectory() as folder:
         s = QSettings(str(Path(folder) / "settings.ini"), QSettings.IniFormat)
+        # 按 Windows 路径走，自启写入也在保存流程里。
         with patch("settings.dialog.get_settings", return_value=s), \
-             patch("settings.dialog._write_autostart"), patch("settings.dialog.show_message") as warning:
-            # 新组合被占用：设置窗口不关，配置保持原值。
+             patch("settings.dialog.sys", SimpleNamespace(platform="win32")), \
+             patch("settings.dialog._write_autostart") as autostart, patch("settings.dialog.show_message") as warning:
+            # 新组合被占用：设置窗口不关，配置保持原值，自启也不写。
             dialog = SettingsDialog(apply_hotkeys=lambda texts: "占用")
+            dialog._autostart.setChecked(True)
             dialog._hotkeys["screenshot"].setKeySequence("Ctrl+Shift+A")
             dialog._save()
             assert warning.called and dialog.result() == 0 and s.value("hotkey/screenshot") is None
+            assert not autostart.called, "热键冲突时不应已写入自启"
+            # 自启写入失败：热键换回原组合，配置不变。
+            applied = []
+            dialog._apply_hotkeys = lambda texts: applied.append(dict(texts))
+            autostart.side_effect = OSError("denied")
+            dialog._save()
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": HOTKEY_DEFAULTS["longshot"]}, HOTKEY_DEFAULTS], applied
+            assert s.value("hotkey/screenshot") is None
+            autostart.side_effect = None
             # 两个功能撞键：确定前就拦下。
             dialog._hotkeys["longshot"].setKeySequence("Ctrl+Shift+A")
             assert not dialog._check_hotkeys() and dialog._hotkey_error.text()

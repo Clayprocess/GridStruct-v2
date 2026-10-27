@@ -13,8 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QSettings, Qt, QUrl, QSize
 from PySide6.QtGui import QDesktopServices, QKeySequence, QIcon
 
-from ui import BaseDialog, ask_confirmation, show_message
-from ui.icons import tinted_icon
+from ui import BaseDialog, ask_confirmation, show_message, tinted_icon
 from styles import apply_theme
 from styles import tokens as T
 from tray import HOTKEY_DEFAULTS, parse_hotkey
@@ -386,18 +385,23 @@ class SettingsDialog(BaseDialog):
             self._nav.setCurrentRow(4)
             show_message(self, "热键无效", self._hotkey_error.text())
             return
-        if sys.platform == "win32":
-            try:
-                _write_autostart(self._autostart.isChecked())
-            except OSError as exc:
-                show_message(self, "无法保存设置", f"开机自启设置失败：{exc}")
-                return
+        # 先换热键（冲突时整组保留原热键，没有副作用），再写自启；自启失败把热键换回去，
+        # 保证保存失败时什么都没改。
         texts = self._hotkey_texts()
         problem = self._apply_hotkeys(texts) if self._apply_hotkeys is not None else None
         if problem:
             self._nav.setCurrentRow(4)
             show_message(self, "快捷键冲突", problem)
             return
+        if sys.platform == "win32":
+            try:
+                _write_autostart(self._autostart.isChecked())
+            except OSError as exc:
+                if self._apply_hotkeys is not None:
+                    self._apply_hotkeys({name: self._s.value(f"hotkey/{name}", HOTKEY_DEFAULTS[name])
+                                         for name in texts})
+                show_message(self, "无法保存设置", f"开机自启设置失败：{exc}")
+                return
         for name, text in texts.items():
             self._s.setValue(f"hotkey/{name}", text)
         self._s.setValue("theme", self._theme.currentData())

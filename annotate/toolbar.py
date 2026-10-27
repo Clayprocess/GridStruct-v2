@@ -232,7 +232,8 @@ class FloatPanel(QWidget):
         for row in (self._button_row, self._options, self._ocr_feedback):
             if row is None or row.isHidden():
                 continue
-            rect = QRectF(row.geometry()).adjusted(-1.5, -1.5, 1.5, 1.5)
+            # 主条的左缩进（contentsMargins）是两张卡片的水平错位，不属于卡片本身。
+            rect = QRectF(row.contentsRect().translated(row.pos())).adjusted(-1.5, -1.5, 1.5, 1.5)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(*T.FLOAT_PANEL_SHADOW))
             painter.drawRoundedRect(rect.translated(0, 3).adjusted(-1, -1, 1, 1), T.RADIUS_LG + 1, T.RADIUS_LG + 1)
@@ -380,12 +381,22 @@ class FloatPanel(QWidget):
             tallest += self._options.sizeHint().height() + _CARD_GAP
         below = rect.bottom() + _GAP
         self._set_options_above(below + tallest > geo.bottom() + 1)
-        size = self.sizeHint()
 
-        # 按主条宽度居中：二级面板比主条宽时向右伸出，主条不随工具切换左右跳。
-        bar_width = self._button_row.sizeHint().width() + margins.left() + margins.right()
-        x = rect.center().x() - bar_width // 2
-        x = max(geo.left(), min(x, geo.right() - size.width() + 1))
+        # 主条只按自身宽度居中并夹在屏幕内，与二级面板宽度无关，切换工具时不左右跳；
+        # 二级面板与主条左缘对齐，右边放不下时单独左移，此时主条用左缩进留在原位。
+        self._button_row.setContentsMargins(0, 0, 0, 0)
+        bar_width = self._button_row.sizeHint().width()
+        bar_x = rect.center().x() - bar_width // 2
+        bar_x = max(geo.left() + margins.left(), min(bar_x, geo.right() - margins.right() - bar_width + 1))
+        options_x = bar_x
+        if self._options is not None and not self._options.isHidden():
+            options_right = geo.right() - margins.right() - self._options.sizeHint().width() + 1
+            options_x = max(geo.left() + margins.left(), min(bar_x, options_right))
+        self._button_row.setContentsMargins(bar_x - options_x, 0, 0, 0)
+        # 立即重算布局：否则窗口最小宽度还是上一次的，setGeometry 会被撑宽。
+        self._root_layout.activate()
+        x = options_x - margins.left()
+        size = self.sizeHint()
         if self._options_above:
             y = max(geo.top(), rect.top() - size.height() - _GAP)
         else:

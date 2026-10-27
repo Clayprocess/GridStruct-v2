@@ -11,7 +11,7 @@ from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QGuiApplication
 
 from styles import tokens as T
-from ui.icons import APP_ICON_SIZES, app_icon_pixmap
+from ui import APP_ICON_SIZES, app_icon_pixmap
 
 ICO = Path(__file__).resolve().parents[1] / "assets" / "app" / "gridstruct.ico"
 

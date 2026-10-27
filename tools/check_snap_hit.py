@@ -115,14 +115,23 @@ def check_detector():
         def close(self):
             pass
 
-    original = snap._IS_WIN, snap._try_init_uia, snap._try_init_msaa
+    class FakeUser32:
+        @staticmethod
+        def IsWindow(_hwnd):
+            return True
+
+        IsWindowVisible = IsWindow
+
+    original = (snap._IS_WIN, snap._try_init_uia, snap._try_init_msaa,
+                snap._win32_api, snap._snapshot_windows)
     snap._try_init_uia, snap._try_init_msaa = FakeUIA, lambda: provider
+    # 走 Windows 构造路径：构造时就会刷新一次窗口快照。
+    snap._IS_WIN, snap._win32_api = True, FakeUser32
+    snap._snapshot_windows = lambda _ignored: [(7, WINDOW)]
     detector = snap.RegionDetector(only_window=False)
-    snap._IS_WIN = True
+    detector._snapshot_timer.stop()
     # 离屏平台单屏、原点 (0,0)、DPR 1：逻辑坐标即物理坐标。
     assert manager.logical_to_physical(QPoint(115, 18), manager.screen_at(QPoint(0, 0))) == QPoint(115, 18)
-    detector._windows = [(7, WINDOW)]
-    detector._lookup = lambda x, y: (7, WINDOW) if WINDOW.contains(x, y) else None
     results = []
     detector.regionDetected.connect(results.append)
 
@@ -162,7 +171,8 @@ def check_detector():
         print("PASS: detector merges BFS cache with hit path, skips repeat queries, steps to parents, demotes slow windows")
     finally:
         detector.shutdown()
-        snap._IS_WIN, snap._try_init_uia, snap._try_init_msaa = original
+        (snap._IS_WIN, snap._try_init_uia, snap._try_init_msaa,
+         snap._win32_api, snap._snapshot_windows) = original
 
 
 if __name__ == "__main__":

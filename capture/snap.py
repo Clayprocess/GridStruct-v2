@@ -89,6 +89,9 @@ class RegionDetector(QObject):
         super().__init__()
         self._only_window = only_window
         self._cache = {}
+        # 点命中结果和慢窗口：首次 _refresh_snapshot 会按存活窗口过滤，必须先建好。
+        self._hits = {}
+        self._slow = set()
         self._requests = {}
         self._request_id = 0
         self._mode_revision = 0
@@ -116,8 +119,6 @@ class RegionDetector(QObject):
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.start()
         # 点命中单独一条线程：整窗遍历可能占满 200ms，不能挡住鼠标下的精化。
-        self._hits = {}
-        self._slow = set()
         self._point_inflight = False
         self._point_queued = None
         self._point_id = 0
