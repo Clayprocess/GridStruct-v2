@@ -63,6 +63,13 @@ class ScreenshotFlow(QObject):
             self._ann.select_tool(tool)
 
     def _trigger_action(self, action):
+        if action == "escape":
+            if self._ann is not None:
+                self._ann.trigger_action(action)
+            else:
+                # 标注创建失败时仍可退出已经冻结的遮罩。
+                self._cleanup()
+            return
         if action.startswith("tool:"):
             self._select_tool(action[5:])
             return

@@ -436,6 +436,85 @@ def screenshot_lifecycle():
     flow.deleteLater()
 
 
+def frozen_overlay_escape():
+    from capture import ScreenshotFlow, DesktopCapture, ScreenFrame
+    from PySide6.QtGui import QUndoCommand
+
+    flow = ScreenshotFlow(app)
+    source = sample(800, 600)
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(0, 0, 800, 600), source, QPoint())])
+    settings = get_settings()
+    previous_confirm = settings.value("capture/confirm_exit", True, type=bool)
+    settings.setValue("capture/confirm_exit", True)
+
+    def open_annotation():
+        flow.start()
+        flow._win._sel = QRect(30, 30, 300, 200)
+        flow._win.confirm()
+        flush()
+        assert flow._win._frozen and flow._ann is not None
+        return flow._ann
+
+    def escape_from_overlay():
+        # 点击选区外后焦点会回到冻结遮罩，不能只验证标注窗口自身的 Esc。
+        overlay = flow._win._windows[0]
+        overlay.activateWindow()
+        overlay.setFocus()
+        flush()
+        assert overlay.hasFocus()
+        QTest.keyClick(overlay, Qt.Key_Escape)
+        flush()
+
+    try:
+        with patch("capture.flow.capture_virtual_desktop", return_value=shot), \
+             patch("annotate.window.MessageDialog") as dialog:
+            open_annotation()
+            escape_from_overlay()
+            assert flow._win is None and flow._ann is None and not dialog.called
+
+            window = open_annotation()
+            window._canvas._undo.push(QUndoCommand("unsaved mark"))
+            dialog.return_value.exec.return_value = QDialog.Rejected
+            escape_from_overlay()
+            assert dialog.call_count == 1 and flow._ann is window and flow._win._frozen
+            dialog.return_value.exec.return_value = QDialog.Accepted
+            dialog.return_value.checkbox.isChecked.return_value = False
+            escape_from_overlay()
+            assert dialog.call_count == 2 and flow._win is None and flow._ann is None
+
+            for tool_id in ("text", "polyline"):
+                window = open_annotation()
+                window.select_tool(tool_id)
+                canvas = window._canvas
+                canvas._tool.on_press(canvas.scene(), QPointF(20, 20), canvas._undo)
+                if tool_id == "text":
+                    canvas._tool._item.setPlainText("pending text")
+                else:
+                    canvas._tool.on_press(canvas.scene(), QPointF(90, 70), canvas._undo)
+                dialog.reset_mock()
+                dialog.return_value.exec.return_value = QDialog.Rejected
+                escape_from_overlay()
+                assert flow._ann is window and canvas._tool._item is None and not dialog.called
+                assert not canvas._undo.isClean(), f"{tool_id}: Escape discarded the edit"
+                escape_from_overlay()
+                assert dialog.call_count == 1 and flow._ann is window
+                dialog.return_value.exec.return_value = QDialog.Accepted
+                escape_from_overlay()
+                assert flow._win is None and flow._ann is None
+
+            settings.setValue("capture/confirm_exit", False)
+            window = open_annotation()
+            window._canvas._undo.push(QUndoCommand("unsaved mark"))
+            dialog.reset_mock()
+            escape_from_overlay()
+            assert not dialog.called and flow._win is None and flow._ann is None, "不再提醒 ignored"
+    finally:
+        flow.cancel()
+        flow.deleteLater()
+        settings.setValue("capture/confirm_exit", previous_confirm)
+        flush()
+
+
 def pin_missing_fields():
     import json
     import pin
@@ -805,7 +884,7 @@ if __name__ == "__main__":
     checks = [high_dpi_canvas, ocr_pixels, offline_models, empty_polyline,
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
-              real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, pin_lifecycle, save_failure,
+              real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,
               longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, ocr_copy_text, ocr_selection_paint, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:

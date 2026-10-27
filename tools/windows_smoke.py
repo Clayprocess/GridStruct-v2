@@ -61,10 +61,14 @@ try:
         assert results[-1] == target.geometry(), (results, target.geometry())
         print(f"PASS: snapshot lookup excludes overlay and hits top-level, DPR={dpr} logical result")
     finally:
-        worker = detector._worker
+        stopped = time.monotonic()
         detector.shutdown()
-        assert not detector._thread.isRunning()
-        assert not shiboken6.isValid(worker), "worker 未在所属线程释放"
+        assert time.monotonic() - stopped < 0.25, "关闭吸附不应等待外部查询"
+        assert not detector._reply_timer.isActive()
+        detector.deleteLater()
+        from PySide6.QtCore import QCoreApplication, QEvent
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        assert not shiboken6.isValid(detector), "关闭后 detector 应可释放"
 finally:
     overlay.close()
     target.close()
@@ -120,7 +124,7 @@ finally:
     detector.shutdown()
     snap._try_init_uia, snap._try_init_msaa = original_try, original_msaa
     target.close()
-print("PASS: detector thread shutdown and worker deletion")
+print("PASS: detector shutdown is non-blocking and QObject can be released")
 
 from PySide6.QtWidgets import QPushButton
 target = QWidget()
@@ -130,16 +134,21 @@ button = QPushButton("x", target)
 button.setGeometry(40, 40, 16, 16)  # 标签页关闭按钮大小的小控件
 target.show()
 app.processEvents()
-msaa = snap._try_init_msaa()
+original_uia = snap._try_init_uia
+snap._try_init_uia = lambda: None
+detector = snap.RegionDetector(only_window=False)
 try:
-    dpr = target.devicePixelRatioF()
-    centre = physical(QRect(button.mapToGlobal(QPoint(8, 8)), QSize(1, 1)), dpr).topLeft()
-    path = msaa.hit_path(int(target.winId()), centre.x(), centre.y())
-    expected = physical(QRect(button.mapToGlobal(QPoint()), button.size()), dpr)
-    assert path and path[-1] == expected, (path, expected)
-    print(f"PASS: MSAA hit path reaches a 16px button, depth={len(path)}, DPR={dpr}")
+    # Qt GUI 线程可能已用 STA 初始化 COM；按正式路径在后台创建 MSAA，避免在 GUI 线程误测 MTA。
+    results = []
+    detector.regionDetected.connect(results.append)
+    started = time.monotonic()
+    detector.detect(button.mapToGlobal(QPoint(8, 8)))
+    logical_button = QRect(button.mapToGlobal(QPoint()), button.size())
+    wait_until(lambda: results and results[-1] == logical_button)
+    print(f"PASS: native background MSAA reaches a 16px button in {(time.monotonic() - started) * 1000:.1f}ms")
 finally:
-    msaa.close()
+    detector.shutdown()
+    snap._try_init_uia = original_uia
     target.close()
 
 import ctypes

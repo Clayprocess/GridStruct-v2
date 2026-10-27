@@ -220,6 +220,11 @@ class AnnotationWindow(QWidget):
             self.close()
         elif action == "cancel":
             self._request_cancel()
+        elif action == "escape":
+            if self._canvas.pipette_active:
+                self._toggle_pipette(False)
+            elif not self._canvas.finish_editing():
+                self._request_cancel()
 
     def _finish(self):
         self._canvas.finish_editing()
@@ -257,10 +262,7 @@ class AnnotationWindow(QWidget):
     def keyPressEvent(self, event):
         key, modifiers = event.key(), event.modifiers()
         if key == Qt.Key_Escape:
-            if self._canvas.pipette_active:
-                self._toggle_pipette(False)
-            elif not self._canvas.finish_editing():
-                self._request_cancel()
+            self._on_action("escape")
         elif modifiers & Qt.ControlModifier and key in (Qt.Key_S, Qt.Key_C):
             self._on_action("save" if key == Qt.Key_S else "copy")
         elif modifiers & Qt.ShiftModifier and key == Qt.Key_O:

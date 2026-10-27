@@ -13,71 +13,54 @@
 # 非 Windows 平台返回空（Linux 开发机不断）。
 
 import ctypes
+from queue import SimpleQueue
 import sys
+from threading import Semaphore, Thread
 import time
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, QRect, QPoint, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, QRect, QPoint, Slot
 
 _IS_WIN = sys.platform == "win32"
 
 
-class _SnapWorker(QObject):
-    done = Signal(int, object)
-
-    def __init__(self):
-        super().__init__()
-        self._uia = None
-        self._uia_initialized = False
-
-    @Slot(int, "qulonglong")
-    def query(self, request_id: int, hwnd: int):
-        started = time.perf_counter()
-        rects = []
-        if _IS_WIN:
-            if not self._uia_initialized:
-                self._uia = _try_init_uia()
-                self._uia_initialized = True
-            if self._uia is not None:
-                try:
-                    rects = self._uia.window_rectangles(hwnd)
-                except OSError as exc:
-                    print(f"[GridStruct-V2] UIA 精化失败：{exc}", flush=True)
-        detection_ms = (time.perf_counter() - started) * 1000
-        print(f"[GridStruct-V2] UIA request={request_id} detectionMs={detection_ms:.2f} "
-              f"rectangles={len(rects)}", flush=True)
-        self.done.emit(request_id, rects)
-
-    @Slot()
-    def cleanup(self):
-        if self._uia is not None:
-            self._uia.close()
-            self._uia = None
+# 外部 COM 调用可能不返回。每种查询全进程只允许一个在途任务，旧截图卡住时新截图退回窗口吸附。
+_QUERY_SLOTS = {"uia": Semaphore(1), "point": Semaphore(1)}
 
 
-class _PointWorker(QObject):
-    done = Signal(int, object, float)
+def _run_query(kind, request_id, args, factory, results, slot):
+    started = time.perf_counter()
+    rects = []
+    try:
+        provider = factory()
+        if provider is not None:
+            try:
+                rects = provider.window_rectangles(*args) if kind == "uia" else provider.hit_path(*args)
+            finally:
+                # COM 的创建、调用和释放必须在同一线程；关闭窗口不参与这条生命周期。
+                provider.close()
+    except OSError as error:
+        print(f"[GridStruct-V2] {kind} 查询失败：{error}", flush=True)
+    finally:
+        elapsed = (time.perf_counter() - started) * 1000
+        slot.release()
+        # 队列只携带值，不引用 detector、窗口或 Qt 信号；旧会话可以立即销毁。
+        results.put((kind, request_id, rects, elapsed))
 
-    def __init__(self):
-        super().__init__()
-        self._msaa = None
-        self._msaa_initialized = False
 
-    @Slot(int, "qulonglong", int, int)
-    def query(self, request_id: int, hwnd: int, x: int, y: int):
-        started = time.perf_counter()
-        rects = []
-        if _IS_WIN:
-            if not self._msaa_initialized:
-                self._msaa = _try_init_msaa()
-                self._msaa_initialized = True
-            if self._msaa is not None:
-                rects = self._msaa.hit_path(hwnd, x, y)
-        self.done.emit(request_id, rects, (time.perf_counter() - started) * 1000)
-
-    @Slot()
-    def cleanup(self):
-        if self._msaa is not None:
-            self._msaa.close()
-            self._msaa = None
+def _start_query(kind, request_id, args, factory, results):
+    if not _IS_WIN:
+        results.put((kind, request_id, [], 0.0))
+        return True
+    slot = _QUERY_SLOTS[kind]
+    if not slot.acquire(blocking=False):
+        return False
+    thread = Thread(target=_run_query, args=(kind, request_id, args, factory, results, slot),
+                    name=f"GridStruct-snap-{kind}", daemon=True)
+    try:
+        thread.start()
+    except RuntimeError:
+        slot.release()
+        raise
+    return True
 
 
 class RegionDetector(QObject):
@@ -111,25 +94,14 @@ class RegionDetector(QObject):
         if _IS_WIN:
             self._refresh_snapshot()
             self._snapshot_timer.start(2000)
-        self._thread = QThread(self)
-        self._worker = _SnapWorker()
-        self._worker.moveToThread(self._thread)
-        self._worker.done.connect(self._on_done)
-        self._thread.finished.connect(self._worker.cleanup)
-        self._thread.finished.connect(self._worker.deleteLater)
-        self._thread.start()
-        # 点命中单独一条线程：整窗遍历可能占满 200ms，不能挡住鼠标下的精化。
+        self._results = SimpleQueue()
+        self._reply_timer = QTimer(self)
+        self._reply_timer.setInterval(16)
+        self._reply_timer.timeout.connect(self._poll_results)
         self._point_inflight = False
         self._point_queued = None
         self._point_id = 0
         self._point_requests = {}
-        self._point_thread = QThread(self)
-        self._point_worker = _PointWorker()
-        self._point_worker.moveToThread(self._point_thread)
-        self._point_worker.done.connect(self._on_point_done)
-        self._point_thread.finished.connect(self._point_worker.cleanup)
-        self._point_thread.finished.connect(self._point_worker.deleteLater)
-        self._point_thread.start()
 
     def detect(self, pos: QPoint):
         from .screen import ScreenManager
@@ -162,6 +134,8 @@ class RegionDetector(QObject):
         self._chain = chain
         rect = chain[min(self._level, len(chain) - 1)]
         self._publish(manager.physical_rect_to_logical(rect))
+        if self._stopping:
+            return
         if not self._only_window:
             self._request_point(key, hwnd, x, y)
         # 冻结截图内按窗口收集一次控件，按钮之间移动也无需再跨 COM。
@@ -207,11 +181,24 @@ class RegionDetector(QObject):
             self._dispatch_point(*request)
 
     def _dispatch_point(self, request_id, hwnd, x, y):
-        from PySide6.QtCore import QMetaObject, Qt, Q_ARG
-        self._point_inflight = True
-        QMetaObject.invokeMethod(
-            self._point_worker, "query", Qt.QueuedConnection,
-            Q_ARG(int, request_id), Q_ARG("qulonglong", hwnd), Q_ARG(int, x), Q_ARG(int, y))
+        self._point_inflight = _start_query("point", request_id, (hwnd, x, y), _try_init_msaa, self._results)
+        if self._point_inflight:
+            self._reply_timer.start()
+        else:
+            self._point_requests.pop(request_id)
+
+    def _poll_results(self):
+        # 只消费本轮已有的结果，后续派发的快查询留到下一轮，避免占满 GUI 事件循环。
+        for _ in range(self._results.qsize()):
+            if self._stopping:
+                return
+            kind, request_id, rects, elapsed = self._results.get_nowait()
+            if kind == "point":
+                self._on_point_done(request_id, rects, elapsed)
+            else:
+                self._on_done(request_id, rects)
+        if not self._inflight and not self._point_inflight:
+            self._reply_timer.stop()
 
     @Slot(int, object, float)
     def _on_point_done(self, request_id, rects, elapsed_ms):
@@ -252,12 +239,11 @@ class RegionDetector(QObject):
             self.detect(self._last)
 
     def _dispatch(self, request_id, hwnd):
-        from PySide6.QtCore import QMetaObject, Qt, Q_ARG
-        self._inflight = True
-        # HWND 是指针宽度，不能放进 Qt 的 32 位 int 参数。
-        QMetaObject.invokeMethod(
-            self._worker, "query", Qt.QueuedConnection,
-            Q_ARG(int, request_id), Q_ARG("qulonglong", hwnd))
+        self._inflight = _start_query("uia", request_id, (hwnd,), _try_init_uia, self._results)
+        if self._inflight:
+            self._reply_timer.start()
+        else:
+            self._requests.pop(request_id)
 
     def _discard_queued(self):
         if self._queued is not None:
@@ -300,12 +286,12 @@ class RegionDetector(QObject):
     def shutdown(self):
         self._stopping = True
         self._snapshot_timer.stop()
+        self._reply_timer.stop()
         self._discard_queued()
         self._point_queued = None
-        self._thread.quit()
-        self._point_thread.quit()
-        self._thread.wait()
-        self._point_thread.wait()
+        self._requests.clear()
+        self._point_requests.clear()
+        self._inflight = self._point_inflight = False
 
 
 # ---------- Windows API 边界 ----------

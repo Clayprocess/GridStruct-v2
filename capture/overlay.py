@@ -364,7 +364,12 @@ class ScreenShotWindow(QObject):
         return True
 
     def key_press(self, event, window):
-        if self._frozen or self._refreshing:
+        if self._frozen:
+            # 标注时选区外遮罩仍能获得焦点，Esc 必须交给标注窗口处理编辑和退出确认。
+            if event.key() == Qt.Key_Escape:
+                self.actionRequested.emit("escape")
+            return
+        if self._refreshing:
             return
         key, modifiers = event.key(), event.modifiers()
         if key == Qt.Key_Escape:
