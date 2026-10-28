@@ -536,8 +536,8 @@ class TableDialog(BaseDialog):
             show_message(self, "导出失败", f"无法写入文件：{path}\n{exc}")
             return
         settings.setValue("table/export_dir", str(Path(path).parent))
-        QApplication.clipboard().setText(path)
-        show_toast("已导出，文件路径已复制" + self._pending_note())
+        # 同截图保存：不动剪贴板，提示里可点复制路径。
+        show_toast("已导出" + self._pending_note(), ("复制路径", lambda: QApplication.clipboard().setText(path)))
 
     # ---- 缩放 ----
 
