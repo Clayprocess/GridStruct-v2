@@ -69,7 +69,8 @@ def main():
         directory = Path(temporary)
         session_path = directory / "pins" / "session.json"
         with (patch("pin.data_directory", return_value=directory),
-              patch("pin.show_message") as warning,
+              patch("pin.show_message"),
+              patch("pin.ask_confirmation", return_value=False) as warning,
               patch("ocr.OCREngine.recognize_image", side_effect=AssertionError("转移和恢复不应推理")) as infer):
             for mode in ("light", "dark"):
                 apply_theme(app, mode)

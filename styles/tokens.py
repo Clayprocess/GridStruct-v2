@@ -31,6 +31,9 @@ LIGHT = {
     "border":            "#e4e4e7",  # --border: 240 5.9% 90%
     "input":             "#e4e4e7",  # --input
     "ring":              "#18181b",  # --ring（focus 环）
+    # 设置窗口：右侧内容底色比导航和卡片暗一档，分组卡片浮在上面（同 PixPin 配置窗口的层次）。
+    "settings_surface":  "#f4f4f5",
+    "settings_card":     "#ffffff",
 }
 
 DARK = {
@@ -57,7 +60,15 @@ DARK = {
     "border":            "#27272a",
     "input":             "#27272a",
     "ring":              "#d4d4d8",  # --ring: 240 4.9% 83.9%
+    # 深色下卡片要比底色亮一档才分得出层次。
+    "settings_surface":  "#111113",
+    "settings_card":     "#1c1c1f",
 }
+
+# 设置窗口：导航列宽、导航项高度（PixPin 实测约 154 / 35 逻辑像素），右侧控件列宽。
+SETTINGS_NAV_WIDTH = 168
+SETTINGS_NAV_ITEM = 36
+SETTINGS_CONTROL_WIDTH = 220
 
 # 圆角（--radius: 0.5rem = 8px）
 RADIUS_SM = 4
@@ -74,6 +85,7 @@ SPACE_4 = 16
 FONT_SM = 12
 FONT_MD = 13
 FONT_LG = 15
+FONT_XL = 20
 
 THEMES = {"light": LIGHT, "dark": DARK}
 
@@ -93,5 +105,12 @@ PIN_HUD_MS = 1200
 # 同 PixPin 默认：Ctrl+滚轮每格 5%；鼠标穿透时不透明度最高 50%。
 PIN_OPACITY_STEP = 0.05
 PIN_CLICK_THROUGH_OPACITY = 0.5
+# OCR 原图选字：只叠半透明底色，不遮住原图字形；明暗主题共用（叠在截图像素上，与界面主题无关）。
+OCR_SELECTION = (59, 130, 246, 96)
+OCR_HOVER = (59, 130, 246, 28)
+# 应用标识点阵在 EXE、窗口上的颜色：无底色，要在浅色和深色背景上都看得见，取中等明度的靛蓝。
+APP_ICON_COLOR = "#6366f1"
 # 复制、保存等结果提示的停留时长。
 TOAST_MS = 1600
+# 带操作按钮的提示要留出移动鼠标去点的时间。
+TOAST_ACTION_MS = 4000

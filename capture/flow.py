@@ -63,11 +63,22 @@ class ScreenshotFlow(QObject):
             self._ann.select_tool(tool)
 
     def _trigger_action(self, action):
+        if action == "escape":
+            if self._ann is not None:
+                self._ann.trigger_action(action)
+            else:
+                # 标注创建失败时仍可退出已经冻结的遮罩。
+                self._cleanup()
+            return
         if action.startswith("tool:"):
             self._select_tool(action[5:])
             return
         if action == "pipette":
             self._win.start_pipette()
+            return
+        if action == "cancel":
+            # 与 Esc 一致：框选阶段直接退出，不先转成标注窗口再问。
+            self._win.close()
             return
         if action == "longshot":
             self._longshot_requested = True

@@ -3,13 +3,14 @@
 import json
 import math
 import re
+import shutil
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPixmap
-from PySide6.QtCore import QPoint, QTimer, QSaveFile, QIODevice
+from PySide6.QtCore import QDateTime, QPoint, QTimer, QSaveFile, QIODevice
 
 from settings import data_directory
-from ui import show_message, show_toast
+from ui import ask_confirmation, show_message, show_toast
 from .window import PinWindow, PinTextWindow, _ConfirmDialog
 
 __all__ = [
@@ -199,41 +200,72 @@ def _validate_state(state):
             raise ValueError("贴图像素比例无效")
 
 
-def restore_pins() -> bool:
-    """启动时恢复未关闭贴图。损坏的会话保持原样，禁止后续自动覆盖。"""
-    global _restoring, _restore_failed
-    path = None
+def _read_session(directory, path):
+    """逐条检查会话，返回 (可恢复记录, 问题列表)；整个文件读不了时没有可恢复记录。"""
     try:
-        directory = data_directory() / "pins"
-        path = directory / "session.json"
-        if not path.exists():
-            return True
         data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("pins"), list):
-            raise ValueError("不支持的贴图会话格式")
-        prepared = []
-        identifiers = set()
-        for state in data["pins"]:
+    except (OSError, ValueError) as error:
+        return [], [f"会话文件无法读取：{error}"]
+    if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("pins"), list):
+        return [], ["不支持的贴图会话格式"]
+    prepared, problems, identifiers = [], [], set()
+    for index, state in enumerate(data["pins"], 1):
+        try:
             _validate_state(state)
             if state["id"] in identifiers:
                 raise ValueError("贴图 ID 重复")
-            identifiers.add(state["id"])
             pixmap = None
             if state["kind"] == "image":
                 pixmap = QPixmap(str(directory / f"{state['id']}.png"))
                 if pixmap.isNull():
-                    raise ValueError(f"贴图图片缺失或无法读取：{state['id']}.png")
+                    raise ValueError(f"图片缺失或无法读取：{state['id']}.png")
                 pixmap.setDevicePixelRatio(state["dpr"])
-            prepared.append((state, pixmap))
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        _restore_failed = True
-        show_message(
-            None, "贴图恢复失败",
-            f"{error}\n原会话已保留，自动保存暂停。"
-            + (f"请修复或移走该文件后重启：\n{path}" if path is not None else "请检查应用目录的写入权限后重启。"))
+        except KeyError as error:
+            problems.append(f"第 {index} 条记录缺少字段 {error.args[0]}")
+            continue
+        except (ValueError, TypeError) as error:
+            problems.append(f"第 {index} 条记录：{error}")
+            continue
+        identifiers.add(state["id"])
+        prepared.append((state, pixmap))
+    return prepared, problems
+
+
+def _offer_continue(path, problems):
+    """有记录没恢复时先备份原会话，再让用户决定是否以当前结果继续自动保存。"""
+    shown = problems[:8] + ([f"……另有 {len(problems) - 8} 条"] if len(problems) > 8 else [])
+    details = "\n".join(shown)
+    stamp = QDateTime.currentDateTime().toString("yyyyMMdd-HHmmss")
+    backup = path.with_name(f"session-backup-{stamp}.json")
+    try:
+        shutil.copy2(path, backup)
+    except OSError as error:
+        show_message(None, "部分贴图未恢复",
+                     f"{details}\n\n无法备份原会话（{error}），自动保存已暂停以保护原数据。"
+                     f"\n请修复或移走该文件后重启：\n{path}")
         return False
+    return ask_confirmation(
+        None, "部分贴图未恢复",
+        f"{details}\n\n其余贴图已恢复，原会话已完整备份到：\n{backup}"
+        "\n\n继续：自动保存只记录已恢复的贴图，未恢复的内容留在备份里。"
+        "\n暂停：原会话保持不变，可修复后重启再试。",
+        confirm_text="保留备份并继续", cancel_text="暂停自动保存")
+
+
+def restore_pins() -> bool:
+    """启动时恢复未关闭贴图。坏记录单独隔离，正常贴图照常恢复；全部完好时返回 True。"""
+    global _restoring, _restore_failed
+    try:
+        directory = data_directory() / "pins"
+    except OSError as error:
+        _restore_failed = True
+        show_message(None, "贴图恢复失败", f"{error}\n自动保存暂停。请检查应用目录的写入权限后重启。")
+        return False
+    path = directory / "session.json"
+    if not path.exists():
+        return True
+    prepared, problems = _read_session(directory, path)
     _restoring = True
-    ocr_errors = []
     for state, pixmap in prepared:
         document = None
         if state["kind"] == "image" and "ocr" in state:
@@ -241,20 +273,19 @@ def restore_pins() -> bool:
             try:
                 document = OCRDocument.from_payload(state["ocr"], pixmap.toImage())
             except (ValueError, TypeError, KeyError) as error:
-                ocr_errors.append(f"{state['id']}：{error}")
+                problems.append(f"贴图 {state['id'][:8]} 的 OCR 校正无法恢复（图片已恢复）：{error}")
         window = PinWindow(pixmap, document=document) if state["kind"] == "image" else PinTextWindow(state["text"])
         window.restore_state(state)
         _register(window)
         if state["kind"] == "image" and "ocr" in state and document is None:
-            window._show_ocr_status("OCR 数据未恢复，原会话已保留，自动保存暂停", False)
+            window._show_ocr_status("OCR 数据未恢复，原校正保留在会话备份中", False)
     _restoring = False
-    # OCR 校正损坏时仍恢复图片，但不能用空结果自动覆盖原始人工编辑。
-    _restore_failed = bool(ocr_errors)
-    if ocr_errors:
-        show_message(None, "贴图 OCR 未恢复", "\n".join(ocr_errors)
-                     + f"\n贴图图片已恢复，原会话和 OCR 校正已保留，自动保存暂停。"
-                     + f"\n请修复或移走该文件后重启：\n{path}")
-    return not ocr_errors
+    if problems:
+        # 选择暂停时不能自动保存：否则会用缺记录、缺校正的当前状态覆盖原会话。
+        _restore_failed = not _offer_continue(path, problems)
+        if not _restore_failed:
+            _schedule_save()
+    return not problems
 
 
 def shutdown_pins() -> bool:

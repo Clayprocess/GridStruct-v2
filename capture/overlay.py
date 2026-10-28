@@ -4,7 +4,7 @@ from PySide6.QtGui import QPainter, QPen, QColor, QCursor, QRegion
 from PySide6.QtCore import (Qt, QRect, QPoint, QSize, Signal, QObject, QTimer, QEvent,
                            Property, QPropertyAnimation, QEasingCurve)
 from styles import tokens as T
-from ui import floating_window_type, ask_confirmation, show_toast
+from ui import floating_window_type, show_toast
 from settings import get_settings
 from annotate import shortcut_tool
 from .screen import ScreenManager, capture_virtual_desktop
@@ -364,15 +364,17 @@ class ScreenShotWindow(QObject):
         return True
 
     def key_press(self, event, window):
-        if self._frozen or self._refreshing:
+        if self._frozen:
+            # 标注时选区外遮罩仍能获得焦点，Esc 必须交给标注窗口走退出确认。
+            if event.key() == Qt.Key_Escape:
+                self.actionRequested.emit("escape")
+            return
+        if self._refreshing:
             return
         key, modifiers = event.key(), event.modifiers()
         if key == Qt.Key_Escape:
-            if self._pipette_mode:
-                self._pipette_mode = False
-                return
-            if ask_confirmation(window, "退出截图", "确认退出截图？"):
-                self.close()
+            # 框选阶段还没有标注，退出不会丢东西，不打断；取色中也一样直接退出。
+            self.close()
         elif key in (Qt.Key_Return, Qt.Key_Enter) and not self._sel.isNull():
             self._accept_selection()
         elif self._keep_open and not self._sel.isNull() and modifiers & Qt.ControlModifier and key in (Qt.Key_C, Qt.Key_S):
@@ -525,7 +527,8 @@ class _ScreenOverlay(QWidget):
         self.setScreen(frame.screen)
         self.setGeometry(frame.geometry)
         from annotate import PipettePopup
-        self.loupe = PipettePopup(frame.pixmap, grid=True)
+        self.loupe = PipettePopup(frame.pixmap, grid=True, hint="Shift: 切换颜色格式 · C: 复制颜色值",
+                                  origin=frame.physical_origin)
 
     def hover_region(self):
         c = self.controller

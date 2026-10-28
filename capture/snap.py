@@ -4,51 +4,86 @@
 #   三级检测：UIA 元素矩形 -> Win32 窗口矩形 -> 有效性校验，
 #   后台线程异步，结果经信号回传，带矩形缓存。
 #
-# 本实现：窗口/控件快照同步点查 + 每窗口一次 QThread UIAutomation 精化。
+# 本实现：窗口快照同步点查，两条后台精化并行：
+#   1. 每窗口一次 UIAutomation 广度遍历，覆盖工具栏等浅层控件，同窗内移动零调用；
+#   2. 鼠标点命中（同 PixPin 2026-10-26 反编译的日常后端）：MSAA 从窗口对象起逐层
+#      accHitTest，最多 31 层，每层 accLocation 得到“窗口 → … → 最内层控件”的整条路径，
+#      深层和小控件靠它补齐；命中矩形仍包含鼠标时不再查询。单次查询超过 300ms 的窗口
+#      之后只用窗口快照和遍历结果（PixPin 同样把慢窗口降级为 HWND 后端）。
 # 非 Windows 平台返回空（Linux 开发机不断）。
 
+import ctypes
+from queue import SimpleQueue
 import sys
+from threading import Lock, Thread
 import time
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, QRect, QPoint, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, QRect, QPoint, Slot
 
 _IS_WIN = sys.platform == "win32"
 
 
-class _SnapWorker(QObject):
-    done = Signal(int, object)
+# 外部 COM 调用可能不返回。每种查询全进程只允许一个在途任务；超过 _HUNG_S 视为卡死：
+# 线程留给它自己结束，拉黑那个窗口（本次运行只用窗口吸附），名额让给别的窗口。
+# 卡死线程最多容忍 _MAX_ABANDONED 条，再多才整类停用，避免无限堆积。
+_query_lock = Lock()
+_running = {"uia": None, "point": None}  # kind -> (token, hwnd, started)
+_abandoned = {"uia": 0, "point": 0}
+_hung_hwnds = set()
 
-    def __init__(self):
-        super().__init__()
-        self._uia = None
-        self._uia_initialized = False
 
-    @Slot(int, "qulonglong")
-    def query(self, request_id: int, hwnd: int):
-        started = time.perf_counter()
-        rects = []
-        if _IS_WIN:
-            if not self._uia_initialized:
-                self._uia = _try_init_uia()
-                self._uia_initialized = True
-            if self._uia is not None:
-                try:
-                    rects = self._uia.window_rectangles(hwnd)
-                except OSError as exc:
-                    print(f"[GridStruct-V2] UIA 精化失败：{exc}", flush=True)
-        detection_ms = (time.perf_counter() - started) * 1000
-        print(f"[GridStruct-V2] UIA request={request_id} detectionMs={detection_ms:.2f} "
-              f"rectangles={len(rects)}", flush=True)
-        self.done.emit(request_id, rects)
+def _run_query(kind, token, request_id, args, factory, results):
+    started = time.perf_counter()
+    rects = []
+    try:
+        provider = factory()
+        if provider is not None:
+            try:
+                rects = provider.window_rectangles(*args) if kind == "uia" else provider.hit_path(*args)
+            finally:
+                # COM 的创建、调用和释放必须在同一线程；关闭窗口不参与这条生命周期。
+                provider.close()
+    except OSError as error:
+        print(f"[GridStruct-V2] {kind} 查询失败：{error}", flush=True)
+    finally:
+        elapsed = (time.perf_counter() - started) * 1000
+        with _query_lock:
+            if _running[kind] is not None and _running[kind][0] is token:
+                _running[kind] = None
+            else:
+                _abandoned[kind] -= 1
+        # 队列只携带值，不引用 detector、窗口或 Qt 信号；旧会话可以立即销毁。
+        results.put((kind, request_id, rects, elapsed))
 
-    @Slot()
-    def cleanup(self):
-        if self._uia is not None:
-            self._uia.close()
-            self._uia = None
+
+def _start_query(kind, request_id, args, factory, results):
+    if not _IS_WIN:
+        results.put((kind, request_id, [], 0.0))
+        return True
+    hwnd, now = args[0], time.monotonic()
+    with _query_lock:
+        current = _running[kind]
+        if current is not None and now - current[2] >= _HUNG_S and _abandoned[kind] < _MAX_ABANDONED:
+            _abandoned[kind] += 1
+            _hung_hwnds.add(current[1])
+            print(f"[GridStruct-V2] {kind} 查询超过 {_HUNG_S:.0f}s 未返回，窗口 {current[1]} 改用窗口吸附", flush=True)
+            current = _running[kind] = None
+        if current is not None or hwnd in _hung_hwnds:
+            return False
+        token = object()
+        _running[kind] = (token, hwnd, now)
+    thread = Thread(target=_run_query, args=(kind, token, request_id, args, factory, results),
+                    name=f"GridStruct-snap-{kind}", daemon=True)
+    try:
+        thread.start()
+    except RuntimeError:
+        with _query_lock:
+            _running[kind] = None
+        raise
+    return True
 
 
 class RegionDetector(QObject):
-    """同步命中窗口/控件快照，后台只收集 UIA 控件矩形。"""
+    """同步命中窗口快照，后台用整窗 UIA 遍历和鼠标点 MSAA 命中补控件矩形。"""
 
     regionDetected = Signal(QRect)
 
@@ -56,6 +91,9 @@ class RegionDetector(QObject):
         super().__init__()
         self._only_window = only_window
         self._cache = {}
+        # 点命中结果和慢窗口：首次 _refresh_snapshot 会按存活窗口过滤，必须先建好。
+        self._hits = {}
+        self._slow = set()
         self._requests = {}
         self._request_id = 0
         self._mode_revision = 0
@@ -75,13 +113,17 @@ class RegionDetector(QObject):
         if _IS_WIN:
             self._refresh_snapshot()
             self._snapshot_timer.start(2000)
-        self._thread = QThread(self)
-        self._worker = _SnapWorker()
-        self._worker.moveToThread(self._thread)
-        self._worker.done.connect(self._on_done)
-        self._thread.finished.connect(self._worker.cleanup)
-        self._thread.finished.connect(self._worker.deleteLater)
-        self._thread.start()
+        self._results = SimpleQueue()
+        self._reply_timer = QTimer(self)
+        self._reply_timer.setInterval(16)
+        self._reply_timer.timeout.connect(self._poll_results)
+        self._point_inflight = False
+        self._point_queued = None
+        self._point_id = 0
+        self._point_requests = {}
+        # 在途请求 (request_id, 派发时刻)：超过 _HUNG_S 不再等，按空结果收尾并降级该窗口。
+        self._sent = None
+        self._point_sent = None
 
     def detect(self, pos: QPoint):
         from .screen import ScreenManager
@@ -106,7 +148,7 @@ class RegionDetector(QObject):
             return
         hwnd, window_rect = hit
         key = (hwnd, window_rect.getRect())
-        chain = [] if self._only_window else [c for c in self._cache.get(key, ()) if c.contains(x, y) and c != window_rect]
+        chain = [] if self._only_window else self._element_chain(key, window_rect, x, y)
         chain.append(window_rect)
         # 换到另一个元素上时回到最内层，在同一元素内移动保持滚轮选的层级。
         if not self._chain or chain[0] != self._chain[0]:
@@ -114,6 +156,10 @@ class RegionDetector(QObject):
         self._chain = chain
         rect = chain[min(self._level, len(chain) - 1)]
         self._publish(manager.physical_rect_to_logical(rect))
+        if self._stopping:
+            return
+        if not self._only_window:
+            self._request_point(key, hwnd, x, y)
         # 冻结截图内按窗口收集一次控件，按钮之间移动也无需再跨 COM。
         if self._queued is not None and self._requests[self._queued[0]][0] != key:
             self._discard_queued()
@@ -127,6 +173,82 @@ class RegionDetector(QObject):
             self._queued = request
         else:
             self._dispatch(*request)
+
+    def _element_chain(self, key, window_rect, x, y):
+        """遍历缓存与点命中路径合并：包含鼠标的控件由内到外，去重后按面积排序。"""
+        found = {c.getRect() for c in self._cache.get(key, ()) if c.contains(x, y)}
+        hits = self._hits.get(key)
+        if hits is not None:
+            found |= {c.intersected(window_rect).getRect() for c in hits[1] if c.contains(x, y)}
+        found.discard(window_rect.getRect())
+        return sorted((QRect(*r) for r in found if r[2] >= _MIN_ELEMENT and r[3] >= _MIN_ELEMENT),
+                      key=lambda r: r.width() * r.height())
+
+    def _request_point(self, key, hwnd, x, y):
+        hits = self._hits.get(key)
+        # 最内层命中仍包含鼠标就沿用（同 PixPin 的矩形包含短路），换控件才再问一次。
+        # 结果只沿用 1 秒：Chrome 等程序首次被查询后才逐步建好无障碍树，停住不动也要能细化。
+        if key in self._slow or (hits is not None and hits[0].contains(x, y)
+                                 and time.monotonic() - hits[2] < _HIT_REUSE_S):
+            return
+        self._point_id += 1
+        self._point_requests[self._point_id] = (key, self._mode_revision)
+        request = (self._point_id, hwnd, x, y)
+        if self._point_inflight:
+            # 只保留最新的位置：鼠标划过的中间点没有必要再查。
+            if self._point_queued is not None:
+                self._point_requests.pop(self._point_queued[0])
+            self._point_queued = request
+        else:
+            self._dispatch_point(*request)
+
+    def _dispatch_point(self, request_id, hwnd, x, y):
+        self._point_inflight = _start_query("point", request_id, (hwnd, x, y), _try_init_msaa, self._results)
+        if self._point_inflight:
+            self._point_sent = (request_id, time.monotonic())
+            self._reply_timer.start()
+        else:
+            self._point_requests.pop(request_id)
+
+    def _poll_results(self):
+        # 只消费本轮已有的结果，后续派发的快查询留到下一轮，避免占满 GUI 事件循环。
+        for _ in range(self._results.qsize()):
+            if self._stopping:
+                return
+            kind, request_id, rects, elapsed = self._results.get_nowait()
+            if kind == "point":
+                # 已按超时收尾的请求，迟到的结果直接丢弃。
+                if self._point_sent is not None and self._point_sent[0] == request_id:
+                    self._on_point_done(request_id, rects, elapsed)
+            elif self._sent is not None and self._sent[0] == request_id:
+                self._on_done(request_id, rects)
+        now = time.monotonic()
+        if self._point_sent is not None and now - self._point_sent[1] >= _HUNG_S:
+            # 耗时远超 _SLOW_POINT_MS，_on_point_done 会把该窗口降级为窗口吸附。
+            self._on_point_done(self._point_sent[0], [], (now - self._point_sent[1]) * 1000)
+        if self._sent is not None and now - self._sent[1] >= _HUNG_S:
+            # 空结果写入缓存，本次截图不再遍历这个窗口。
+            self._on_done(self._sent[0], [])
+        if not self._inflight and not self._point_inflight:
+            self._reply_timer.stop()
+
+    @Slot(int, object, float)
+    def _on_point_done(self, request_id, rects, elapsed_ms):
+        key, revision = self._point_requests.pop(request_id)
+        self._point_inflight = False
+        self._point_sent = None
+        if not self._stopping and revision == self._mode_revision:
+            if elapsed_ms > _SLOW_POINT_MS:
+                self._slow.add(key)
+                print(f"[GridStruct-V2] 点命中 {elapsed_ms:.0f}ms，该窗口改用窗口快照", flush=True)
+            # 记下最内层矩形用于短路；窗口不提供无障碍信息时整窗都算命中，1 秒内不再问。
+            inner = rects[-1] if rects else QRect(*key[1])
+            self._hits[key] = (inner, rects, time.monotonic())
+        if self._point_queued is not None and not self._stopping:
+            request, self._point_queued = self._point_queued, None
+            self._dispatch_point(*request)
+        if not self._stopping and self._last is not None:
+            self.detect(self._last)
 
     def _publish(self, rect):
         if rect != self._last_rect:
@@ -144,16 +266,18 @@ class RegionDetector(QObject):
         self._windows = _snapshot_windows(self._ignored_hwnd)
         alive = {(hwnd, rect.getRect()) for hwnd, rect in self._windows}
         self._cache = {key: rects for key, rects in self._cache.items() if key in alive}
+        # 不随刷新清空点命中路径（否则高亮会退回外层闪一下），由新结果直接替换。
+        self._hits = {key: hits for key, hits in self._hits.items() if key in alive}
         if self._last is not None:
             self.detect(self._last)
 
     def _dispatch(self, request_id, hwnd):
-        from PySide6.QtCore import QMetaObject, Qt, Q_ARG
-        self._inflight = True
-        # HWND 是指针宽度，不能放进 Qt 的 32 位 int 参数。
-        QMetaObject.invokeMethod(
-            self._worker, "query", Qt.QueuedConnection,
-            Q_ARG(int, request_id), Q_ARG("qulonglong", hwnd))
+        self._inflight = _start_query("uia", request_id, (hwnd,), _try_init_uia, self._results)
+        if self._inflight:
+            self._sent = (request_id, time.monotonic())
+            self._reply_timer.start()
+        else:
+            self._requests.pop(request_id)
 
     def _discard_queued(self):
         if self._queued is not None:
@@ -163,12 +287,13 @@ class RegionDetector(QObject):
     @Slot(int, object)
     def _on_done(self, request_id, rects):
         key, revision = self._requests.pop(request_id)
+        self._sent = None
         alive = any((hwnd, rect.getRect()) == key for hwnd, rect in self._windows)
         if not self._stopping and revision == self._mode_revision and alive:
             window_rect = QRect(*key[1])
             unique = {r.intersected(window_rect).getRect() for r in rects}
             self._cache[key] = sorted(
-                (QRect(*r) for r in unique if r[2] >= 8 and r[3] >= 8),
+                (QRect(*r) for r in unique if r[2] >= _MIN_ELEMENT and r[3] >= _MIN_ELEMENT),
                 key=lambda r: r.width() * r.height())
         self._inflight = False
         if self._queued is not None and not self._stopping:
@@ -189,15 +314,20 @@ class RegionDetector(QObject):
         self._mode_revision += 1
         self._discard_queued()
         self._cache.clear()
+        self._hits.clear()
         if self._last is not None:
             self.detect(self._last)
 
     def shutdown(self):
         self._stopping = True
         self._snapshot_timer.stop()
+        self._reply_timer.stop()
         self._discard_queued()
-        self._thread.quit()
-        self._thread.wait()
+        self._point_queued = None
+        self._requests.clear()
+        self._point_requests.clear()
+        self._inflight = self._point_inflight = False
+        self._sent = self._point_sent = None
 
 
 # ---------- Windows API 边界 ----------
@@ -311,8 +441,19 @@ def _window_at(user32, x, y, ignored_hwnd):
     return target, covered or target != root
 
 
-def _valid_rect(rect, x, y):
-    return (8 <= rect.width() <= 10000 and 8 <= rect.height() <= 10000
+# 控件最小边长（物理像素）：任务栏、托盘、标签页关闭按钮这类小图标也要能框到。
+_MIN_ELEMENT = 4
+# 单次点命中超过这个耗时的窗口，之后不再做点命中（同 PixPin 的 300ms 降级）。
+_SLOW_POINT_MS = 300
+# 点命中结果的沿用时长（秒）。
+_HIT_REUSE_S = 1.0
+# 单次外部查询超过它视为卡死（UIA 自带 200ms 超时，正常不会到这里）。
+_HUNG_S = 2.0
+_MAX_ABANDONED = 2
+
+
+def _valid_rect(rect, x, y, minimum=8):
+    return (minimum <= rect.width() <= 10000 and minimum <= rect.height() <= 10000
             and rect.contains(x, y))
 
 
@@ -395,7 +536,7 @@ class _UIAutomation:
                 if offscreen.value:
                     continue
                 rect = QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top)
-                if _valid_rect(rect, rc.left, rc.top):
+                if _valid_rect(rect, rc.left, rc.top, _MIN_ELEMENT):
                     rects.append(rect)
                 child = self._relative(element, 4)
                 while child:
@@ -407,6 +548,121 @@ class _UIAutomation:
         finally:
             for element in pending:
                 self._release(element)
+
+# ---------- MSAA 点命中（oleacc.dll，IAccessible ABI 来自 oleacc.h） ----------
+
+
+class _VariantValue(ctypes.Union):
+    _fields_ = [("lVal", ctypes.c_long), ("pointer", ctypes.c_void_p), ("pad", ctypes.c_byte * 16)]
+
+
+class _Variant(ctypes.Structure):
+    # x64 VARIANT：vt + 3 个保留字，后跟 16 字节联合体，共 24 字节。
+    _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                ("r3", ctypes.c_ushort), ("value", _VariantValue)]
+
+
+class _Accessibility:
+    # IAccessible 虚表：QueryInterface 0、Release 2、accLocation 22、accHitTest 24。
+    _IID = "618736e0-3c3d-11cf-810c-00aa00389b71"
+    _VT_I4, _VT_DISPATCH = 3, 9
+    _MAX_DEPTH = 31
+
+    def __init__(self):
+        from ctypes import wintypes
+        from uuid import UUID
+        self._ctypes = ctypes
+        self._ole32 = ctypes.OleDLL("ole32")
+        self._ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        self._ole32.CoInitializeEx.restype = ctypes.c_long
+        self._ole32.CoUninitialize.argtypes = []
+        self._ole32.CoUninitialize.restype = None
+        # 在已初始化为 STA 的线程上会返回 RPC_E_CHANGED_MODE，此时不能多配一次 CoUninitialize。
+        self._com_owned = self._ole32.CoInitializeEx(None, 0) >= 0
+        self._oleacc = ctypes.WinDLL("oleacc")
+        self._oleacc.AccessibleObjectFromWindow.argtypes = [
+            wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+        self._oleacc.AccessibleObjectFromWindow.restype = ctypes.c_long
+        self._user32 = _win32_api()
+        self._iid = (ctypes.c_byte * 16).from_buffer_copy(UUID(self._IID).bytes_le)
+
+    def _call(self, pointer, index, argtypes, *args):
+        ctypes = self._ctypes
+        table = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        function = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(table[index])
+        result = function(pointer, *args)
+        if result < 0:
+            raise OSError(f"IAccessible HRESULT 0x{result & 0xffffffff:08x}")
+        return result
+
+    def _release(self, pointer):
+        if pointer:
+            self._call(pointer, 2, [])
+
+    def close(self):
+        if self._com_owned:
+            self._ole32.CoUninitialize()
+
+    def _location(self, accessible, child):
+        ctypes = self._ctypes
+        left, top, width, height = (ctypes.c_long() for _ in range(4))
+        variant = _Variant(vt=self._VT_I4)
+        variant.value.lVal = child
+        self._call(accessible, 22, [ctypes.POINTER(ctypes.c_long)] * 4 + [_Variant],
+                   ctypes.byref(left), ctypes.byref(top), ctypes.byref(width), ctypes.byref(height), variant)
+        return QRect(left.value, top.value, width.value, height.value)
+
+    def hit_path(self, hwnd, x, y):
+        """由外到内返回鼠标所在的各层控件矩形（物理像素）。"""
+        ctypes = self._ctypes
+        result = ctypes.c_size_t()
+        # 跨进程 COM 遇到无响应窗口会一直卡住线程，先用无副作用的 WM_NULL 探一下。
+        if not self._user32.SendMessageTimeoutW(hwnd, 0, 0, 0, 2, 100, ctypes.byref(result)):
+            return []
+        accessible = ctypes.c_void_p()
+        if (self._oleacc.AccessibleObjectFromWindow(hwnd, 0, ctypes.byref(self._iid), ctypes.byref(accessible)) < 0
+                or not accessible):
+            return []
+        rects = []
+        try:
+            for _ in range(self._MAX_DEPTH):
+                variant = _Variant()
+                self._call(accessible, 24, [ctypes.c_long, ctypes.c_long, ctypes.POINTER(_Variant)],
+                           x, y, ctypes.byref(variant))
+                if variant.vt == self._VT_DISPATCH and variant.value.pointer:
+                    dispatch, child = variant.value.pointer, ctypes.c_void_p()
+                    try:
+                        self._call(dispatch, 0, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+                                   ctypes.byref(self._iid), ctypes.byref(child))
+                    finally:
+                        self._release(dispatch)
+                    self._release(accessible)
+                    accessible = child
+                    if not accessible:
+                        break
+                    rect = self._location(accessible, 0)
+                elif variant.vt == self._VT_I4 and variant.value.lVal != 0:
+                    rect = self._location(accessible, variant.value.lVal)
+                else:
+                    break
+                if not rect.contains(x, y):
+                    break
+                rects.append(rect)
+                if variant.vt == self._VT_I4:
+                    break
+        except OSError:
+            pass  # 某层不支持命中或定位：保留已经得到的外层路径。
+        finally:
+            self._release(accessible)
+        return rects
+
+
+def _try_init_msaa():
+    try:
+        return _Accessibility()
+    except OSError:
+        return None
+
 
 def _try_init_uia():
     try:
