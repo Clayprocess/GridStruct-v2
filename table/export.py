@@ -21,15 +21,15 @@ DEFAULT_ROW_HEIGHT = 22.0
 MAXIMUM_ROW_HEIGHT = 110.0
 
 
-def stack(documents):
+def stack(documents, remove_repeated_headers=False):
     """多页表格上下接成一张。列数不足的页右侧补空格；续页首行与第一页首行一字不差时
-    视为重复表头去掉（首行有跨行合并的不去，免得拆坏表头）。"""
+    仅在用户选择去重时视为重复表头（首行有跨行合并的不去，免得拆坏表头）。"""
     columns = max(document.grid.column_count for document in documents)
     header = documents[0].rows[0]
     cells, merges = [], []
     for index, document in enumerate(documents):
         tall_header = any(merge.top == 0 and merge.bottom > 1 for merge in document.grid.merges)
-        skip = int(index > 0 and document.grid.row_count > 1 and document.rows[0] == header
+        skip = int(remove_repeated_headers and index > 0 and document.grid.row_count > 1 and document.rows[0] == header
                    and any(text.strip() for text in header) and not tall_header)
         offset = len(cells) - skip
         cells += [(*row, *(TableCell(),) * (columns - len(row))) for row in document.cells[skip:]]

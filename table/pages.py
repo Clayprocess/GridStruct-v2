@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QImageReader, QPainter
+from PySide6.QtGui import QColor, QImage, QImageReader, QPainter
 from PySide6.QtPdf import QPdfDocument
+
+from styles import tokens as T
 
 # 扫描件 OCR 的常用分辨率；再高检测会先缩小，只是更慢。
 PDF_DPI = 200
@@ -47,7 +48,7 @@ class FilePage:
             rendered = self.source.render(self.index, size.toSize())
             # PDFium 只画页面内容，空白处是透明的；按白纸合成，识别和显示都不受影响。
             image = QImage(rendered.size(), QImage.Format_RGB32)
-            image.fill(Qt.white)
+            image.fill(QColor(T.PAPER_BACKGROUND))
             painter = QPainter(image)
             painter.drawImage(0, 0, rendered)
             painter.end()

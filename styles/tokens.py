@@ -71,6 +71,9 @@ DARK = {
     "settings_card":     "#1c1c1f",
 }
 
+# PDF 透明页面按白纸合成，原始内容不随界面主题变色。
+PAPER_BACKGROUND = "#ffffff"
+
 # 设置窗口：导航列宽、导航项高度（PixPin 实测约 154 / 35 逻辑像素），右侧控件列宽。
 SETTINGS_NAV_WIDTH = 168
 SETTINGS_NAV_ITEM = 36
