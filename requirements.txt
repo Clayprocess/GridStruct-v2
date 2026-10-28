@@ -4,3 +4,6 @@ PySide6>=6.7
 # 注意：rapidocr-onnxruntime 是旧包（停在 1.4.4），3.9+ 统一用 rapidocr
 onnxruntime>=1.17
 rapidocr>=3.9.0
+
+# 表格导出 xlsx（纯 Python，约 1 MB）；按文本写入，避免 Excel 自动转公式/链接/数字
+XlsxWriter>=3.0

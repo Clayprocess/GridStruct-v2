@@ -31,6 +31,8 @@ LIGHT = {
     "border":            "#e4e4e7",  # --border: 240 5.9% 90%
     "input":             "#e4e4e7",  # --input
     "ring":              "#18181b",  # --ring（focus 环）
+    # 表格待复核单元格（amber-100）；xlsx 导出也用浅色这一档。
+    "pending":           "#fef3c7",
     # 设置窗口：右侧内容底色比导航和卡片暗一档，分组卡片浮在上面（同 PixPin 配置窗口的层次）。
     "settings_surface":  "#f4f4f5",
     "settings_card":     "#ffffff",
@@ -60,6 +62,7 @@ DARK = {
     "border":            "#27272a",
     "input":             "#27272a",
     "ring":              "#d4d4d8",  # --ring: 240 4.9% 83.9%
+    "pending":           "#422006",  # amber-950，深色底上仍能和普通格区分
     # 深色下卡片要比底色亮一档才分得出层次。
     "settings_surface":  "#111113",
     "settings_card":     "#1c1c1f",
@@ -105,6 +108,10 @@ PIN_HUD_MS = 1200
 # 同 PixPin 默认：Ctrl+滚轮每格 5%；鼠标穿透时不透明度最高 50%。
 PIN_OPACITY_STEP = 0.05
 PIN_CLICK_THROUGH_OPACITY = 0.5
+# 表格网格叠在任意截图上，明暗主题共用贴图“操作中”的蓝色，只调透明度分层。
+TABLE_GRID = PIN_STATE_COLORS["active"]
+TABLE_GRID_ALPHA = {"line": 190, "active": 255, "selection": 48, "merge": 26, "frame": 255}
+TABLE_HANDLE = "#ffffff"
 # OCR 原图选字：只叠半透明底色，不遮住原图字形；明暗主题共用（叠在截图像素上，与界面主题无关）。
 OCR_SELECTION = (59, 130, 246, 96)
 OCR_HOVER = (59, 130, 246, 28)

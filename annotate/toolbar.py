@@ -46,6 +46,8 @@ SECONDARY_TOOLS: list[tuple[str, str, str]] = [
 ]
 SECONDARY_ACTIONS: list[tuple[str, str, str]] = [
     ("pipette", "取色", "pipette"),
+    # 表格识别是低频的重操作，放次区不占主条位置。
+    ("table", "表格识别", "table"),
 ]
 
 

@@ -17,13 +17,14 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS = ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx", "ch_ppocr_mobile_v2.0_cls_mobile.onnx")
+MODELS = ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx", "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+          "slanet-plus.onnx")
 
 
 def check_requirements():
     if sys.platform != "win32":
         raise RuntimeError("Windows 便携包必须在 Windows 上构建。")
-    missing = [name for name in ("PyInstaller", "PySide6", "onnxruntime", "rapidocr") if util.find_spec(name) is None]
+    missing = [name for name in ("PyInstaller", "PySide6", "onnxruntime", "rapidocr", "xlsxwriter") if util.find_spec(name) is None]
     if missing:
         raise RuntimeError(f"缺少构建依赖：{', '.join(missing)}。PyInstaller 不会自动安装；请先在此虚拟环境中安装 PyInstaller 6.x。")
     if metadata.version("pyinstaller").split(".", 1)[0] != "6":
@@ -90,7 +91,7 @@ def main():
     args = parser.parse_args()
     check_requirements()
     if args.check:
-        print("构建依赖、三个 OCR 模型与图标已就绪；尚未执行打包。")
+        print("构建依赖、OCR/表格模型与图标已就绪；尚未执行打包。")
         return 0
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     output = (args.output or ROOT / "dist" / f"portable-{stamp}").resolve()
@@ -110,7 +111,7 @@ def main():
         "built_at": datetime.now().astimezone().isoformat(),
         "python": platform.python_version(),
         "architecture": platform.machine(),
-        "dependencies": {name: metadata.version(name) for name in ("pyinstaller", "PySide6", "onnxruntime", "rapidocr")},
+        "dependencies": {name: metadata.version(name) for name in ("pyinstaller", "PySide6", "onnxruntime", "rapidocr", "XlsxWriter")},
         "resource_sha256": hashes,
         "native_dependency_load_verified": True,
         "runtime_verified": False,
