@@ -70,7 +70,7 @@ from tray import create_tray, GlobalHotkey, HOTKEY_DEFAULTS, parse_hotkey
 from capture import ScreenshotFlow, ScreenManager
 
 from pin import show_pin_from_clipboard, restore_pins, save_pins, shutdown_pins, disable_click_through
-from settings import SettingsDialog, get_settings, check_updates
+from settings import SettingsDialog, VERSION, get_settings, check_updates
 
 APP_NAME = "GridStruct-V2"
 # 显示名称变化时仍与旧包共享单实例锁，避免争抢全局热键。
@@ -130,7 +130,7 @@ def main() -> int:
             app.quit()
 
     def _about():
-        show_message(None, "关于 GridStruct-V2", "GridStruct-V2 0.1.0\n本地截图、标注、贴图与中英文 OCR。\n便携配置保存在 user-data。")
+        show_message(None, "关于 GridStruct-V2", f"GridStruct-V2 {VERSION}\n本地截图、标注、贴图、文字识别与表格识别。\n便携配置保存在 user-data。")
 
     callbacks = {
         "screenshot": flow.start,
@@ -162,6 +162,14 @@ def main() -> int:
             # 配置被手改坏时退回默认键，不能让截图入口失效。
             text = default
         bound[name] = (hotkey.register(text, callbacks[name]) if text else None, text)
+
+    # 没有主窗口，第一次启动时用托盘气泡告诉用户程序在哪、怎么开始；只提示一次。
+    if not config.value("hint/tray_intro_shown", False, type=bool):
+        hid, text = bound["screenshot"]
+        start = f"按 {text} 截图" if hid is not None else "单击托盘图标截图"
+        tray_icon.showMessage("GridStruct-V2 已在托盘运行", f"{start}，右键托盘图标打开识别、设置等功能。",
+                              app_icon(T.THEMES[mode]["foreground"]), 8000)
+        config.setValue("hint/tray_intro_shown", True)
 
     def _apply_hotkeys(texts):
         """设置确认前调用：新组合全部注册成功才替换旧的，任何一个失败都保留旧热键并返回原因。"""

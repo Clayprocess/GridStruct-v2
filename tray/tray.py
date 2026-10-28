@@ -25,16 +25,10 @@ MENU_ITEMS: list[tuple[str, str]] = [
 _SEPARATOR_AFTER = {"document", "update"}
 
 
-def _placeholder(text: str):
-    def _cb():
-        print(f"[托盘] {text}：占位回调，未实现")
-    return _cb
-
-
 def create_tray(app, callbacks: dict | None) -> QSystemTrayIcon:
     """创建托盘图标并返回（调用方负责 show()）。
 
-    callbacks: key 见 MENU_ITEMS；缺失的 key 自动接占位回调。
+    callbacks: key 见 MENU_ITEMS；没有回调的菜单项不显示。
     截图菜单项约定用 callbacks["screenshot"]。
     """
     callbacks = callbacks or {}
@@ -43,7 +37,9 @@ def create_tray(app, callbacks: dict | None) -> QSystemTrayIcon:
 
     menu = QMenu()
     for key, text in MENU_ITEMS:
-        cb = callbacks.get(key) or _placeholder(text)
+        if key not in callbacks:
+            continue
+        cb = callbacks[key]
         if key == "pin" and "restore_pin_input" in callbacks:
             submenu = menu.addMenu(text)
             action = submenu.addAction("从剪贴板贴图 / 文字")
@@ -55,5 +51,6 @@ def create_tray(app, callbacks: dict | None) -> QSystemTrayIcon:
         if key in _SEPARATOR_AFTER:
             menu.addSeparator()
     tray.setContextMenu(menu)
-    tray.activated.connect(lambda reason: callbacks["screenshot"]() if reason == QSystemTrayIcon.Trigger else None)
+    if "screenshot" in callbacks:
+        tray.activated.connect(lambda reason: callbacks["screenshot"]() if reason == QSystemTrayIcon.Trigger else None)
     return tray
