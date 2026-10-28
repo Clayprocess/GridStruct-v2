@@ -155,6 +155,7 @@ class ImageStitcher:
         self._horizontal = horizontal
         self._preserve_tail = False
         self._viewport_end = 0
+        self._header = self._footer = 0
 
     def relocate(self, pm: QPixmap) -> bool:
         """恢复定位只移动视口，绝不执行普通反向滚动的裁尾。"""
@@ -162,7 +163,7 @@ class ImageStitcher:
             pm = pm.transformed(QTransform().rotate(90))
         if pm.width() != self._stitched.width() or pm.devicePixelRatio() != self._stitched.devicePixelRatio():
             return False
-        end = _find_viewport_end(self._stitched, pm)
+        end = _find_viewport_end(self._stitched, pm, header=self._header, footer=self._footer)
         if not end:
             return False
         self._viewport_end = end
@@ -187,7 +188,7 @@ class ImageStitcher:
         if pm.width() != self._stitched.width() or pm.devicePixelRatio() != self._stitched.devicePixelRatio():
             return False
         if self._preserve_tail:
-            end = _find_viewport_end(self._stitched, pm)
+            end = _find_viewport_end(self._stitched, pm, header=self._header, footer=self._footer)
             if end:
                 self._viewport_end = end
                 self._last_input = QPixmap(pm)
@@ -195,18 +196,24 @@ class ImageStitcher:
             if reverse:
                 return False
         elif reverse:
-            end = _find_viewport_end(self._stitched, pm)
+            end = _find_viewport_end(self._stitched, pm, header=self._header, footer=self._footer)
             if not end or end >= self._stitched.height():
                 return False
             self._stitched = self._stitched.copy(0, 0, pm.width(), end)
+            if self._footer:
+                # 裁尾处原本是滚动正文，必须以当前视口的底栏收尾。
+                footer = pm.copy(0, pm.height() - self._footer, pm.width(), self._footer)
+                with QPainter(self._stitched) as painter:
+                    painter.drawPixmap(QPointF(0, (end - self._footer) / pm.devicePixelRatio()), footer)
             self._last_input = QPixmap(pm)
             self._viewport_end = end
             return True
-        cut, footer = find_overlap(self._stitched, pm), 0
+        header, footer = self._header, self._footer
+        cut = find_overlap(self._stitched, pm, header=header, footer=footer)
         if cut <= 0 and not self._preserve_tail:
             # 精确重叠失败（抗锯齿抖动、闪烁光标、吸顶/吸底栏）：结果末尾就是上一帧，改用容差定位。
-            cut, footer = find_shift(self._last_input, pm)
-        if cut <= 0 or cut >= pm.height():
+            cut, header, footer = find_shift(self._last_input, pm)
+        if cut <= 0 or cut >= pm.height() - footer:
             return False
         dpr = pm.devicePixelRatio() or 1.0
         bottom = pm.copy(0, cut, pm.width(), pm.height() - cut)
@@ -226,6 +233,7 @@ class ImageStitcher:
             p.drawPixmap(QPointF(0, 0), self._stitched, QRect(0, 0, w, kept))
             p.drawPixmap(QPointF(0, kept / dpr), bottom)
         self._stitched = out
+        self._header, self._footer = header, footer
         self._last_input = QPixmap(pm)
         self._viewport_end = h
         self._preserve_tail = False

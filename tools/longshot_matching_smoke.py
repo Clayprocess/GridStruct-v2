@@ -130,14 +130,14 @@ def main():
             painter.fillRect(0, 850, 1200, 50, QColor(T.LIGHT["secondary"]))
             painter.fillRect(40, 862, 300, 16, QColor(T.LIGHT["foreground"]))
         return pm
-    cases.append({"case": "shift_sticky_bars", "actual": list(find_shift(sticky(0), sticky(137))), "expected": [713, 50]})
+    cases.append({"case": "shift_sticky_bars", "actual": list(find_shift(sticky(0), sticky(137))), "expected": [713, 60, 50]})
     tall_repeated = QPixmap(1200, 1000)
     with QPainter(tall_repeated) as painter:
         for y in range(0, 1000, 25):
             painter.drawPixmap(0, y, page.copy(0, 0, 1200, 25))
-    cases.append({"case": "shift_repeated_refused", "expected": [0, 0], "actual": list(
+    cases.append({"case": "shift_repeated_refused", "expected": [0, 0, 0], "actual": list(
         find_shift(tall_repeated.copy(0, 0, 1200, 900), tall_repeated.copy(0, 30, 1200, 900)))})
-    cases.append({"case": "shift_blank_refused", "actual": list(find_shift(blank, blank)), "expected": [0, 0]})
+    cases.append({"case": "shift_blank_refused", "actual": list(find_shift(blank, blank)), "expected": [0, 0, 0]})
     from capture.longshot import ImageStitcher
     stitcher = ImageStitcher()
     stitcher.feed(sticky(0))

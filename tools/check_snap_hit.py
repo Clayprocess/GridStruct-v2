@@ -105,7 +105,7 @@ def check_hit_path():
 
 def check_detector():
     app = QApplication.instance() or QApplication([])
-    from capture.screen import ScreenManager
+    from capture import ScreenManager
     manager = ScreenManager.instance()
     provider = FakeAccessible(tree())
 

@@ -873,7 +873,9 @@ def ocr_confirm_selection():
     flow = ScreenshotFlow(app)
     with patch("capture.flow.capture_virtual_desktop", return_value=shot):
         for action, select, change_tool in (("confirm", True, False), ("confirm", False, False),
-                                            ("copy", True, False), ("confirm", True, True)):
+                                            ("copy", True, False), ("confirm", True, True),
+                                            ("return", True, False), ("enter", True, False),
+                                            ("return", False, False), ("enter", False, False)):
             flow.start()
             flow._win._sel = QRect(30, 30, 300, 200)
             flow._win.confirm()
@@ -892,12 +894,16 @@ def ocr_confirm_selection():
                 assert app.clipboard().text() == "Recognized"
             if change_tool:
                 window.select_tool("arrow")
-            # 必须走真实完成按钮和 ScreenshotFlow 回调，才能抓到随后复制图片覆盖文字的问题。
-            window._toolbar._buttons[action].click()
+            # 键盘确认也要走真实视口及 ScreenshotFlow 回调，避免只验证按钮而漏掉图片覆盖文字。
+            if action in ("return", "enter"):
+                key = Qt.Key_Return if action == "return" else Qt.Key_Enter
+                QTest.keyClick(window._canvas.viewport(), key)
+            else:
+                window._toolbar._buttons[action].click()
             flush()
             mime = app.clipboard().mimeData()
-            if action == "confirm" and select and not change_tool:
-                assert app.clipboard().text() == "Recognized" and not mime.hasImage(), "对号覆盖了 OCR 选中文字"
+            if action != "copy" and select and not change_tool:
+                assert app.clipboard().text() == "Recognized" and not mime.hasImage(), f"{action} 覆盖了 OCR 选中文字"
             else:
                 assert mime.hasImage(), "普通确认或明确复制图片动作被改成了文字复制"
             assert flow._win is None and flow._ann is None, "确认后截图会话未清理"

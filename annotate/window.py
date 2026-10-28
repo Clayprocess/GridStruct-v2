@@ -282,7 +282,7 @@ class AnnotationWindow(QWidget):
         elif shortcut_tool(event):
             self.select_tool(shortcut_tool(event))
         elif key in (Qt.Key_Return, Qt.Key_Enter):
-            self._finish()
+            self._on_action("confirm")
         else:
             super().keyPressEvent(event)
 
