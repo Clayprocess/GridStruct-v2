@@ -734,7 +734,8 @@ def hotkey_settings():
             dialog._apply_hotkeys = lambda texts: applied.append(dict(texts))
             autostart.side_effect = OSError("denied")
             dialog._save()
-            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": HOTKEY_DEFAULTS["longshot"]}, HOTKEY_DEFAULTS]
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": HOTKEY_DEFAULTS["longshot"], "document": ""},
+                               HOTKEY_DEFAULTS]
             assert s.value("hotkey/screenshot") is None
             autostart.side_effect = None
             # 两个功能撞键：确定前就拦下。
@@ -743,9 +744,20 @@ def hotkey_settings():
             applied = []
             dialog._apply_hotkeys = lambda texts: applied.append(texts)
             dialog._hotkeys["longshot"].setKeySequence("F1")
+            # 识别文档的热键可选：空着合法，设了也不能和别的功能撞。
+            assert dialog._check_hotkeys()
+            dialog._hotkeys["document"].setKeySequence("F1")
+            assert not dialog._check_hotkeys()
+            dialog._hotkeys["document"].setKeySequence("Ctrl+Alt+D")
             dialog._save()
-            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": "F1"}]
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": "F1", "document": "Ctrl+Alt+D"}]
             assert s.value("hotkey/screenshot") == "Ctrl+Shift+A" and s.value("hotkey/longshot") == "F1"
+            assert s.value("hotkey/document") == "Ctrl+Alt+D"
+            dialog._hotkeys["document"].clear()
+            assert dialog._check_hotkeys()
+            applied.clear()
+            dialog._save()
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": "F1", "document": ""}]
             dialog.deleteLater()
             if sys.platform == "win32":
                 applied.clear()
@@ -753,8 +765,8 @@ def hotkey_settings():
                 dialog = SettingsDialog(apply_hotkeys=lambda texts: applied.append(texts))
                 dialog._hotkeys["screenshot"].setKeySequence("Ctrl+Shift+B")
                 dialog._save()
-                assert applied == [{"screenshot": "Ctrl+Shift+B", "longshot": "F1"},
-                                   {"screenshot": "Ctrl+Shift+A", "longshot": "F1"}]
+                assert applied == [{"screenshot": "Ctrl+Shift+B", "longshot": "F1", "document": ""},
+                                   {"screenshot": "Ctrl+Shift+A", "longshot": "F1", "document": ""}]
                 assert dialog.result() == 0 and s.value("hotkey/screenshot") == "Ctrl+Shift+A"
                 dialog.deleteLater()
 

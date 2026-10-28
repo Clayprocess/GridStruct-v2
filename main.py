@@ -115,6 +115,11 @@ def main() -> int:
     def _open_pin():
         show_pin_from_clipboard()
 
+    def _open_document():
+        # 表格模块带 numpy/onnxruntime，首次用到再加载，不拖慢托盘启动。
+        from table import open_document
+        open_document()
+
     def _open_settings():
         SettingsDialog(apply_hotkeys=_apply_hotkeys).exec()
         tray_icon.setIcon(app_icon(T.THEMES[app.property("theme_mode")]["foreground"]))
@@ -131,6 +136,7 @@ def main() -> int:
         "screenshot": flow.start,
         "pin": _open_pin,
         "longshot": flow.start_longshot,
+        "document": _open_document,
         "settings": _open_settings,
         "update": check_updates,
         "about": _about,
@@ -150,23 +156,29 @@ def main() -> int:
     for name, default in HOTKEY_DEFAULTS.items():
         text = config.value(f"hotkey/{name}", default)
         try:
-            parse_hotkey(text)
+            if text or HOTKEY_DEFAULTS[name]:
+                parse_hotkey(text)
         except ValueError:
             # 配置被手改坏时退回默认键，不能让截图入口失效。
             text = default
-        bound[name] = (hotkey.register(text, callbacks[name]), text)
+        bound[name] = (hotkey.register(text, callbacks[name]) if text else None, text)
 
     def _apply_hotkeys(texts):
         """设置确认前调用：新组合全部注册成功才替换旧的，任何一个失败都保留旧热键并返回原因。"""
         added = {}
         for name, text in texts.items():
             hid, current = bound[name]
-            if text == current and hid is not None:
+            if text == current and (hid is not None or not text):
+                continue
+            if not text:
+                # 清空可选热键：只释放旧的，不注册新的。
+                added[name] = None
                 continue
             new = hotkey.register(text, callbacks[name], warn=False)
             if new is None:
                 for done in added.values():
-                    hotkey.release(done)
+                    if done is not None:
+                        hotkey.release(done)
                 return f"[{text}] 无法注册，可能已被其他程序占用，请换一个组合。"
             added[name] = new
         for name, new in added.items():
