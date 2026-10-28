@@ -155,7 +155,9 @@ class ScreenshotFlow(QObject):
         cropped = capture.crop(rect)
         crosses_screens = sum(frame.geometry.intersects(rect) for frame in capture.frames) > 1
 
+        toolbar_pos = None
         if self._panel is not None:
+            toolbar_pos = self._panel.manual_position()
             self._panel.close()
             self._panel = None
         self._shot = None
@@ -165,7 +167,7 @@ class ScreenshotFlow(QObject):
         mode = self._app.property("theme_mode") or self._mode
         # 跨屏导出保留各屏原生像素，单个标注视口不能再假定统一的屏幕 DPR。
         self._ann = AnnotationWindow(cropped, position, mode, scrollable=crosses_screens,
-                                     capture_region=rect)
+                                     capture_region=rect, toolbar_pos=toolbar_pos)
         self._ann.finished.connect(self._on_finished)
         self._ann.cancelled.connect(self._cleanup)
         self._ann.longshotRequested.connect(self.start_longshot)

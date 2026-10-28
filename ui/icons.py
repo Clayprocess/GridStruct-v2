@@ -4,7 +4,7 @@
 
 import os
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtGui import QPainter
 
@@ -33,17 +33,44 @@ def icon(name: str) -> QIcon:
     return _cache[key]
 
 
-def tinted_icon(name: str, color: str, size: int = 16) -> QIcon:
-    """按 styles/tokens.py 提供的颜色渲染图标。"""
-    key = ("tinted", name, color, size)
-    if key not in _cache:
-        svg = _load_svg(name).replace("currentColor", color)
-        renderer = QSvgRenderer(bytearray(svg.encode("utf-8")))
-        pm = QPixmap(QSize(size, size))
+# Windows 常见的显示缩放档位。每档按实际像素单独画一张：只给 1 倍图，
+# 在 125%/150% 的屏幕上会被位图放大，线条发虚。
+_SCALES = (1, 1.25, 1.5, 1.75, 2, 2.5, 3)
+
+
+def painted_icon(size: QSize, draw, icon: QIcon | None = None,
+                 mode=QIcon.Normal, state=QIcon.Off) -> QIcon:
+    """逐个缩放档位绘制同一图形。draw(painter, rect) 按逻辑像素作画，传入 icon 时追加到它上面。"""
+    if icon is None:
+        icon = QIcon()
+    for scale in _SCALES:
+        pm = QPixmap(round(size.width() * scale), round(size.height() * scale))
+        pm.setDevicePixelRatio(scale)
         pm.fill(Qt.transparent)
         with QPainter(pm) as p:
-            renderer.render(p)
-        _cache[key] = QIcon(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            draw(p, QRectF(0, 0, size.width(), size.height()))
+        icon.addPixmap(pm, mode, state)
+    return icon
+
+
+def paint_svg(painter: QPainter, name: str, color: str, rect: QRectF) -> None:
+    """把图标按矢量直接画进 rect，不经过中间位图。"""
+    key = ("svg", name, color)
+    if key not in _cache:
+        svg = _load_svg(name).replace("currentColor", color)
+        _cache[key] = QSvgRenderer(bytearray(svg.encode("utf-8")))
+    _cache[key].render(painter, rect)
+
+
+def tinted_icon(name: str, color: str, size: int = 16, icon: QIcon | None = None,
+                mode=QIcon.Normal, state=QIcon.Off) -> QIcon:
+    """按 styles/tokens.py 提供的颜色渲染图标；传入 icon 时把这一态追加上去（不缓存）。"""
+    if icon is not None:
+        return painted_icon(QSize(size, size), lambda p, r: paint_svg(p, name, color, r), icon, mode, state)
+    key = ("tinted", name, color, size)
+    if key not in _cache:
+        _cache[key] = painted_icon(QSize(size, size), lambda p, r: paint_svg(p, name, color, r))
     return _cache[key]
 
 

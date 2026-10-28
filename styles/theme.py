@@ -531,17 +531,16 @@ QFrame#OptionSeparator {{
 }}
 /* 色块与粗细圆点：选中态是一圈 ring，不用底色，避免把颜色本身染灰。 */
 QToolButton#Swatch {{
-    padding: 2px;
+    padding: 0;
     border: 2px solid transparent;
     border-radius: 12px;
 }}
 QToolButton#Swatch:hover {{
     background-color: {t['accent']};
 }}
+/* 选中环画在色块图标里（annotate/options.py _ringed），QSS 圆角边框不抗锯齿 */
 QToolButton#Swatch:checked {{
     background-color: transparent;
-    border: 2px solid {t['ring']};
-    padding: 2px;
 }}
 QToolButton#Swatch:disabled, QToolButton#Segment:disabled {{
     background-color: transparent;

@@ -4,14 +4,14 @@
 """
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QSize
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
+from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSpinBox, QToolButton,
     QButtonGroup, QColorDialog, QFontComboBox, QFrame, QMenu, QSizePolicy, QWidgetAction,
 )
 
 from styles import tokens as T
-from ui import round_corners, tinted_icon
+from ui import paint_svg, painted_icon, round_corners, tinted_icon
 from ui.motion import SelectionPill, fade_in
 from .items import ArrowMarkItem, LineMarkItem, MarkStyle, SerialMarkItem, arrow_heads
 
@@ -25,50 +25,48 @@ def _theme():
     return T.THEMES[QApplication.instance().property("theme_mode") or "light"]
 
 
-def _swatch_icon(color, current=False):
-    # 色块是数据（颜色值）而非图标。圆形是预设色；方形是"当前颜色"，点开自定义取色，
-    # 同 PixPin 调色板里那块最大的当前色。白色色块需要描边才能在浅色面板上看见。
-    pm = QPixmap(QSize(_SWATCH, _SWATCH) * 2)
-    pm.setDevicePixelRatio(2)
-    pm.fill(Qt.transparent)
-    with QPainter(pm) as p:
-        p.setRenderHint(QPainter.Antialiasing)
-        # 深色主题的 border 与面板几乎同色，黑色色块会消失，描边用专门的 swatch_ring。
-        p.setPen(QPen(QColor(_theme()["swatch_ring"]), 1))
-        p.setBrush(QColor(color))
-        if current:
-            p.drawRoundedRect(QRectF(0.5, 0.5, _SWATCH - 1, _SWATCH - 1), T.RADIUS_SM, T.RADIUS_SM)
-        else:
-            p.drawEllipse(QRectF(2, 2, _SWATCH - 4, _SWATCH - 4))
-    return QIcon(pm)
-
-
-def _dot_icon(diameter):
-    pm = QPixmap(QSize(_SWATCH, _SWATCH) * 2)
-    pm.setDevicePixelRatio(2)
-    pm.fill(Qt.transparent)
-    with QPainter(pm) as p:
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(_theme()["foreground"]))
-        offset = (_SWATCH - diameter) / 2
-        p.drawEllipse(offset, offset, diameter, diameter)
-    return QIcon(pm)
-
-
 _ICON = QSize(_SWATCH, _SWATCH)
 # 下拉预览要横向展开才看得出箭头头部和线型差别。
 _PREVIEW = QSize(36, 16)
 
 
-def _paint(size, draw):
-    pm = QPixmap(size * 2)
-    pm.setDevicePixelRatio(2)
-    pm.fill(Qt.transparent)
-    with QPainter(pm) as p:
-        p.setRenderHint(QPainter.Antialiasing)
-        draw(p, QRectF(0, 0, size.width(), size.height()))
-    return pm
+# 色块按钮的图标铺满整个按钮，选中环也画在图标里。
+_SWATCH_BOX = QSize(20, 20)
+
+
+def _ringed(draw):
+    """选中时外圈加一道描边环。QSS 的圆角边框不抗锯齿，在 125%/150% 缩放下会发毛、变成方圆。"""
+    icon = painted_icon(_SWATCH_BOX, draw)
+
+    def ring(p, r):
+        draw(p, r)
+        p.setPen(QPen(QColor(_theme()["ring"]), 1.5))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(r.center(), 9.25, 9.25)
+
+    return painted_icon(_SWATCH_BOX, ring, icon, QIcon.Normal, QIcon.On)
+
+
+def _swatch_icon(color, current=False):
+    # 色块是数据（颜色值）而非图标。圆形是预设色；方形是"当前颜色"，点开自定义取色，
+    # 同 PixPin 调色板里那块最大的当前色。白色色块需要描边才能在浅色面板上看见。
+    def draw(p, r):
+        # 深色主题的 border 与面板几乎同色，黑色色块会消失，描边用专门的 swatch_ring。
+        p.setPen(QPen(QColor(_theme()["swatch_ring"]), 1))
+        p.setBrush(QColor(color))
+        if current:
+            p.drawRoundedRect(r.adjusted(2.5, 2.5, -2.5, -2.5), T.RADIUS_SM, T.RADIUS_SM)
+        else:
+            p.drawEllipse(r.center(), 6, 6)
+    return _ringed(draw)
+
+
+def _dot_icon(diameter):
+    def draw(p, r):
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(_theme()["foreground"]))
+        p.drawEllipse(r.center(), diameter / 2, diameter / 2)
+    return _ringed(draw)
 
 
 def _two_state(draw, size=_ICON):
@@ -77,12 +75,12 @@ def _two_state(draw, size=_ICON):
     icon = QIcon()
     for state, key in ((QIcon.Off, "muted_foreground"), (QIcon.On, "foreground")):
         color = QColor(t[key])
-        icon.addPixmap(_paint(size, lambda p, r: draw(p, color, r)), QIcon.Normal, state)
+        painted_icon(size, lambda p, r, c=color: draw(p, c, r), icon, QIcon.Normal, state)
     return icon
 
 
 def _lucide(name):
-    return _two_state(lambda p, c, r: tinted_icon(name, c.name(), _SWATCH).paint(p, r.toRect()))
+    return _two_state(lambda p, c, r: paint_svg(p, name, c.name(), r))
 
 
 def _fill_icon(mode):
@@ -165,6 +163,75 @@ def _number_icon(number):
     return _two_state(draw)
 
 
+# ---- 数字框前的图形标签（参考 PixPin：用图形说明数字调的是什么，提示里再给文字） ----
+
+def _radius_glyph(p, c, r):
+    # 虚线方框，右上角一段实线圆角：调的就是这个角。
+    dashed = QPen(c, 1.25)
+    dashed.setDashPattern([1.6, 1.6])
+    p.setPen(dashed)
+    p.setBrush(Qt.NoBrush)
+    p.drawPolyline([QPointF(13.5, 10), QPointF(13.5, 13.5), QPointF(2.5, 13.5),
+                    QPointF(2.5, 2.5), QPointF(6, 2.5)])
+    corner = QPainterPath(QPointF(6, 2.5))
+    corner.lineTo(8, 2.5)
+    corner.arcTo(QRectF(2.5, 2.5, 11, 11), 90, -90)
+    corner.lineTo(13.5, 10)
+    p.setPen(QPen(c, 1.6, Qt.SolidLine, Qt.RoundCap))
+    p.drawPath(corner)
+
+
+def _arrow_head_glyph(p, c, r):
+    # 细箭杆配一个大实心箭头：强调调的是头部而不是线宽。
+    p.setPen(QPen(c, 1.5, Qt.SolidLine, Qt.RoundCap))
+    p.drawLine(QPointF(1.5, 8), QPointF(8, 8))
+    p.setPen(Qt.NoPen)
+    p.setBrush(c)
+    p.drawPolygon([QPointF(6.5, 2.5), QPointF(14.5, 8), QPointF(6.5, 13.5)])
+
+
+def _size_glyph(p, c, r):
+    # 底边对齐的一小一大两个圆，分开画，叠在一起会像放大镜。
+    p.setPen(QPen(c, 1.25))
+    p.setBrush(Qt.NoBrush)
+    p.drawEllipse(QPointF(3, 11.5), 2, 2)
+    p.drawEllipse(QPointF(10.5, 9), 4.5, 4.5)
+
+
+def _strength_glyph(p, c, r):
+    # 一细一粗两块棋盘格：强度就是马赛克格子的大小。
+    p.setPen(Qt.NoPen)
+    p.setBrush(c)
+    for x, y, cell in ((1, 10, 2), (7, 1, 4)):
+        p.drawRect(QRectF(x, y, cell, cell))
+        p.drawRect(QRectF(x + cell, y + cell, cell, cell))
+    p.setPen(QPen(c, 1))
+    p.setBrush(Qt.NoBrush)
+    p.drawRect(QRectF(1.5, 10.5, 3, 3))
+    p.drawRect(QRectF(7.5, 1.5, 7, 7))
+
+
+def _opacity_glyph(p, c, r):
+    # 圆里从实到虚的渐变。
+    gradient = QLinearGradient(QPointF(2, 8), QPointF(14, 8))
+    gradient.setColorAt(0, c)
+    clear = QColor(c)
+    clear.setAlpha(0)
+    gradient.setColorAt(1, clear)
+    p.setPen(QPen(c, 1.25))
+    p.setBrush(gradient)
+    p.drawEllipse(r.center(), 6, 6)
+
+
+def _font_size_glyph(p, c, r):
+    # 小 T 加大 T，同 PixPin 的字号标签。
+    p.setPen(Qt.NoPen)
+    p.setBrush(c)
+    for left, top, width, height, stem in ((1, 7, 6, 7, 1.5), (6, 2, 9, 12, 2)):
+        p.drawRect(QRectF(left, top, width, stem))
+        p.drawRect(QRectF(left + (width - stem) / 2, top, stem, height))
+
+
 def _arrow_preview(p, color, r, arrow_type):
     style = MarkStyle()
     style.color, style.width, style.arrow_size, style.arrow_type = color, 2, 7, arrow_type
@@ -188,6 +255,22 @@ def _serial_preview(p, _color, r, serial_type):
     style.serial_type, style.serial_size = serial_type, 15
     p.translate(r.center())
     SerialMarkItem(style, 1).paint(p, None, None)
+
+
+class _Glyph(QWidget):
+    """图形标签：每次按屏幕的实际缩放直接矢量绘制，不像 QLabel 位图那样在高缩放下发虚。"""
+
+    def __init__(self, draw, tip):
+        super().__init__()
+        self._draw = draw
+        self.setFixedSize(_ICON + QSize(4, 0))
+        self.setToolTip(tip)
+
+    def paintEvent(self, _event):
+        with QPainter(self) as p:
+            p.setRenderHint(QPainter.Antialiasing)
+            p.translate(2, (self.height() - _SWATCH) / 2)
+            self._draw(p, QColor(_theme()["muted_foreground"]), QRectF(0, 0, _SWATCH, _SWATCH))
 
 
 class ToolOptions(QWidget):
@@ -234,14 +317,14 @@ class ToolOptions(QWidget):
                                         ("填充", "fill", _fill_icon("fill")),
                                         ("描边加填充", "both", _fill_icon("both"))])
         if tool_id == "rect":
-            self._spin("round_radius", "圆角", 0, 64)
+            self._spin("round_radius", 0, 64, "圆角", _radius_glyph)
         elif tool_id == "arrow":
             self._separator()
             self._picker("arrow_type", "箭头样式；曲线箭头选中后拖动圆点调整弧度，双击箭头添加或关闭注释", [
                 ("直线箭头", "straight"), ("直线双向", "straight_both"), ("线形箭头", "line"),
                 ("线形双向", "line_both"), ("实心箭头", "solid"), ("实心双向", "solid_both"),
                 ("尺寸箭头", "dimension"), ("曲线箭头", "curve")], _arrow_preview)
-            self._spin("arrow_size", "头部", 6, 60)
+            self._spin("arrow_size", 6, 60, "箭头大小", _arrow_head_glyph)
             # 切换箭头类型会自动配好两端，单独改端点属于低频操作。
             heads = [("无", "none"), ("开放", "open"), ("实心", "filled")]
             more += [("arrow_start", "起点样式", heads), ("arrow_end", "终点样式", heads)]
@@ -258,7 +341,7 @@ class ToolOptions(QWidget):
         elif tool_id == "text":
             self._separator()
             self._font()
-            self._spin("font_size", None, 6, 96).setToolTip("字号")
+            self._spin("font_size", 6, 96, "字号", _font_size_glyph)
             self._segment("text_alignment", [("左对齐", "left", _lucide("text-align-start")),
                                              ("居中", "center", _lucide("text-align-center")),
                                              ("右对齐", "right", _lucide("text-align-end"))])
@@ -268,7 +351,7 @@ class ToolOptions(QWidget):
             self._separator()
             self._picker("serial_type", "序号样式", [("圆形数字", "circle"), ("描边圆形", "circle_outline"),
                                                 ("方形数字", "square"), ("圆形字母", "letter")], _serial_preview)
-            self._spin("serial_size", "大小", 12, 96)
+            self._spin("serial_size", 12, 96, "序号大小", _size_glyph)
             self._segment("serial_start", [("从 0 开始编号", 0, _number_icon(0)),
                                            ("从 1 开始编号", 1, _number_icon(1))])
             self._serial_adjust()
@@ -276,12 +359,13 @@ class ToolOptions(QWidget):
         elif tool_id == "mosaic":
             self._segment("mosaic_mode", [("像素化", "pixel", _lucide("checkerboard")),
                                           ("模糊", "blur", _blur_icon())])
-            self._spin("mosaic_strength", "强度", 2, 40)
+            self._spin("mosaic_strength", 2, 40, "马赛克强度", _strength_glyph)
         elif tool_id == "highlight":
-            self._spin("opacity", "不透明度", 5, 100).setSuffix("%")
+            self._spin("opacity", 5, 100, "不透明度", _opacity_glyph).setSuffix("%")
         elif tool_id == "eraser":
-            self._spin("eraser_size", "大小", 4, 120)
-            self._icon_label("paint-bucket", "擦除后填充的颜色")
+            self._spin("eraser_size", 4, 120, "橡皮擦大小", _size_glyph)
+            self._layout.addWidget(_Glyph(lambda p, c, r: paint_svg(p, "paint-bucket", c.name(), r),
+                                          "擦除后填充的颜色"))
             self._color_button("background_color")
         elif tool_id == "magnifier":
             self._label("像素预览 15 × 7，移动鼠标查看")
@@ -343,7 +427,7 @@ class ToolOptions(QWidget):
         button.setObjectName("Swatch")
         button.setCheckable(True)
         button.setToolTip(tip)
-        button.setIconSize(QSize(_SWATCH, _SWATCH))
+        button.setIconSize(_SWATCH_BOX)
         row.layout().addWidget(button)
         return button
 
@@ -351,7 +435,7 @@ class ToolOptions(QWidget):
         button = QToolButton()
         button.setObjectName("Swatch")
         button.setToolTip("选择颜色")
-        button.setIconSize(QSize(_SWATCH, _SWATCH))
+        button.setIconSize(_SWATCH_BOX)
         button.clicked.connect(lambda: self._choose_color(key))
         (row.layout() if row is not None else self._layout).addWidget(button)
         self._bind(key, button, lambda value: button.setIcon(_swatch_icon(value, current=True)))
@@ -366,14 +450,13 @@ class ToolOptions(QWidget):
             button.setObjectName("Swatch")
             button.setCheckable(True)
             button.setToolTip(f"{name}（{value}）")
-            button.setIconSize(QSize(_SWATCH, _SWATCH))
+            button.setIconSize(_SWATCH_BOX)
             button.setIcon(_dot_icon(diameter))
             button.clicked.connect(lambda _=False, v=value: self._canvas.update_style("width", v))
             group.addButton(button)
             presets[value] = button
             row.layout().addWidget(button)
-        spin = self._spin("width", None, 1, 30)
-        spin.setToolTip("粗细")
+        self._spin("width", 1, 30, "粗细")
 
         def refresh(value):
             # 非预设值时三个圆点都不选中，数字框显示真实值。
@@ -384,10 +467,11 @@ class ToolOptions(QWidget):
 
         self._bind("width", row, refresh)
 
-    def _spin(self, key, title, low, high):
-        if title:
-            self._label(title)
+    def _spin(self, key, low, high, tip, glyph=None):
+        if glyph:
+            self._layout.addWidget(_Glyph(glyph, tip))
         spin = QSpinBox()
+        spin.setToolTip(tip)
         spin.setRange(low, high)
         spin.setButtonSymbols(QSpinBox.NoButtons)
         spin.setAlignment(Qt.AlignCenter)
@@ -395,12 +479,6 @@ class ToolOptions(QWidget):
         self._layout.addWidget(spin)
         self._bind(key, spin, spin.setValue)
         return spin
-
-    def _icon_label(self, name, tip):
-        label = QLabel()
-        label.setPixmap(tinted_icon(name, _theme()["muted_foreground"], _SWATCH).pixmap(_ICON))
-        label.setToolTip(tip)
-        self._layout.addWidget(label)
 
     def _segment_frame(self):
         frame = QFrame()
@@ -466,7 +544,7 @@ class ToolOptions(QWidget):
             item.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             item.setText(label)
             item.setIconSize(_PREVIEW)
-            item.setIcon(QIcon(_paint(_PREVIEW, lambda p, r, v=value: preview(p, list_color, r, v))))
+            item.setIcon(painted_icon(_PREVIEW, lambda p, r, v=value: preview(p, list_color, r, v)))
             item.clicked.connect(lambda _=False, v=value: (menu.close(), self._canvas.update_style(key, v)))
             group.addButton(item)
             column.addWidget(item)
@@ -480,7 +558,7 @@ class ToolOptions(QWidget):
 
         def refresh(value):
             items[value].setChecked(True)
-            button.setIcon(QIcon(_paint(_PREVIEW, lambda p, r: preview(p, color, r, value))))
+            button.setIcon(painted_icon(_PREVIEW, lambda p, r: preview(p, color, r, value)))
 
         self._bind(key, button, refresh)
 

@@ -36,7 +36,8 @@ class AnnotationWindow(QWidget):
     longshotRequested = Signal(QRect)
 
     def __init__(self, pixmap: QPixmap, pos: QPoint, theme_mode: str = "light", *,
-                 scrollable: bool = False, capture_region: QRect | None = None):
+                 scrollable: bool = False, capture_region: QRect | None = None,
+                 toolbar_pos: QPoint | None = None):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | floating_window_type())
         self._mode = theme_mode
         self._capture_position = QPoint(pos)
@@ -63,6 +64,8 @@ class AnnotationWindow(QWidget):
         self.move(pos)
 
         self._toolbar = FloatPanel(mode=theme_mode, parent=self)
+        # 框选阶段拖动过工具条，进入标注后留在同一位置。
+        self._toolbar.set_manual_position(toolbar_pos)
         self._options = ToolOptions(self._canvas)
         self._toolbar.set_options_widget(self._options)
         self._toolbar.toolSelected.connect(self._on_tool)

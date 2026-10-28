@@ -98,6 +98,76 @@ _GAP = 8  # 工具条与选区之间的间距
 _CARD_GAP = 6
 
 
+class _DragHandle(QWidget):
+    """主条最左侧的竖胶囊拖柄：平时是一道淡色细线，悬停或拖动时加深变宽，提示这里能抓。"""
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self._panel = panel
+        self._press = None
+        self._hover = 0.0
+        self._anim = tween(self, T.MOTION_FAST)
+        self._anim.valueChanged.connect(self._set_hover)
+        self.setFixedWidth(14)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip("拖动移动工具条，双击回到选区旁")
+
+    def _set_hover(self, value):
+        self._hover = value
+        self.update()
+
+    def _animate(self, target):
+        self._anim.stop()
+        self._anim.setStartValue(self._hover)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def enterEvent(self, event):
+        self._animate(1.0)
+
+    def leaveEvent(self, event):
+        if self._press is None:
+            self._animate(0.0)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._press = (event.globalPosition().toPoint(), self._panel.pos())
+            self.setCursor(Qt.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event):
+        if self._press is not None:
+            start, origin = self._press
+            self._panel.move(origin + event.globalPosition().toPoint() - start)
+
+    def mouseReleaseEvent(self, event):
+        if self._press is None:
+            return
+        self._press = None
+        self.setCursor(Qt.OpenHandCursor)
+        if not self.underMouse():
+            self._animate(0.0)
+        self._panel.keep_position()
+
+    def mouseDoubleClickEvent(self, event):
+        self._panel.reset_position()
+
+    def paintEvent(self, _event):
+        # 静止时在描边色和弱化色之间取四成，既看得见又不抢按钮；悬停过渡到弱化色。
+        t = T.THEMES[self._panel._mode]
+        rest, active = QColor(t["border"]), QColor(t["muted_foreground"])
+        amount = 0.4 + 0.6 * self._hover
+        color = QColor(*(round(a + (b - a) * amount) for a, b in
+                         ((rest.red(), active.red()), (rest.green(), active.green()), (rest.blue(), active.blue()))))
+        width = 3 + self._hover
+        height = 16
+        with QPainter(self) as p:
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(Qt.NoPen)
+            p.setBrush(color)
+            p.drawRoundedRect(QRectF((self.width() - width) / 2, (self.height() - height) / 2, width, height),
+                              width / 2, width / 2)
+
+
 class FloatPanel(QWidget):
     """无边框浮动工具条（截图窗口用）。"""
 
@@ -147,8 +217,12 @@ class FloatPanel(QWidget):
         self._button_layout.addStretch()
         self._root_layout.addWidget(self._button_container)
         layout = QHBoxLayout(buttons)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(2, 6, 6, 6)
         layout.setSpacing(2)
+        # 拖动过的主条留在原处（_manual 是主条左上角的屏幕坐标），选区再变也不跟着跳；双击拖柄复位。
+        self._manual: QPoint | None = None
+        self._near: QRect | None = None
+        layout.addWidget(_DragHandle(self))
 
         # 标注工具：单选互斥。每组一个按钮，记住组内上次用的工具。选中底块在按钮间滑动。
         self._pill = SelectionPill(buttons, "secondary", "border")
@@ -366,9 +440,9 @@ class FloatPanel(QWidget):
         disabled = QColor((muted.red() + base.red()) // 2, (muted.green() + base.green()) // 2,
                           (muted.blue() + base.blue()) // 2).name()
         for btn_id, btn in self._buttons.items():
-            icon = QIcon(tinted_icon(self._icon_names[btn_id], t["foreground"], _ICON_SIZE))
-            icon.addPixmap(tinted_icon(self._icon_names[btn_id], disabled, _ICON_SIZE).pixmap(_ICON_SIZE), QIcon.Disabled)
-            btn.setIcon(icon)
+            name = self._icon_names[btn_id]
+            icon = tinted_icon(name, t["foreground"], _ICON_SIZE, QIcon())
+            btn.setIcon(tinted_icon(name, disabled, _ICON_SIZE, icon, QIcon.Disabled))
         for caret in self._carets:
             caret.setIcon(tinted_icon("chevron-down", t["muted_foreground"], _CARET_SIZE))
         for action, icon_name in self._menu_icons:
@@ -439,10 +513,29 @@ class FloatPanel(QWidget):
             if row is not None:
                 self._root_layout.addWidget(row, 0, Qt.AlignLeft if row is self._options else Qt.Alignment())
 
+    def manual_position(self) -> QPoint | None:
+        """用户拖到的主条位置；没拖过为 None。框选阶段的工具条换成标注窗口的工具条时要接着用。"""
+        return self._manual
+
+    def set_manual_position(self, pos: QPoint | None) -> None:
+        self._manual = pos
+
+    def keep_position(self) -> None:
+        """拖动结束：记下主条位置，再按新位置重新决定二级面板放在哪一侧。"""
+        row = self._button_row.mapToGlobal(QPoint())
+        self._manual = QPoint(row.x() - self._root_layout.contentsMargins().left(), row.y())
+        self.set_position_near(self._near)
+
+    def reset_position(self) -> None:
+        self._manual = None
+        self.set_position_near(self._near)
+
     def set_position_near(self, rect: QRect) -> None:
         """主条只按自身尺寸锚定选区，二级面板靠屏幕边缘时独立换侧或横移。"""
         self._slide.stop()
-        screen = QGuiApplication.screenAt(rect.center()) or QGuiApplication.primaryScreen()
+        self._near = QRect(rect)
+        anchor = self._manual if self._manual is not None else rect.center()
+        screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
         geo = screen.availableGeometry()
         margins = self._root_layout.contentsMargins()
         self._button_layout.setContentsMargins(0, 0, 0, 0)
@@ -451,15 +544,22 @@ class FloatPanel(QWidget):
         size = self.sizeHint()
         bar = self._button_row.sizeHint()
         bar_width = bar.width() + margins.left() + margins.right()
-        anchor_x = max(geo.left(), min(rect.center().x() - bar_width // 2, geo.right() - bar_width + 1))
+        wanted_x = self._manual.x() if self._manual is not None else rect.center().x() - bar_width // 2
+        anchor_x = max(geo.left(), min(wanted_x, geo.right() - bar_width + 1))
         x = max(geo.left(), min(anchor_x, geo.right() - size.width() + 1))
         # 宽面板把整个窗口向左推时，用主条行的留白抵消位移。
         self._button_layout.setContentsMargins(anchor_x - x, 0, 0, 0)
         self._button_container.updateGeometry()
-        bar_y = rect.bottom() + _GAP + margins.top()
-        bar_above = bar_y + bar.height() + margins.bottom() > geo.bottom() + 1
-        if bar_above:
-            bar_y = max(geo.top() + margins.top(), rect.top() - _GAP - margins.bottom() - bar.height())
+        if self._manual is not None:
+            bar_y = max(geo.top() + margins.top(),
+                        min(self._manual.y(), geo.bottom() + 1 - margins.bottom() - bar.height()))
+            # 拖到选区中线以上就当作在选区上方，二级面板照样朝外展开。
+            bar_above = bar_y + bar.height() // 2 < rect.center().y()
+        else:
+            bar_y = rect.bottom() + _GAP + margins.top()
+            bar_above = bar_y + bar.height() + margins.bottom() > geo.bottom() + 1
+            if bar_above:
+                bar_y = max(geo.top() + margins.top(), rect.top() - _GAP - margins.bottom() - bar.height())
         # 二级面板放在主条背向选区的一侧，不遮住截图；那一侧放不下才换到另一侧。
         fits_below = bar_y - margins.top() + size.height() <= geo.bottom() + 1
         fits_above = bar_y - (size.height() - bar.height() - margins.bottom()) >= geo.top()
