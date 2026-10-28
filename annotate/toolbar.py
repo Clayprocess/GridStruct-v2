@@ -16,14 +16,14 @@ import sys as _sys
 # 作为模块导入时此操作无害（路径已存在则重复）。
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QRegion
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QMenu, QToolButton, QWidget, QLabel
 
 from styles import tokens as T
 from settings import get_settings
 from ui import floating_window_type, tinted_icon
-from ui.motion import SelectionPill, animation
+from ui.motion import SelectionPill, animation, tween
 
 # 主区按 PixPin 3.5.5.1 默认工具条排列：同类工具折成一个按钮，右侧小箭头切换，按钮图标跟随所选。
 # 马赛克的像素化/模糊是样式不是工具，留在二级面板里切换。
@@ -129,6 +129,12 @@ class FloatPanel(QWidget):
         self._root_layout.setSpacing(_CARD_GAP)
         self._options = None
         self._options_above = False
+        # 二级面板卡片的展开/变宽过渡：_card 是动画中的卡片矩形，_card_end 是上次展开到的位置。
+        self._card = None
+        self._card_end = None
+        self._card_anim = tween(self)
+        self._card_anim.valueChanged.connect(self._set_card)
+        self._card_anim.finished.connect(lambda: self._set_card(None))
         self._button_container = QWidget(self)
         # 主条比二级面板窄时容器左侧留白，全局 QWidget 背景会把这段留白涂成方块。
         self._button_container.setObjectName("FloatPanelRow")
@@ -211,6 +217,9 @@ class FloatPanel(QWidget):
         self.refresh_icons(mode)
 
     def eventFilter(self, watched, event):
+        if watched is self._options and event.type() == QEvent.Show and self._card_end is None:
+            # 面板刚显示时布局要等下一轮事件循环才排好，先整块藏起来，交给展开动画露出。
+            self._options.setMask(QRegion(0, 0, 1, 1))
         if watched is self._more and event.type() == QEvent.Enter and not self._more_menu.isVisible():
             QTimer.singleShot(0, self._more.showMenu)
         return super().eventFilter(watched, event)
@@ -235,13 +244,56 @@ class FloatPanel(QWidget):
         for row in (self._button_row, self._options, self._ocr_feedback):
             if row is None or row.isHidden():
                 continue
-            rect = QRectF(QRect(row.mapTo(self, QPoint()), row.size())).adjusted(-1.5, -1.5, 1.5, 1.5)
+            geometry = self._row_rect(row)
+            if row is self._options:
+                # 面板刚显示、还没开始展开时布局未排好，不画卡片，否则会闪出一个小圆点。
+                if self._card_end is None:
+                    continue
+                geometry = self._card if self._card is not None else geometry
+            if geometry.height() < 4:
+                continue
+            rect = QRectF(geometry).adjusted(-1.5, -1.5, 1.5, 1.5)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(*T.FLOAT_PANEL_SHADOW))
             painter.drawRoundedRect(rect.translated(0, 3).adjusted(-1, -1, 1, 1), T.RADIUS_LG + 1, T.RADIUS_LG + 1)
             painter.setBrush(QColor(t["popover"]))
             painter.setPen(QPen(QColor(t["border"]), 1))
             painter.drawRoundedRect(rect, T.RADIUS_LG, T.RADIUS_LG)
+
+    def _row_rect(self, row):
+        return QRect(row.mapTo(self, QPoint()), row.size())
+
+    def _set_card(self, rect):
+        self._card = rect
+        if rect is None:
+            self._options.clearMask()
+        else:
+            # 内容按卡片当前大小裁切，看起来是从主条里抽出来的。
+            self._options.setMask(QRegion(rect.translated(-self._options.pos())))
+        self.update()
+
+    def _reveal_options(self):
+        """二级面板首次出现时从主条边缘展开，换工具时卡片宽高平滑过渡到新尺寸。"""
+        if self._options is None or self._options.isHidden():
+            self._card_anim.stop()
+            if self._card is not None:
+                self._set_card(None)
+            self._card_end = None
+            return
+        end = self._row_rect(self._options)
+        if end == self._card_end:
+            if self._card_anim.state() != QVariantAnimation.Running:
+                self._options.clearMask()
+            return
+        start = self._card if self._card is not None else self._card_end
+        if start is None:
+            edge = end.bottom() + 1 if self._options_above else end.top()
+            start = QRect(end.left(), edge, end.width(), 0)
+        self._card_end = end
+        self._card_anim.stop()
+        self._card_anim.setStartValue(start)
+        self._card_anim.setEndValue(end)
+        self._card_anim.start()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -358,11 +410,13 @@ class FloatPanel(QWidget):
         self._uncheck_tools()
         if self._options is not None:
             self._options.hide()
+            self._reveal_options()
             self.adjustSize()
 
     def set_options_widget(self, widget):
         """工具配置跟随浮动面板，避免挤占截图画布。"""
         self._options = widget
+        widget.installEventFilter(self)
         self._root_layout.insertWidget(1, widget, 0, Qt.AlignLeft)
         widget.setVisible(bool(self.selected_tool()))
 
@@ -407,6 +461,7 @@ class FloatPanel(QWidget):
         self.resize(size)
         self._root_layout.activate()
         self.move(x, bar_y - self._button_row.mapTo(self, QPoint()).y())
+        self._reveal_options()
         self.update()
 
 

@@ -2,7 +2,7 @@
 
 import sys
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, QRectF, Qt
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, QRectF, Qt, QVariantAnimation
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
 
@@ -25,6 +25,23 @@ def animation(target, prop, duration=T.MOTION_BASE):
     anim.setDuration(duration if motion_enabled() else 0)
     anim.setEasingCurve(QEasingCurve.OutCubic)
     return anim
+
+
+def tween(parent, duration=T.MOTION_BASE):
+    """没有现成属性可绑的过渡（如手绘卡片的矩形），由 valueChanged 自己应用。"""
+    anim = QVariantAnimation(parent)
+    anim.setDuration(duration if motion_enabled() else 0)
+    anim.setEasingCurve(QEasingCurve.OutCubic)
+    return anim
+
+
+def enable_menu_effects(app):
+    """菜单和提示淡入；Qt 默认按系统设置，这里与本模块的动效开关保持一致。"""
+    on = motion_enabled()
+    app.setEffectEnabled(Qt.UI_AnimateMenu, on)
+    app.setEffectEnabled(Qt.UI_FadeMenu, on)
+    app.setEffectEnabled(Qt.UI_AnimateTooltip, on)
+    app.setEffectEnabled(Qt.UI_FadeTooltip, on)
 
 
 def fade_in(widget, duration=T.MOTION_FAST):
