@@ -1,4 +1,4 @@
-# pin 模块公开接口；会话仅记录未关闭贴图，不实现 P1 历史/销毁。
+# pin 模块公开接口；会话仅记录未关闭贴图，关闭的贴图连同图片一并清理，不做历史记录。
 
 import json
 import math
@@ -126,7 +126,7 @@ def disable_click_through():
 
 
 def save_pins() -> bool:
-    """原子保存当前会话。失败会保留上次 JSON 并提示，不删除历史图片。"""
+    """原子保存当前会话，成功后清理已关闭贴图的图片；失败会保留上次 JSON 和图片并提示。"""
     global _save_error
     if _shutting_down:
         return True
@@ -161,6 +161,7 @@ def save_pins() -> bool:
             raise OSError(session.errorString())
         if not session.commit():
             raise OSError(session.errorString())
+        _prune_images(directory, {state["id"] for state in states})
     except OSError as error:
         message = str(error)
         if message != _save_error:
@@ -169,6 +170,22 @@ def save_pins() -> bool:
         return False
     _save_error = None
     return True
+
+
+def _prune_images(directory, keep):
+    """删除已关闭贴图留下的图片。会话备份引用的图片保留，备份读不了时一张都不删。"""
+    for backup in directory.glob("session-backup-*.json"):
+        try:
+            data = json.loads(backup.read_text(encoding="utf-8"))
+            keep |= {state["id"] for state in data["pins"] if isinstance(state, dict) and "id" in state}
+        except (OSError, ValueError, TypeError, KeyError):
+            return
+    for image in directory.glob("*.png"):
+        if re.fullmatch(r"[0-9a-f]{32}", image.stem) and image.stem not in keep:
+            try:
+                image.unlink()
+            except OSError:
+                pass  # 文件被占用等情况下次保存再删，不打断贴图使用。
 
 
 def _validate_state(state):
