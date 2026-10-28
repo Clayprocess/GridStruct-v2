@@ -14,6 +14,7 @@ MENU_ITEMS: list[tuple[str, str]] = [
     ("screenshot", "截图"),
     ("pin", "贴图"),
     ("longshot", "长截图"),
+    ("document", "识别文档…"),
     ("settings", "设置"),
     ("update", "检查更新"),
     ("about", "关于"),
@@ -21,7 +22,7 @@ MENU_ITEMS: list[tuple[str, str]] = [
 ]
 
 # 在这些 key 的菜单项之后加分隔线
-_SEPARATOR_AFTER = {"longshot", "update"}
+_SEPARATOR_AFTER = {"document", "update"}
 
 
 def create_tray(app, callbacks: dict | None) -> QSystemTrayIcon:

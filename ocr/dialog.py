@@ -1,31 +1,74 @@
-"""逐条/逐段校正联动原图，全文自由编辑保留为独立导出草稿。"""
+"""文字识别窗口：左边原图可滑选，右边按行/按段直接改字，或切到全文自由编辑。
 
-from PySide6.QtCore import QSignalBlocker, Qt, Slot
-from PySide6.QtGui import QPixmap
+布局与表格识别窗口一致：上方工具行、中间原图对照、底部状态 + 主操作。
+按行/按段的改字立即同步原图文字层、贴图和复制结果；全文是独立草稿，不回写原图。
+"""
+
+from dataclasses import replace
+
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Slot
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QGraphicsScene, QGraphicsView,
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPlainTextEdit,
-    QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QFrame, QGraphicsScene, QGraphicsView,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton, QSplitter,
+    QStackedWidget, QToolButton, QVBoxLayout,
 )
-from ui import BaseDialog
+from styles import tokens as T
+from ui import BaseDialog, MultilineDelegate, show_toast
+from ui.motion import SelectionPill
 from .layer import add_text_layer
 from .layout import format_text
 from .model import OCRDocument
 
+VIEWS = (("line", "按行", "每行一条，改字同步原图"), ("paragraph", "按段", "每段一条，改字同步原图"),
+         ("full", "全文", "自由增删合并；不回写原图"))
+# 与表格识别的待复核阈值同一含义：低于它的条目底色标出，F8 逐条跳转。
+_PENDING_SCORE = .8
+
+
+class _LineDelegate(MultilineDelegate):
+    """列表项 QSS 有圆角时 Qt 不再画 BackgroundRole，待复核底色在这里自己画。"""
+
+    def paint(self, painter, option, index):
+        color = index.data(Qt.BackgroundRole)
+        if color is not None:
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(option.rect, T.RADIUS_SM, T.RADIUS_SM)
+            painter.restore()
+        super().paint(painter, option, index)
+
 
 class _ImagePreview(QGraphicsView):
+    """默认适应窗口；Ctrl+滚轮缩放（同表格识别），缩放后不再自动适应。"""
+
     def __init__(self):
         super().__init__()
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setObjectName("OCRPreview")
+        self.setAlignment(Qt.AlignCenter)
+        self._fit = True
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            self._fit = False
+            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+            self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+            self.scale(factor, factor)
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
+        if self._fit:
+            self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
+        if self._fit:
+            self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
 
 
 class OCRResultDialog(BaseDialog):
@@ -34,149 +77,157 @@ class OCRResultDialog(BaseDialog):
         from settings import get_settings
         self._settings = get_settings()
         image = pixmap.toImage() if pixmap is not None else None
-        self._document = results if isinstance(results, OCRDocument) else OCRDocument(results, image)
-        self._results = self._document
-        if pixmap is None and not self._document.image.isNull():
-            pixmap = QPixmap.fromImage(self._document.image)
-        self.setWindowTitle("文字复核与校正 · 本地 OCR")
-        self.resize(1100, 690)
-        self._selection_source = None
-        self._selection_text = ""
+        document = results if isinstance(results, OCRDocument) else OCRDocument(results, image)
+        if pixmap is None and not document.image.isNull():
+            pixmap = QPixmap.fromImage(document.image)
+        self.setWindowTitle("文字识别 · 本地")
+        self.resize(1100, 680)
+        self._mode = QApplication.instance().property("theme_mode") or "light"
+        self._layer = None
         self._refreshing = False
-        self._pending = {}
-        self._editing_ids = ()
-        self._metadata_base = ""
-        self._owns_focus = False
-        self._publishing_focus = False
+        self._stale = False
+
         layout = QVBoxLayout(self)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("中文 / English · 本地识别"))
-        row.addStretch()
-        self._show_image = QCheckBox("显示原图与文字层")
-        self._show_image.setChecked(pixmap is not None)
-        self._show_image.setEnabled(pixmap is not None)
-        row.addWidget(self._show_image)
-        layout.addLayout(row)
-        self._splitter = QSplitter(Qt.Horizontal)
-        self._splitter.setChildrenCollapsible(False)
+        layout.setContentsMargins(T.SPACE_3, T.SPACE_3, T.SPACE_3, T.SPACE_3)
+        layout.setSpacing(T.SPACE_2)
+        layout.addLayout(self._build_toolbar())
+
         self._preview = _ImagePreview()
         self._preview.setMinimumWidth(200)
-        scene = QGraphicsScene(self._preview)
-        self._preview.setScene(scene)
-        self._layer = None
+        self._preview.setScene(QGraphicsScene(self._preview))
+
+        self._items = QListWidget()
+        self._items.setObjectName("OCRLines")
+        self._items.setWordWrap(True)
+        self._items.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._items.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+                                    | QAbstractItemView.AnyKeyPressed)
+        delegate = _LineDelegate(self._items)
+        # 编辑时别处改了同一文档：先保住输入框，关掉后再刷新列表。
+        delegate.closeEditor.connect(lambda *_: QTimer.singleShot(0, self._refresh_if_stale))
+        self._items.setItemDelegate(delegate)
+        self._items.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._items.customContextMenuRequested.connect(self._item_menu)
+        self._items.currentItemChanged.connect(self._selected)
+        self._items.itemChanged.connect(self._item_edited)
+        self._text = QPlainTextEdit()
+        self._text.setObjectName("OCRFullText")
+        self._text.textChanged.connect(self._draft_changed)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._items)
+        self._stack.addWidget(self._text)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self._preview)
+        splitter.addWidget(self._stack)
+        splitter.setSizes([560, 520])
+        layout.addWidget(splitter, 1)
+        layout.addLayout(self._build_footer())
+
+        self._next_shortcut = QShortcut(QKeySequence("F8"), self, self._next_pending)
+        QShortcut(QKeySequence("Ctrl+Shift+C"), self, self._copy_all)
+        self._load(document, pixmap)
+        view = self._settings.value("ocr/view", "line")
+        self._view_buttons.get(view, self._view_buttons["line"]).setChecked(True)
+
+    def _load(self, document, pixmap):
+        """pixmap 为空表示历史纯文字结果，没有原图可对照。"""
+        self._document, self._pixmap = document, pixmap
         if pixmap is not None:
+            scene = self._preview.scene()
             scene.addPixmap(pixmap)
-            mode = QApplication.instance().property("theme_mode") or "light"
-            self._layer = add_text_layer(scene, self._document, mode)
-            self._layer.selectionChanged.connect(self._selection_changed)
+            self._layer = add_text_layer(scene, document, self._mode)
             size = pixmap.deviceIndependentSize()
             scene.setSceneRect(0, 0, size.width(), size.height())
         self._preview.setVisible(pixmap is not None)
-        self._show_image.toggled.connect(self._preview.setVisible)
-        self._splitter.addWidget(self._preview)
-        self._tabs = QTabWidget()
-        correction = QWidget()
-        panel = QVBoxLayout(correction)
-        selection = QHBoxLayout()
-        selection.addWidget(QLabel("校正单位"))
-        self._unit = QComboBox()
-        self._unit.addItem("逐条校正", "item")
-        self._unit.addItem("逐段校正", "paragraph")
-        self._unit.currentIndexChanged.connect(self._unit_changed)
-        selection.addWidget(self._unit)
-        selection.addStretch()
-        panel.addLayout(selection)
-        self._items = QListWidget()
-        self._items.setMinimumHeight(100)
-        self._items.currentItemChanged.connect(self._selected)
-        self._items.itemClicked.connect(self._clicked)
-        panel.addWidget(self._items, 2)
-        self._metadata = QLabel()
-        self._metadata.setWordWrap(True)
-        panel.addWidget(self._metadata)
-        panel.addWidget(QLabel("原始识别文字（保留不变）"))
-        self._original = QPlainTextEdit()
-        self._original.setReadOnly(True)
-        self._original.setMaximumHeight(70)
-        panel.addWidget(self._original)
-        panel.addWidget(QLabel("校正文字 · 应用后同步原图、全文和贴图"))
-        self._editor = QPlainTextEdit()
-        self._editor.textChanged.connect(self._editor_changed)
-        self._editor.setMinimumHeight(65)
-        panel.addWidget(self._editor, 1)
-        actions = QHBoxLayout()
-        self._reset = QPushButton("恢复原始文字")
-        self._reset.setProperty("class", "outline")
-        self._reset.clicked.connect(self._reset_selected)
-        self._apply = QPushButton("应用校正")
-        # 底部"复制校正结果"是本窗口唯一主操作，应用校正降为次按钮。
-        self._apply.setProperty("class", "secondary")
-        self._apply.clicked.connect(self._apply_correction)
-        actions.addWidget(self._reset)
-        actions.addStretch()
-        actions.addWidget(self._apply)
-        panel.addLayout(actions)
-        self._tabs.addTab(correction, "原图联动校正")
-        draft = QWidget()
-        draft_layout = QVBoxLayout(draft)
-        self._draft_notice = QLabel()
-        self._draft_notice.setWordWrap(True)
-        draft_layout.addWidget(self._draft_notice)
-        self._text = QPlainTextEdit()
-        self._text.setLayoutDirection(Qt.LeftToRight)
-        self._text.textChanged.connect(self._draft_changed)
-        self._text.selectionChanged.connect(self._draft_selection_changed)
-        draft_layout.addWidget(self._text)
-        draft_actions = QHBoxLayout()
-        draft_actions.addStretch()
-        copy_draft = QPushButton("复制导出草稿")
-        copy_draft.setProperty("class", "outline")
-        copy_draft.clicked.connect(self._copy_draft)
-        draft_actions.addWidget(copy_draft)
-        draft_layout.addLayout(draft_actions)
-        self._tabs.addTab(draft, "独立导出草稿")
-        self._splitter.addWidget(self._tabs)
-        self._splitter.setSizes([450, 600])
-        layout.addWidget(self._splitter, 1)
-        formats = QHBoxLayout()
-        self._no_breaks = QCheckBox("去换行")
-        self._no_spaces = QCheckBox("去空格")
-        self._copy_on_close = QCheckBox("关闭时复制校正结果")
-        self._direct = QCheckBox("下次直接复制")
-        self._direct.setChecked(self._settings.value("ocr/direct_copy", False, type=bool))
-        self._direct.toggled.connect(self._set_direct_copy)
-        self._auto_close = QCheckBox("复制后关闭")
-        for widget in (self._no_breaks, self._no_spaces, self._copy_on_close, self._direct, self._auto_close):
-            formats.addWidget(widget)
-        layout.addLayout(formats)
-        buttons = QHBoxLayout()
-        buttons.addStretch()
-        self._copy_selection = QPushButton("复制选中")
-        self._copy_selection.setProperty("class", "outline")
-        self._copy_selection.setEnabled(False)
-        self._copy_selection.clicked.connect(self._copy_selected)
-        to_table = QPushButton("按表格整理…")
-        to_table.setProperty("class", "outline")
-        to_table.setToolTip("复用本次识别的文字，在原图上划分行列后导出 Excel")
-        to_table.setEnabled(not self._document.image.isNull())
-        to_table.clicked.connect(self._open_table)
-        buttons.insertWidget(0, to_table)
-        close = QPushButton("关闭")
-        close.setProperty("class", "secondary")
-        close.clicked.connect(self.accept)
-        all_text = QPushButton("复制校正结果")
-        all_text.setProperty("class", "primary")
-        all_text.clicked.connect(self._copy_all)
-        for widget in (self._copy_selection, close, all_text):
-            buttons.addWidget(widget)
-        layout.addLayout(buttons)
-        self._document.changed.connect(self._refresh)
-        self._document.focused.connect(self._focus_from_image)
+        self._to_table.setEnabled(pixmap is not None)
+        document.changed.connect(self._refresh)
+        document.focused.connect(self._focus_from_image)
         self._refresh()
 
-    @Slot(bool)
-    def _set_direct_copy(self, value):
-        self._settings.setValue("ocr/direct_copy", value)
+    # ---- 构造 ----
+
+    def _build_toolbar(self):
+        row = QHBoxLayout()
+        row.setSpacing(T.SPACE_2)
+        frame = QFrame()
+        frame.setObjectName("SegmentGroup")
+        segments = QHBoxLayout(frame)
+        segments.setContentsMargins(1, 1, 1, 1)
+        segments.setSpacing(2)
+        pill = SelectionPill(frame, "background", "border")
+        group = QButtonGroup(frame)
+        self._view_buttons = {}
+        for view, label, tip in VIEWS:
+            button = QToolButton()
+            button.setObjectName("Segment")
+            button.setProperty("pill", True)
+            button.setText(label)
+            button.setToolTip(tip)
+            button.setCheckable(True)
+            button.toggled.connect(lambda on, value=view, target=button: on and (pill.track(target), self._set_view(value)))
+            group.addButton(button)
+            segments.addWidget(button)
+            self._view_buttons[view] = button
+        row.addWidget(frame)
+        row.addStretch()
+        # 只影响复制出去的文字，不改识别结果。
+        self._no_breaks = QCheckBox("复制时去换行")
+        self._no_spaces = QCheckBox("去空格")
+        row.addWidget(self._no_breaks)
+        row.addWidget(self._no_spaces)
+        return row
+
+    def _build_footer(self):
+        row = QHBoxLayout()
+        row.setSpacing(T.SPACE_2)
+        self._status = QLabel()
+        self._status.setObjectName("OCRStatus")
+        row.addWidget(self._status, 1)
+        self._pending = QLabel()
+        self._pending.setObjectName("OCRPending")
+        self._pending.setToolTip("模型置信度较低的文字；改过后消失")
+        self._next = QPushButton("下一处")
+        self._next.setProperty("class", "ghost")
+        self._next.setToolTip("跳到下一处待复核文字 (F8)")
+        self._next.clicked.connect(self._next_pending)
+        row.addWidget(self._pending)
+        row.addWidget(self._next)
+        row.addSpacing(T.SPACE_2)
+        self._to_table = QPushButton("按表格整理…")
+        self._to_table.setProperty("class", "outline")
+        self._to_table.setToolTip("复用本次识别的文字，在原图上划分行列后导出 Excel")
+        self._to_table.clicked.connect(self._open_table)
+        self._copy = QPushButton("复制全文")
+        self._copy.setProperty("class", "primary")
+        self._copy.setToolTip("复制右侧当前显示的全部文字 (Ctrl+Shift+C)")
+        self._copy.clicked.connect(self._copy_all)
+        row.addWidget(self._to_table)
+        row.addWidget(self._copy)
+        return row
+
+    # ---- 视图 ----
+
+    @property
+    def view(self):
+        return next((view for view, button in self._view_buttons.items() if button.isChecked()), "line")
+
+    def _set_view(self, view):
+        self._settings.setValue("ocr/view", view)
+        self._stack.setCurrentWidget(self._text if view == "full" else self._items)
+        self._refresh()
+        if view != "full":
+            self._publish_focus()
+
+    def _groups(self):
+        if self.view == "paragraph":
+            return self._document.groups()
+        return [result.source_ids or (result.item_id,) for result in self._document.results]
+
+    def _members(self, ids):
+        selected = set(ids)
+        return [result for result in self._document.results if selected.intersection(result.source_ids or (result.item_id,))]
 
     def _ids(self):
         item = self._items.currentItem()
@@ -184,175 +235,140 @@ class OCRResultDialog(BaseDialog):
 
     @Slot()
     def _refresh(self):
+        if self._items.state() == QAbstractItemView.EditingState:
+            self._stale = True
+            return
+        self._stale = False
         selected_ids = self._ids() or self._document.focused_ids
+        pending = QColor(T.THEMES[self._mode]["pending"])
         self._refreshing = True
-        self._items.clear()
-        if self._unit.currentData() == "paragraph":
-            groups = self._document.groups()
-        else:
-            groups = [result.source_ids or (result.item_id,) for result in self._document.results]
-        for index, ids in enumerate(groups):
-            displayed = [result for result in self._document.results if set(ids).intersection(result.source_ids or (result.item_id,))]
-            text = format_text(displayed)
-            entry = QListWidgetItem(f"{index + 1}. {text.replace(chr(10), ' ')[:90] or '（校正为空）'}")
-            entry.setData(Qt.UserRole, ids)
-            entry.setToolTip(text)
-            self._items.addItem(entry)
-        row = next((index for index, ids in enumerate(groups) if set(ids).intersection(selected_ids)), 0)
-        self._items.setCurrentRow(row if groups else -1)
-        draft_text = self._document.draft if self._document.draft is not None else self._document.text()
-        if self._text.toPlainText() != draft_text:
-            self._text.setPlainText(draft_text)
-        self._draft_notice.setText(
-            "独立导出草稿：原图校正已变化，草稿未同步；已有编辑已保留。" if self._document.draft_stale else
-            "独立导出草稿：可任意增删或合并段落；不会覆盖校正结果，也不映射回原图。")
+        with QSignalBlocker(self._items):
+            self._items.clear()
+            groups = self._groups() if self.view != "full" else []
+            for ids in groups:
+                members = self._members(ids)
+                text = format_text(members)
+                original = format_text([replace(member, text=member.original_text) for member in members])
+                score = min((member.score for member in members), default=1)
+                entry = QListWidgetItem(text)
+                entry.setData(Qt.UserRole, ids)
+                entry.setData(Qt.UserRole + 1, original)
+                entry.setFlags(entry.flags() | Qt.ItemIsEditable)
+                if text != original:
+                    entry.setToolTip(f"已人工修改；原识别：{original or '（空）'}")
+                elif score < _PENDING_SCORE:
+                    entry.setData(Qt.BackgroundRole, pending)
+                    entry.setToolTip(f"待复核：模型置信度 {score:.0%}，双击改字")
+                self._items.addItem(entry)
+            row = next((index for index, ids in enumerate(groups) if set(ids).intersection(selected_ids)), 0)
+            self._items.setCurrentRow(row if groups else -1)
+        draft = self._document.draft if self._document.draft is not None else self._document.text()
+        if self._text.toPlainText() != draft:
+            with QSignalBlocker(self._text):
+                self._text.setPlainText(draft)
         self._refreshing = False
-        self._load_selected()
-        # 只有发起定位的窗口负责调整拆回后的范围，其他窗口仅跟随，避免互相抢焦点。
-        if self._owns_focus and self._ids() != selected_ids:
-            self._publish_focus()
+        self._update_status()
 
-    def _current_text(self, ids):
-        selected = set(ids)
-        current = [result for result in self._document.results if selected.intersection(result.source_ids or (result.item_id,))]
-        return format_text(current)
+    def _refresh_if_stale(self):
+        if self._stale:
+            self._refresh()
 
-    def _load_selected(self):
-        ids = self._ids()
-        selected = set(ids)
-        raw = [result for result in self._document.raw_results if result.item_id in selected]
-        current = [result for result in self._document.results if selected.intersection(result.source_ids or (result.item_id,))]
-        self._original.setPlainText("\n".join(result.original_text for result in raw))
-        self._editing_ids = ids
-        text = self._pending[ids][0] if ids in self._pending else format_text(current)
-        if self._editor.toPlainText() != text:
-            with QSignalBlocker(self._editor):
-                self._editor.setPlainText(text)
-        score = min((result.score for result in raw), default=0)
-        confidence = f"模型置信度 {score:.0%}（仅供复核参考）" if raw else "未检测到文字"
-        if raw and score < .8:
-            confidence += " · 建议优先复核，文字未自动删除"
-        if len(ids) > 1:
-            confidence += "\n段落修改按整体区域定位，不将新文字猜测分配给旧行。"
-        changed = any(result.text != result.original_text for result in current)
-        if changed:
-            confidence += " · 已人工校正"
-        self._metadata_base = confidence
-        self._update_pending_notice()
-        self._apply.setEnabled(bool(ids))
-        self._reset.setEnabled(bool(ids))
-        self._editor.setEnabled(bool(ids))
+    def _pending_rows(self):
+        return [row for row in range(self._items.count())
+                if self._items.item(row).data(Qt.BackgroundRole) is not None]
 
-    def _update_pending_notice(self):
-        message = self._metadata_base
-        pending = self._pending.get(self._editing_ids)
-        if pending is not None:
-            message += "\n有待应用校正，输入仅在当前窗口保留。"
-            if self._current_text(self._editing_ids) != pending[1]:
-                message += " 当前结果已在其他位置修改；你的输入已保留，应用将替换当前结果。"
-        self._metadata.setText(message)
-
-    @Slot()
-    def _editor_changed(self):
-        ids = self._editing_ids
-        current = self._current_text(ids)
-        text = self._editor.toPlainText()
-        if text == current:
-            self._pending.pop(ids, None)
+    def _update_status(self):
+        document = self._document
+        if not document:
+            message = "未检测到文字"
+        elif self.view == "full":
+            message = ("原图上的改字在全文之后发生，全文未跟着变；已有编辑保留" if document.draft_stale
+                       else "全文可自由增删、合并段落，不会改动原图文字")
         else:
-            previous = self._pending.get(ids)
-            self._pending[ids] = (text, previous[1] if previous is not None else current)
-        self._update_pending_notice()
+            changed = sum(result.text != result.original_text for result in document.results)
+            unit = "段" if self.view == "paragraph" else "行"
+            message = f"共 {self._items.count()} {unit}" + (f" · 已改 {changed} 处" if changed else "") + " · 双击改字，Enter 提交"
+        self._status.setText(message)
+        count = len(self._pending_rows()) if self.view != "full" else 0
+        self._pending.setText(f"待复核 {count} 处")
+        for widget in (self._pending, self._next):
+            widget.setVisible(count > 0)
+        self._next_shortcut.setEnabled(count > 0)
+
+    # ---- 联动 ----
 
     def _publish_focus(self):
-        self._publishing_focus = True
-        self._document.focus(self._ids())
-        self._publishing_focus = False
-
-    def _unit_changed(self):
-        self._refresh()
-        self._publish_focus()
-
-    def _clicked(self, item):
-        self._load_selected()
-        self._publish_focus()
+        ids = self._ids()
+        if ids:
+            self._document.focus(ids)
 
     def _selected(self, current, previous):
-        if self._refreshing:
-            return
-        self._load_selected()
-        self._publish_focus()
+        if not self._refreshing:
+            self._publish_focus()
 
     @Slot(object)
     def _focus_from_image(self, ids):
-        self._owns_focus = self._publishing_focus
         wanted = set(ids)
         for row in range(self._items.count()):
             if wanted.intersection(self._items.item(row).data(Qt.UserRole)):
-                self._refreshing = True
-                self._items.setCurrentRow(row)
-                self._refreshing = False
-                self._load_selected()
+                if row != self._items.currentRow():
+                    self._refreshing = True
+                    self._items.setCurrentRow(row)
+                    self._refreshing = False
                 break
         if self._layer is not None:
             for item in self._layer.childItems():
                 if wanted.intersection(item._ids):
                     self._preview.ensureVisible(item.sceneBoundingRect(), 20, 20)
 
-    def _apply_correction(self):
-        ids, text = self._ids(), self._editor.toPlainText()
-        self._pending.pop(ids, None)
-        self._publish_focus()
-        self._document.correct(ids, text)
+    def _item_edited(self, item):
+        if self._refreshing:
+            return
+        ids, text = tuple(item.data(Qt.UserRole)), item.text()
+        # 改回原文等于撤销人工修改（同表格识别）。
+        if text == item.data(Qt.UserRole + 1):
+            self._document.reset_correction(ids)
+        else:
+            self._document.correct(ids, text)
 
-    def _reset_selected(self):
-        ids = self._ids()
-        self._pending.pop(ids, None)
-        self._publish_focus()
-        self._document.reset_correction(ids)
+    def _item_menu(self, position):
+        item = self._items.itemAt(position)
+        if item is None:
+            return
+        menu = QMenu(self._items)
+        menu.addAction("改字", lambda: self._items.editItem(item))
+        menu.addAction("复制这条", lambda: QApplication.clipboard().setText(self._formatted(item.text())))
+        restore = menu.addAction("恢复识别原文", lambda: self._document.reset_correction(tuple(item.data(Qt.UserRole))))
+        restore.setEnabled(item.text() != item.data(Qt.UserRole + 1))
+        menu.exec(self._items.viewport().mapToGlobal(position))
+        menu.deleteLater()
+
+    def _next_pending(self):
+        rows = self._pending_rows()
+        if not rows:
+            return
+        target = next((row for row in rows if row > self._items.currentRow()), rows[0])
+        self._items.setCurrentRow(target)
+        self._items.scrollToItem(self._items.currentItem())
+        self._items.setFocus()
 
     def _draft_changed(self):
-        if not self._refreshing:
-            self._document.set_draft(self._text.toPlainText())
+        self._document.set_draft(self._text.toPlainText())
 
-    def _draft_selection_changed(self):
-        self._selection_changed(self._text, self._text.textCursor().selectedText())
-
-    @Slot(object, str)
-    def _selection_changed(self, source, text):
-        if text:
-            self._selection_source = source
-            self._selection_text = text.replace("\u2029", "\n")
-        elif self._selection_source is source or (source is self._layer and self._selection_source is not self._text):
-            self._selection_text = ""
-        self._copy_selection.setEnabled(bool(self._selection_text))
+    # ---- 输出 ----
 
     def _formatted(self, text):
         if self._no_breaks.isChecked():
             text = text.replace("\n", "")
         if self._no_spaces.isChecked():
-            text = text.replace(" ", "").replace("\u3000", "")
+            text = text.replace(" ", "").replace("　", "")
         return text
 
-    def _copy_value(self, text):
+    def _copy_all(self):
+        text = self._text.toPlainText() if self.view == "full" else self._document.text()
         QApplication.clipboard().setText(self._formatted(text))
-        if self._auto_close.isChecked():
-            self.accept()
+        show_toast("已复制全文")
 
     def _open_table(self):
         from table import open_table
-        open_table(self._document.image, self._document.results)
-
-    def _copy_all(self):
-        self._copy_value(self._document.text())
-
-    def _copy_draft(self):
-        self._copy_value(self._text.toPlainText())
-
-    def _copy_selected(self):
-        self._copy_value(self._selection_text)
-
-    def done(self, result):
-        if self._copy_on_close.isChecked():
-            QApplication.clipboard().setText(self._formatted(self._document.text()))
-        super().done(result)
+        open_table(self._pixmap, self._document.results)
