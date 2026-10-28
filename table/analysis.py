@@ -40,11 +40,11 @@ def tokens_from_results(results, image):
 
 
 def content_rect(tokens, pixels):
-    """只裁掉整页墨迹外的空白页边，避免空白行列的表格边线被文字范围截掉。"""
+    """只裁掉与整页最亮背景完全一致的均匀页边，保留浅色表格线和 OCR 文字框。"""
     height, width = pixels.shape[:2]
-    # 扫描件底色常偏灰，按整页最亮处往下一截算墨迹。
-    gray = pixels.min(axis=2)
-    ink = gray < int(gray.max()) - 80
+    # 浅灰线也可能是表格边界；颜色或噪声有差异就保留，宁可多留页边。
+    background = pixels.max(axis=(0, 1))
+    ink = np.any(pixels != background, axis=2)
     rows, columns = np.flatnonzero(ink.any(axis=1)), np.flatnonzero(ink.any(axis=0))
     if not rows.size:
         return QRect(0, 0, width, height)

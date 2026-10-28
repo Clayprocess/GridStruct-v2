@@ -161,12 +161,12 @@ def check_content_crop():
     from table.model import Rect, Token
 
     tokens = (Token("内容", .99, Rect(50, 50, 80, 70)),)
-    for background in (255, 210):
+    for background, line in ((255, 0), (210, 0), (255, 200), (255, 245), (210, 200)):
         pixels = np.full((300, 500, 3), background, dtype=np.uint8)
         for x in (20, 100, 300, 480):
-            pixels[20:282, x:x + 2] = 0
+            pixels[20:282, x:x + 2] = line
         for y in (20, 100, 180, 280):
-            pixels[y:y + 2, 20:482] = 0
+            pixels[y:y + 2, 20:482] = line
         pixels[50:70, 50:80] = 0
         # 只有左上格有文字，空白外行列和未识别文字的表格仍需保留完整边线。
         expected = QRect(18, 18, 466, 266)
@@ -174,10 +174,14 @@ def check_content_crop():
         assert content_rect((), pixels) == expected
         wider_text = (Token("内容", .99, Rect(10, 10, 490, 290)),)
         assert content_rect(wider_text, pixels) == QRect(8, 8, 484, 284)
+        # 边角只差一个灰度值也保留，不把噪声阈值当成可删除内容的依据。
+        pixels[0, 0] = background - 1
+        pixels[-1, -1] = background - 1
+        assert content_rect(tokens, pixels) == QRect(0, 0, 500, 300)
         pixels.fill(background)
         assert content_rect((), pixels) == QRect(0, 0, 500, 300)
         assert content_rect(tokens, pixels) == QRect(0, 0, 500, 300)
-    print("PASS: document crop retains blank outer rows/columns, OCR boxes and blank pages on white/gray backgrounds")
+    print("PASS: document crop retains faint grid lines, outer rows/columns, OCR boxes, edge noise and blank pages")
 
 
 def check_analysis():
