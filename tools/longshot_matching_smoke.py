@@ -17,7 +17,7 @@ import numpy as np
 from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QTransform, QImage, QFontDatabase
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
-from capture.longshot_matching import find_overlap, find_viewport_end
+from capture.longshot_matching import find_overlap, find_shift, find_viewport_end
 from styles import tokens as T
 
 
@@ -116,6 +116,41 @@ def main():
     with QPainter(outside_overlap) as painter:
         painter.fillRect(30, 850, 50, 30, QColor(T.LIGHT["foreground"]))
     cases.append({"case": "dynamic_outside_overlap", "actual": find_overlap(frame(0), outside_overlap), "expected": 763})
+    # 容差后备：闪烁光标、抗锯齿抖动、吸顶/吸底栏要能接上，重复内容和空白仍拒绝。
+    cases.append({"case": "shift_dynamic_overlap", "actual": find_shift(frame(0), dynamic)[0], "expected": 763})
+    noisy = frame(137).toImage()
+    for index in range(400):
+        noisy.setPixelColor(index * 37 % 1200, index * 53 % 900, QColor(T.LIGHT["muted_foreground"]))
+    cases.append({"case": "shift_noise", "actual": find_shift(frame(0), QPixmap.fromImage(noisy))[0], "expected": 763})
+
+    def sticky(y):
+        pm = frame(y)
+        with QPainter(pm) as painter:
+            painter.fillRect(0, 0, 1200, 60, QColor(T.LIGHT["primary"]))
+            painter.fillRect(0, 850, 1200, 50, QColor(T.LIGHT["secondary"]))
+            painter.fillRect(40, 862, 300, 16, QColor(T.LIGHT["foreground"]))
+        return pm
+    cases.append({"case": "shift_sticky_bars", "actual": list(find_shift(sticky(0), sticky(137))), "expected": [713, 60, 50]})
+    tall_repeated = QPixmap(1200, 1000)
+    with QPainter(tall_repeated) as painter:
+        for y in range(0, 1000, 25):
+            painter.drawPixmap(0, y, page.copy(0, 0, 1200, 25))
+    cases.append({"case": "shift_repeated_refused", "expected": [0, 0, 0], "actual": list(
+        find_shift(tall_repeated.copy(0, 0, 1200, 900), tall_repeated.copy(0, 30, 1200, 900)))})
+    cases.append({"case": "shift_blank_refused", "actual": list(find_shift(blank, blank)), "expected": [0, 0, 0]})
+    from capture.longshot import ImageStitcher
+    stitcher = ImageStitcher()
+    stitcher.feed(sticky(0))
+    for y in range(211, 211 * 12, 211):
+        stitcher.feed(sticky(y))
+    expected_sticky = page.copy(0, 0, 1200, 211 * 11 + 900)
+    with QPainter(expected_sticky) as painter:
+        painter.fillRect(0, 0, 1200, 60, QColor(T.LIGHT["primary"]))
+        bottom = 211 * 11 + 850
+        painter.fillRect(0, bottom, 1200, 50, QColor(T.LIGHT["secondary"]))
+        painter.fillRect(40, bottom + 12, 300, 16, QColor(T.LIGHT["foreground"]))
+    cases.append({"case": "stitch_sticky_bars_pixels", "actual": stitcher.result.toImage() == expected_sticky.toImage(),
+                  "expected": True})
     horizontal_page = page.transformed(QTransform().rotate(-90))
     a = horizontal_page.copy(0, 0, 900, 1200).transformed(QTransform().rotate(90))
     b = horizontal_page.copy(852, 0, 900, 1200).transformed(QTransform().rotate(90))

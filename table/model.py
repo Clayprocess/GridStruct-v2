@@ -159,12 +159,21 @@ class GridSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class CellCorrection:
+    """保留人工文字对应的原图区域，合并后拆分时仍能找回原位置。"""
+    box: Rect
+    text: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
 class TableCell:
     """status：空串为普通格；pending 待复核；confirmed 人工确认；corrected 人工改字。"""
     text: str = ""
     original_text: str = ""
     tokens: tuple = ()
     status: str = ""
+    corrections: tuple = ()
 
     @property
     def weighted_confidence(self):

@@ -57,7 +57,12 @@ def save(document, path):
     """按扩展名写文件；CSV 带 BOM，Excel 双击打开中文不乱码。"""
     suffix = path.rsplit(".", 1)[-1].lower()
     if suffix == "xlsx":
-        _save_xlsx(document, path)
+        from xlsxwriter.exceptions import FileCreateError
+        try:
+            _save_xlsx(document, path)
+        except FileCreateError as error:
+            # XlsxWriter 包装了文件写入异常，统一为与 CSV/HTML 相同的 IO 错误交给界面提示。
+            raise OSError(str(error)) from error
         return
     if suffix == "csv":
         content, encoding = to_csv(document), "utf-8-sig"

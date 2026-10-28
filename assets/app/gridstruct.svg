@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <g fill="currentColor">
+    <rect x="12.00" y="12.00" width="36.00" height="36.00" rx="12.00"/>
+    <rect x="61.00" y="12.00" width="36.00" height="36.00" rx="12.00"/>
+    <rect x="110.00" y="12.00" width="36.00" height="36.00" rx="12.00"/>
+    <rect x="161.20" y="14.20" width="31.60" height="31.60" rx="12.00"/>
+    <rect x="213.20" y="17.20" width="25.60" height="25.60" rx="12.00"/>
+    <rect x="12.00" y="61.00" width="36.00" height="36.00" rx="12.00"/>
+    <rect x="61.00" y="61.00" width="36.00" height="36.00" rx="12.00"/>
+    <rect x="112.20" y="63.20" width="31.60" height="31.60" rx="12.00"/>
+    <rect x="164.20" y="66.20" width="25.60" height="25.60" rx="12.00"/>
+    <rect x="216.40" y="69.40" width="19.20" height="19.20" rx="9.60"/>
+    <rect x="12.00" y="110.00" width="36.00" height="36.00" rx="12.00"/>
+    <rect x="63.20" y="112.20" width="31.60" height="31.60" rx="12.00"/>
+    <rect x="115.20" y="115.20" width="25.60" height="25.60" rx="12.00"/>
+    <rect x="167.40" y="118.40" width="19.20" height="19.20" rx="9.60"/>
+    <rect x="219.20" y="121.20" width="13.60" height="13.60" rx="6.80"/>
+    <rect x="14.20" y="161.20" width="31.60" height="31.60" rx="12.00"/>
+    <rect x="66.20" y="164.20" width="25.60" height="25.60" rx="12.00"/>
+    <rect x="118.40" y="167.40" width="19.20" height="19.20" rx="9.60"/>
+    <rect x="170.20" y="170.20" width="13.60" height="13.60" rx="6.80"/>
+    <rect x="17.20" y="213.20" width="25.60" height="25.60" rx="12.00"/>
+    <rect x="69.40" y="216.40" width="19.20" height="19.20" rx="9.60"/>
+    <rect x="121.20" y="219.20" width="13.60" height="13.60" rx="6.80"/>
+  </g>
+</svg>

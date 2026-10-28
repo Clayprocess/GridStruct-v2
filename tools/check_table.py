@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPainter, QPen
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -114,6 +114,47 @@ def check_review():
     assert review.document.cell(0, 1).status == ""
 
 
+def check_correction_merges():
+    from table.model import CellMerge, GridSpec, Rect, Token
+    from table.review import TableReview
+    grid = GridSpec((0, 40), (0, 40, 80))
+    tokens = (Token("A", .99, Rect(5, 5, 25, 15)), Token("B", .99, Rect(45, 5, 65, 15)))
+    review = TableReview(tokens, grid)
+    review.edit(0, 0, "A corrected")
+    review.edit(0, 1, "B corrected")
+    review.set_grid(grid.with_merge(CellMerge(0, 0, 1, 2)))
+    assert review.document.rows == (("A corrected B corrected", ""),), review.document.rows
+    review.set_grid(grid)
+    assert review.document.rows == (("A corrected", "B corrected"),), review.document.rows
+    review.undo()
+    assert review.document.rows == (("A corrected B corrected", ""),)
+    review.redo()
+    assert review.document.rows == (("A corrected", "B corrected"),)
+    review.set_grid(grid.without_line("v", 1))
+    assert review.document.rows == (("A corrected B corrected",),)
+    review.set_grid(grid)
+    assert review.document.rows == (("A corrected", "B corrected"),)
+    review.edit(0, 1, "B")
+    review.set_grid(grid.with_merge(CellMerge(0, 0, 1, 2)))
+    assert review.document.rows == (("A corrected B", ""),), "合并不得丢掉未修改格的文字"
+    review.edit(0, 0, "whole replacement")
+    review.set_grid(grid)
+    assert "A corrected" not in str(review.document.rows), "整格重写后不得复活旧校正"
+    assert "whole replacement" in str(review.document.rows)
+    review = TableReview(tokens, grid)
+    review.edit(0, 0, "A corrected")
+    review.set_grid(grid.with_line("v", 18))
+    assert review.document.rows == (("", "A corrected", "B"),), "加线不得复活已被校正替代的原文"
+    review = TableReview((tokens[0], Token("B", .5, tokens[1].box)), grid)
+    review.edit(0, 0, "A corrected")
+    review.set_grid(grid.with_merge(CellMerge(0, 0, 1, 2)))
+    assert review.confirm(0, 0)
+    review.set_grid(grid)
+    assert review.document.rows == (("A corrected", "B"),), "确认合并格不得丢失组成文字的原位置"
+    assert not review.pending_cells(), "已确认文字拆分后不得重新待复核"
+    print("PASS correction merge/split/delete/undo/redo preserves text and positions")
+
+
 def check_analysis():
     from table import export
     from table.analysis import analyze
@@ -198,18 +239,140 @@ def check_dialog(app):
         app.processEvents()
 
 
+
+def check_selection_after_grid_change(app):
+    from table.model import GridSpec
+    from table.dialog import TableDialog
+    from table.grid import Candidate, Suggestion
+    image = QImage(100, 100, QImage.Format_RGB32)
+    image.fill(QColor(T.LIGHT['background']))
+    dialog = TableDialog(image)
+    grid = GridSpec((0, 50, 100), (0, 50, 100))
+    dialog.apply_analysis((), Suggestion(Candidate(grid, 'structure', 1.0), (), 1.0, 'probe'), '')
+    canvas = dialog._canvas
+    canvas.select_cell(1, 1)
+    dialog._scheme_chosen(1)
+    QTest.keyClick(canvas, Qt.Key_Right, Qt.ShiftModifier)
+    assert canvas._selected == {(0, 0)}, ('scheme selection', canvas._selected)
+    assert not canvas.can_merge
+    assert not canvas.grab().isNull()
+    dialog._undo()
+    canvas.select_cell(1, 1)
+    QTest.keyClick(canvas, Qt.Key_Right, Qt.ControlModifier)
+    QTest.keyClick(canvas, Qt.Key_Delete)
+    QTest.keyClick(canvas, Qt.Key_Right, Qt.ShiftModifier)
+    QTest.keyClick(canvas, Qt.Key_Down, Qt.ShiftModifier)
+    assert canvas._selected == {(0, 0), (1, 0)}, ('delete column', canvas._selected)
+    assert canvas.can_merge
+    QTest.keyClick(canvas, Qt.Key_Down, Qt.ControlModifier)
+    QTest.keyClick(canvas, Qt.Key_Delete)
+    QTest.keyClick(canvas, Qt.Key_Right, Qt.ShiftModifier)
+    assert canvas._selected == {(0, 0)}, ('delete row', canvas._selected)
+    assert not canvas.can_merge
+    assert not canvas.grab().isNull()
+    dialog.close()
+
+
+
+def check_ocr_reuse(app):
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+    from PySide6.QtCore import QPoint, QSettings, QCoreApplication, QEvent
+    from PySide6.QtGui import QPixmap
+    from annotate import AnnotationWindow
+    from pin import PinWindow
+    from ocr import OCRDocument, OCRResult, OCRResultDialog
+    from table.analysis import tokens_from_results
+
+    with TemporaryDirectory() as folder:
+        settings = QSettings(str(Path(folder) / "settings.ini"), QSettings.IniFormat)
+        settings.setValue("config_version", 1)
+        settings.sync()
+        with patch("settings.storage.data_directory", return_value=Path(folder)):
+            for paragraph in (False, True):
+                image = QImage(200, 100, QImage.Format_RGB32)
+                image.fill(QColor(T.LIGHT["background"]))
+                raw = (OCRResult(QRect(5, 5, 60, 20), "120O", .6),
+                       OCRResult(QRect(5, 28, 60, 20), "total", .9))
+                document = OCRDocument(raw, image)
+                ids = document.groups()[0] if paragraph else (raw[0].item_id,)
+                document.correct(ids, "1200 total" if paragraph else "1200")
+                expected = ["1200 total"] if paragraph else ["1200", "total"]
+                pixmap = QPixmap.fromImage(image)
+                annotation = AnnotationWindow(pixmap, QPoint())
+                annotation._ocr.adopt_document(document, pixmap)
+                pin = PinWindow(pixmap, document=document)
+                dialog = OCRResultDialog(document)
+                for entry in (lambda: annotation._on_action("table"), pin._recognize_table, dialog._open_table):
+                    with patch("table.open_table") as opened:
+                        entry()
+                        passed_image, results = opened.call_args.args
+                        passed_image = passed_image.toImage() if isinstance(passed_image, QPixmap) else passed_image
+                        tokens = tokens_from_results(results, passed_image)
+                        assert [token.text for token in tokens] == expected
+                        if paragraph:
+                            assert len(tokens) == 1 and tokens[0].box.top == 5 and tokens[0].box.bottom == 48
+                pin._allow_close = True
+                pin.close()
+                dialog.close()
+                dialog.deleteLater()
+                app.processEvents()
+                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    print("PASS: corrected OCR reused by screenshot, pin and OCR result entries")
+
+
+def check_xlsx_failure(app):
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+    from PySide6.QtCore import QSettings, QCoreApplication, QEvent
+    from table import TableDialog
+    from table.model import GridSpec
+    from table.review import TableReview
+
+    with TemporaryDirectory() as folder:
+        settings = QSettings(str(Path(folder) / "settings.ini"), QSettings.IniFormat)
+        settings.setValue("table/export_dir", "unchanged")
+        image = QImage(200, 100, QImage.Format_RGB32)
+        image.fill(QColor(T.LIGHT["background"]))
+        dialog = TableDialog(image)
+        dialog._review = TableReview((), GridSpec((0, 100), (0, 200)))
+        # 目录不能作为 XLSX 文件写入，走真实 XlsxWriter 文件失败路径。
+        destination = Path(folder) / "unwritable.xlsx"
+        destination.mkdir()
+        app.clipboard().setText("keep clipboard")
+        with patch("settings.get_settings", return_value=settings), \
+                patch("table.dialog.QFileDialog.getSaveFileName", return_value=(str(destination), "Excel 工作簿 (*.xlsx)")), \
+                patch("table.dialog.show_message") as message:
+            dialog._export_file()
+            assert message.call_args.args[1] == "导出失败"
+        assert app.clipboard().text() == "keep clipboard"
+        assert settings.value("table/export_dir") == "unchanged"
+        dialog.close()
+        app.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.clipboard().clear()
+    print("PASS: XLSX write failure reports error and preserves clipboard/settings")
+
+
 def main():
     app = QApplication.instance() or QApplication([])
+    if sys.platform == "win32":
+        # Windows offscreen 不自动枚举字体，否则合成表格只有方框，无法验证真实识别链路。
+        for name in ("arial.ttf", "msyh.ttc"):
+            QFontDatabase.addApplicationFont(str(Path(os.environ["WINDIR"]) / "Fonts" / name))
     check_model()
     check_grid_edits()
     check_review()
+    check_correction_merges()
+    check_selection_after_grid_change(app)
+    check_ocr_reuse(app)
+    check_xlsx_failure(app)
     document = check_analysis()
     check_export(document)
     check_dialog(app)
     print(f"表格识别自检通过；截图和导出样例在 {OUTPUT}")
     # 没进事件循环不会发 aboutToQuit，手动等后台线程收尾。
-    from table import controller
-    controller._service.shutdown()
+    app.aboutToQuit.emit()
 
 
 if __name__ == "__main__":

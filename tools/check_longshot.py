@@ -10,11 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, Qt
-from PySide6.QtGui import QImage, QPixmap, QTransform, QFontDatabase
+from PySide6.QtGui import QImage, QPixmap, QTransform, QFontDatabase, QPainter, QColor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from capture.longshot import ImageStitcher, LongShotBar, LongShotFlow, MAX_STITCH_LENGTH
-from styles import apply_theme
+from styles import apply_theme, tokens as T
 
 
 app = QApplication([])
@@ -98,6 +98,53 @@ class Hook:
     def stop(self): self.stopped = True
 
 
+def sticky_frame(y, dpr=1, horizontal=False):
+    pm = frame(y)
+    with QPainter(pm) as painter:
+        painter.fillRect(0, 0, 160, 30, QColor(T.LIGHT["primary"]))
+        painter.fillRect(0, 380, 160, 20, QColor(T.LIGHT["secondary"]))
+    if horizontal:
+        pm = pm.transformed(QTransform().rotate(-90))
+    pm.setDevicePixelRatio(dpr)
+    return pm
+
+
+def check_sticky_recovery():
+    for horizontal in (False, True):
+        for dpr in (1, 1.5, 2):
+            make_frame = lambda y: sticky_frame(y, dpr, horizontal)
+            stitch = ImageStitcher(horizontal)
+            for y in (0, 137, 274):
+                assert stitch.feed(make_frame(y))
+            saved = pixels(stitch.result)
+            unchanged = sticky_frame(274)
+            with QPainter(unchanged) as painter:
+                painter.fillRect(0, 380, 160, 20, QColor(T.LIGHT["primary"]))
+            if horizontal:
+                unchanged = unchanged.transformed(QTransform().rotate(-90))
+            unchanged.setDevicePixelRatio(dpr)
+            assert not stitch.feed(unchanged), "仅底栏变化不能算成滚动追加"
+            assert pixels(stitch.result) == saved
+            assert not stitch.feed(make_frame(1800))
+            for y in (0, 100, 274):
+                assert stitch.relocate(make_frame(y)), ("sticky relocation", horizontal, dpr, y)
+                assert stitch.viewport_start == y
+                assert pixels(stitch.result) == saved
+            assert stitch.feed(make_frame(100), reverse=True)
+            assert pixels(stitch.result) == saved, "恢复中的反向滚动不得裁掉历史"
+            assert stitch.feed(make_frame(274))
+            for y, reverse in ((411, False), (90, True)):
+                assert stitch.feed(make_frame(y), reverse=reverse)
+                expected = source.copy(0, 0, 160, y + 400)
+                with QPainter(expected) as painter:
+                    painter.fillRect(0, 0, 160, 30, QColor(T.LIGHT["primary"]))
+                    painter.fillRect(0, y + 380, 160, 20, QColor(T.LIGHT["secondary"]))
+                if horizontal:
+                    expected = expected.transformed(QTransform().rotate(-90))
+                assert pixels(stitch.result) == pixels(expected), "追加和反向裁尾必须保留一份底栏"
+    print("PASS: sticky recovery, resume, reverse pixels across axes and DPR")
+
+
 def setup_flow(automatic=False):
     delivered = []
     flow = LongShotFlow(app, delivered.append)
@@ -129,6 +176,25 @@ def sample(flow, pm, delta=-120, expire=False):
 
 def check_flow():
     with patch("capture.longshot.show_message", side_effect=AssertionError("unexpected modal")):
+        flow, _ = setup_flow()
+        flow._stitcher = ImageStitcher()
+        for y in (0, 137, 274):
+            assert flow._stitcher.feed(sticky_frame(y))
+        flow._last_frame = sticky_frame(274)
+        saved = pixels(flow._stitcher.result)
+        sample(flow, sticky_frame(1800), expire=True)
+        assert flow._recovering
+        with patch.object(flow, "_grab", return_value=sticky_frame(137)):
+            flow._sample_frame()
+        assert not flow._recovering, "带固定栏回滚后必须退出恢复状态"
+        assert pixels(flow._stitcher.result) == saved
+        sample(flow, sticky_frame(274))
+        sample(flow, sticky_frame(411))
+        assert flow._stitcher.height == 811
+        flow.cancel()
+        flow.deleteLater()
+        flush()
+
         flow, delivered = setup_flow()
         saved = pixels(flow._stitcher.result)
         sample(flow, frame(1800), expire=True)
@@ -192,6 +258,7 @@ def check_flow():
         saved = pixels(flow._stitcher.result)
         flow._scroll_target = 123
         with patch("capture.longshot.QApplication.platformName", return_value="windows"), \
+                patch("capture.longshot._IS_WIN", True), \
                 patch("capture.longshot._check_capture_target", side_effect=OSError("window changed")), \
                 patch.object(flow, "_grab", side_effect=AssertionError("captured changed target")):
             flow._sample_frame()
@@ -225,5 +292,6 @@ def render():
 
 
 check_pixels()
+check_sticky_recovery()
 check_flow()
 render()

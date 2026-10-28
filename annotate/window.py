@@ -1,6 +1,6 @@
 """截图画布与浮动工具配置，输出与识别通过模块公开接口调用。"""
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QGraphicsTextItem
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QGraphicsTextItem, QDialog
 from PySide6.QtGui import QPixmap, QColor, QKeySequence
 from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QPropertyAnimation, QEasingCurve, QEvent
 
@@ -8,10 +8,25 @@ from .canvas import AnnotationCanvas
 from .toolbar import FloatPanel, shortcut_tool
 from .options import ToolOptions
 from .color_dialog import ColorDialog
-from ui import floating_window_type, ask_confirmation
+from ui import floating_window_type, MessageDialog, show_toast
+from settings import get_settings
 from styles import tokens as T
 from export import save_image
 from ocr import OCRController, OCRDocument, add_text_layer
+
+
+def _confirm_exit(parent):
+    """有未保存的标注时确认退出；勾选“不再提醒”后直接退出，可在设置里恢复。"""
+    settings = get_settings()
+    if not settings.value("capture/confirm_exit", True, type=bool):
+        return True
+    dialog = MessageDialog(parent, "退出截图", "确认退出截图？未复制或保存的标注将丢失。",
+                           confirm_text="退出", cancel_text="取消", checkbox_text="不再提醒")
+    accepted = dialog.exec() == QDialog.Accepted
+    if accepted and dialog.checkbox.isChecked():
+        settings.setValue("capture/confirm_exit", False)
+    dialog.deleteLater()
+    return accepted
 
 
 class AnnotationWindow(QWidget):
@@ -33,6 +48,7 @@ class AnnotationWindow(QWidget):
         self.setWindowTitle("GridStruct-V2 截图标注")
         self._ended = False
         self._text_layer = None
+        self._ocr_selected_text = ""
         self._pipette_tool = ""
         self.setAttribute(Qt.WA_DeleteOnClose)
         self._canvas = AnnotationCanvas(pixmap)
@@ -139,6 +155,7 @@ class AnnotationWindow(QWidget):
         dialog.deleteLater()
 
     def _remove_text_layer(self):
+        self._ocr_selected_text = ""
         if self._text_layer is not None:
             self._canvas.scene().removeItem(self._text_layer)
             self._text_layer.deleteLater()
@@ -160,6 +177,10 @@ class AnnotationWindow(QWidget):
             self._canvas.clear_tool()
             self._text_layer = add_text_layer(self._canvas.scene(), results, self._mode,
                                               on_show_results=self._ocr.show_results)
+            self._text_layer.selectionChanged.connect(self._select_ocr_text)
+
+    def _select_ocr_text(self, _item, text):
+        self._ocr_selected_text = text
 
     def _show_ocr_status(self, message, has_results):
         self._toolbar.set_ocr_status(message, has_results)
@@ -179,10 +200,17 @@ class AnnotationWindow(QWidget):
             self._canvas.undo()
         elif action == "redo":
             self._canvas.redo()
+        elif action == "confirm" and self._ocr_selected_text:
+            # 完成原图选字时不能再发图片输出信号，否则会覆盖刚复制的文字。
+            QApplication.clipboard().setText(self._ocr_selected_text)
+            show_toast("已复制选中文字")
+            self.close()
         elif action in ("confirm", "copy"):
             self._finish()
         elif action == "save":
-            save_image(self._render(), self)
+            if save_image(self._render(), self):
+                # 已保存的标注退出时不会丢，不必再确认；之后再改又会变回未保存。
+                self._canvas._undo.setClean()
         elif action == "ocr":
             self._toggle_pipette(False)
             self._ocr.start(self._render())
@@ -193,7 +221,7 @@ class AnnotationWindow(QWidget):
             from table import open_table
             pixmap = self._render()
             document = self._ocr.document
-            open_table(pixmap, document.raw_results if document is not None and document.matches(pixmap) else None)
+            open_table(pixmap, document.results if document is not None and document.matches(pixmap) else None)
             self.close()
         elif action == "pipette":
             self._toggle_pipette(not self._canvas.pipette_active)
@@ -208,7 +236,8 @@ class AnnotationWindow(QWidget):
                 document = None
             show_pin(pixmap, self._capture_position, document=document)
             self.close()
-        elif action == "cancel":
+        elif action in ("cancel", "escape"):
+            # 同 PixPin：Esc 在任何状态下都是关闭截图；正在输入的文字、折线先提交，再按有无未保存标注决定是否确认。
             self._request_cancel()
 
     def _finish(self):
@@ -218,7 +247,8 @@ class AnnotationWindow(QWidget):
         self.close()
 
     def _request_cancel(self):
-        if ask_confirmation(self, "退出截图", "确认退出截图？未复制或保存的标注将丢失。"):
+        self._canvas.finish_editing()
+        if self._canvas._undo.isClean() or _confirm_exit(self):
             self.close()
 
     def eventFilter(self, obj, event):
@@ -226,6 +256,11 @@ class AnnotationWindow(QWidget):
             return False
         if obj.window() not in (self, self._toolbar):
             return False
+        if event.key() == Qt.Key_Escape:
+            # 文字框、取色和面板控件都会先吃掉 Esc，统一在这里截下。
+            self._on_action("escape")
+            event.accept()
+            return True
         text = self._canvas.scene().focusItem()
         if (isinstance(text, QGraphicsTextItem) and text.textInteractionFlags() & Qt.TextEditable
                 and (obj is self._canvas or obj is self._canvas.viewport())):
@@ -246,10 +281,7 @@ class AnnotationWindow(QWidget):
     def keyPressEvent(self, event):
         key, modifiers = event.key(), event.modifiers()
         if key == Qt.Key_Escape:
-            if self._canvas.pipette_active:
-                self._toggle_pipette(False)
-            elif not self._canvas.finish_editing():
-                self._request_cancel()
+            self._on_action("escape")
         elif modifiers & Qt.ControlModifier and key in (Qt.Key_S, Qt.Key_C):
             self._on_action("save" if key == Qt.Key_S else "copy")
         elif modifiers & Qt.ShiftModifier and key == Qt.Key_O:
@@ -257,7 +289,7 @@ class AnnotationWindow(QWidget):
         elif shortcut_tool(event):
             self.select_tool(shortcut_tool(event))
         elif key in (Qt.Key_Return, Qt.Key_Enter):
-            self._finish()
+            self._on_action("confirm")
         else:
             super().keyPressEvent(event)
 

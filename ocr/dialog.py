@@ -341,7 +341,7 @@ class OCRResultDialog(BaseDialog):
 
     def _open_table(self):
         from table import open_table
-        open_table(self._document.image, self._document.raw_results)
+        open_table(self._document.image, self._document.results)
 
     def _copy_all(self):
         self._copy_value(self._document.text())

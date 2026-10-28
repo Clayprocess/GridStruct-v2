@@ -7,7 +7,7 @@ v1 只允许同形网格重跑，这里网格随拖线实时变化，所以按�
 from dataclasses import replace
 from statistics import median
 
-from .model import CONFIRMED, CORRECTED, PENDING, TableCell, TableDocument
+from .model import CONFIRMED, CORRECTED, PENDING, CellCorrection, TableCell, TableDocument
 
 
 def visual_rows(tokens):
@@ -44,22 +44,43 @@ def build_document(tokens, grid):
     return TableDocument(grid, tuple(cells))
 
 
+def unreplaced_tokens(tokens, corrections):
+    """排除人工区域内的原文，避免重新分格或确认时复活已替换文字。"""
+    return tuple(token for token in tokens if not any(
+        part.box.left <= token.box.center_x < part.box.right
+        and part.box.top <= token.box.center_y < part.box.bottom for part in corrections))
+
+
 def carry_over(base, recognized):
-    """人工确认或改过的格子保留原文字；中心点落到同一新格时先到先得，其余靠撤销找回。"""
-    claimed = set()
-    document = recognized
+    """校正按原区域落格；合并只改变展示，拆分时仍使用各条校正的原位置。"""
+    grouped = {}
     for row, values in enumerate(base.cells):
         for column, cell in enumerate(values):
-            if not cell.human or base.grid.is_covered(row, column):
+            if base.grid.is_covered(row, column):
                 continue
-            rect = base.grid.cell_rect(row, column)
-            target = recognized.grid.anchor(*recognized.grid.cell_at(rect.center_x, rect.center_y))
-            if target in claimed:
-                continue
-            claimed.add(target)
-            fresh = recognized.cell(*target)
-            document = document.with_cell(*target, replace(fresh, text=cell.text, status=cell.status))
-    return document
+            corrections = cell.corrections
+            if not corrections and cell.human:
+                corrections = (CellCorrection(base.grid.cell_rect(row, column), cell.text, cell.status),)
+            for correction in corrections:
+                rect = correction.box
+                target = recognized.grid.anchor(*recognized.grid.cell_at(rect.center_x, rect.center_y))
+                grouped.setdefault(target, []).append(correction)
+    all_corrections = tuple(part for parts in grouped.values() for part in parts)
+    cells = []
+    for row, values in enumerate(recognized.cells):
+        updated = []
+        for column, fresh in enumerate(values):
+            corrections = tuple(grouped.get((row, column), ()))
+            # 校正区域可能被新线切开，所有格子都排除已被校正替代的原文，避免拆分后重复出现。
+            remaining = unreplaced_tokens(fresh.tokens, all_corrections)
+            lines = visual_rows((*remaining, *(part for part in corrections if part.text)))
+            text = "\n".join(" ".join(part.text for part in line) for line in lines)
+            status = (CORRECTED if any(part.status == CORRECTED for part in corrections) else CONFIRMED) if corrections else ""
+            if TableCell(tokens=remaining).low_confidence:
+                status = PENDING
+            updated.append(replace(fresh, text=text, status=status, corrections=corrections))
+        cells.append(tuple(updated))
+    return TableDocument(recognized.grid, tuple(cells))
 
 
 class TableReview:
@@ -100,14 +121,18 @@ class TableReview:
         self._record(self.document)
         # 改回原文等于撤销人工修改，格子回到识别时的状态。
         status = CORRECTED if text != cell.original_text else PENDING if cell.low_confidence else ""
-        self.document = self.document.with_cell(row, column, replace(cell, text=text, status=status))
+        self.document = self.document.with_cell(row, column, replace(cell, text=text, status=status, corrections=()))
 
     def confirm(self, row, column):
         cell = self.document.cell(row, column)
         if cell.status != PENDING:
             return False
         self._record(self.document)
-        self.document = self.document.with_cell(row, column, replace(cell, status=CONFIRMED))
+        # 确认不是整格重写：保留原校正的位置，并分别记住剩余文字已确认。
+        existing = tuple(part for values in self.document.cells for value in values for part in value.corrections)
+        remaining = unreplaced_tokens(cell.tokens, existing)
+        corrections = cell.corrections + tuple(CellCorrection(token.box, token.text.strip(), CONFIRMED) for token in remaining)
+        self.document = self.document.with_cell(row, column, replace(cell, status=CONFIRMED, corrections=corrections))
         return True
 
     def pending_cells(self):

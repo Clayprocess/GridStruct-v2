@@ -15,14 +15,14 @@ import numpy as np
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSettings, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QMouseEvent, QPainter, QPixmap, QTextCursor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from annotate import AnnotationCanvas
 from annotate.items import SerialMarkItem, TextMarkItem
 from capture.longshot import ImageStitcher
 from ocr import OCREngine, add_text_layer
 from pin import PinWindow
-from settings import SettingsDialog
+from settings import SettingsDialog, get_settings
 from styles import tokens as T
 from styles import apply_theme
 
@@ -436,32 +436,151 @@ def screenshot_lifecycle():
     flow.deleteLater()
 
 
+def frozen_overlay_escape():
+    from capture import ScreenshotFlow, DesktopCapture, ScreenFrame
+    from PySide6.QtGui import QUndoCommand
+
+    flow = ScreenshotFlow(app)
+    source = sample(800, 600)
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(0, 0, 800, 600), source, QPoint())])
+    settings = get_settings()
+    previous_confirm = settings.value("capture/confirm_exit", True, type=bool)
+    settings.setValue("capture/confirm_exit", True)
+
+    def open_annotation():
+        flow.start()
+        flow._win._sel = QRect(30, 30, 300, 200)
+        flow._win.confirm()
+        flush()
+        assert flow._win._frozen and flow._ann is not None
+        return flow._ann
+
+    def escape_from_overlay():
+        # 点击选区外后焦点会回到冻结遮罩，不能只验证标注窗口自身的 Esc。
+        overlay = flow._win._windows[0]
+        overlay.activateWindow()
+        overlay.setFocus()
+        flush()
+        assert overlay.hasFocus()
+        QTest.keyClick(overlay, Qt.Key_Escape)
+        flush()
+
+    try:
+        with patch("capture.flow.capture_virtual_desktop", return_value=shot), \
+             patch("annotate.window.MessageDialog") as dialog:
+            open_annotation()
+            escape_from_overlay()
+            assert flow._win is None and flow._ann is None and not dialog.called
+
+            window = open_annotation()
+            window._canvas._undo.push(QUndoCommand("unsaved mark"))
+            dialog.return_value.exec.return_value = QDialog.Rejected
+            escape_from_overlay()
+            assert dialog.call_count == 1 and flow._ann is window and flow._win._frozen
+            dialog.return_value.exec.return_value = QDialog.Accepted
+            dialog.return_value.checkbox.isChecked.return_value = False
+            escape_from_overlay()
+            assert dialog.call_count == 2 and flow._win is None and flow._ann is None
+
+            for tool_id in ("text", "polyline"):
+                window = open_annotation()
+                window.select_tool(tool_id)
+                canvas = window._canvas
+                canvas._tool.on_press(canvas.scene(), QPointF(20, 20), canvas._undo)
+                if tool_id == "text":
+                    canvas._tool._item.setPlainText("pending text")
+                else:
+                    canvas._tool.on_press(canvas.scene(), QPointF(90, 70), canvas._undo)
+                dialog.reset_mock()
+                dialog.return_value.exec.return_value = QDialog.Rejected
+                if tool_id == "text":
+                    # 同 PixPin：输入中的 Esc 也是关闭，不能被文字框吃掉只结束编辑。
+                    canvas._tool._item.setFocus()
+                    QTest.keyClick(canvas.viewport(), Qt.Key_Escape)
+                    flush()
+                else:
+                    escape_from_overlay()
+                # 一次 Esc 就进入退出确认；正在编辑的内容先提交，取消确认后仍在。
+                assert flow._ann is window and canvas._tool._item is None and dialog.call_count == 1
+                assert not canvas._undo.isClean(), f"{tool_id}: Escape discarded the edit"
+                dialog.return_value.exec.return_value = QDialog.Accepted
+                escape_from_overlay()
+                assert flow._win is None and flow._ann is None
+
+            settings.setValue("capture/confirm_exit", False)
+            window = open_annotation()
+            window._canvas._undo.push(QUndoCommand("unsaved mark"))
+            dialog.reset_mock()
+            escape_from_overlay()
+            assert not dialog.called and flow._win is None and flow._ann is None, "不再提醒 ignored"
+    finally:
+        flow.cancel()
+        flow.deleteLater()
+        settings.setValue("capture/confirm_exit", previous_confirm)
+        flush()
+
+
 def pin_missing_fields():
     import json
     import pin
     from pin import data_directory
-    session = data_directory() / "pins" / "session.json"
-    session.parent.mkdir(parents=True, exist_ok=True)
+    directory = data_directory() / "pins"
+    session = directory / "session.json"
+    directory.mkdir(parents=True, exist_ok=True)
     state = {"id": "a" * 32, "kind": "text", "text": "recovery sample", "x": 0, "y": 0,
              "scale": 1.0, "opacity": 1.0, "topmost": False, "click_through": False}
+
+    def close_restored():
+        for window in list(pin._open_pins):
+            window._allow_close = True
+            window.close()
+        QTest.qWait(180)
+        flush()
+
     try:
-        with patch("pin.show_message") as warning:
+        with patch("pin.ask_confirmation", return_value=False) as ask:
             for missing in ("topmost", "click_through"):
                 session.write_text(json.dumps({"version": 1, "pins": [{k: v for k, v in state.items() if k != missing}]}))
-                assert not pin.restore_pins() and warning.called, f"missing {missing} accepted"
-                assert not pin._restoring
+                assert not pin.restore_pins() and ask.called, f"missing {missing} accepted"
+                assert not pin._restoring and pin._restore_failed
                 pin._restore_failed = False
             # 旧会话只缺 locked 仍要恢复。
             session.write_text(json.dumps({"version": 1, "pins": [state]}))
-            warning.reset_mock()
-            assert pin.restore_pins() and not warning.called
+            ask.reset_mock()
+            assert pin.restore_pins() and not ask.called
         restored = next(w for w in pin._open_pins if w.pin_id == state["id"])
         assert not restored._locked
-        restored._allow_close = True
-        restored.close()
-        QTest.qWait(180)
+        close_restored()
+
+        # 混合正常、缺图和缺字段记录：正常贴图恢复，坏记录隔离，原会话完整备份。
+        good = {**state, "id": "b" * 32, "text": "good pin"}
+        no_image = {**state, "id": "c" * 32, "kind": "image", "dpr": 1.0}
+        broken = {k: v for k, v in {**state, "id": "d" * 32}.items() if k != "opacity"}
+        original = json.dumps({"version": 1, "pins": [good, no_image, broken]})
+        for choice in (False, True):
+            for old in directory.glob("session-backup-*.json"):
+                old.unlink()
+            session.write_text(original)
+            with patch("pin.ask_confirmation", return_value=choice) as ask:
+                assert not pin.restore_pins()
+            message = ask.call_args.args[2]
+            assert "图片缺失" in message and "opacity" in message, message
+            assert [w.pin_id for w in pin._open_pins] == [good["id"]]
+            backups = list(directory.glob("session-backup-*.json"))
+            assert len(backups) == 1 and backups[0].read_text() == original
+            assert pin._restore_failed is not choice
+            QTest.qWait(350)
+            saved = json.loads(session.read_text())
+            if choice:
+                assert [p["id"] for p in saved["pins"]] == [good["id"]], "continue did not resume autosave"
+            else:
+                assert session.read_text() == original, "paused restore overwrote session"
+            pin._restore_failed = False
+            close_restored()
     finally:
         session.unlink()
+        for old in directory.glob("session-backup-*.json"):
+            old.unlink()
         pin._restore_failed = False
 
 
@@ -526,6 +645,118 @@ def save_failure():
     w.deleteLater()
 
 
+def toolbar_stability():
+    from annotate import AnnotationWindow
+    geo = app.primaryScreen().availableGeometry()
+    # 右缘宽面板和上下换侧的临界位置，能发现只测屏幕上下两端遗漏的主条跳位。
+    positions = (QPoint(geo.left() + 250, geo.top() + 40),
+                 QPoint(geo.left() + 250, geo.bottom() - 120),
+                 QPoint(geo.right() - 249, geo.top() + 300),
+                 QPoint(geo.left() + 300, geo.bottom() - 194))
+    for pos in positions:
+        w = AnnotationWindow(sample(200, 100), pos)
+        w.show()
+        flush()
+        spots = set()
+        for tool in ("rect", "text", "arrow", "serial", "pencil", "mosaic", "eraser", "line", "magnifier", "rect"):
+            w.select_tool(tool)
+            flush()
+            w._toolbar._slide.stop()
+            w._position_toolbar()
+            flush()
+            bar = w._toolbar._button_row
+            spots.add(w._toolbar._buttons["geo"].mapToGlobal(QPoint()).toTuple())
+            options = w._toolbar._options
+            if not options.isHidden() and bar.mapToGlobal(QPoint()).x() + options.width() - 1 <= geo.right():
+                # 放得下时二级面板贴主条左缘；宽面板之后不能残留上一次的左移。
+                assert options.mapToGlobal(QPoint()).x() == bar.mapToGlobal(QPoint()).x(), (tool, pos)
+            if not options.isHidden() and bar.mapToGlobal(QPoint()).y() < w.y():
+                # 主条在选区上方时，二级面板应在主条上方，不能盖住截图。
+                assert not QRect(options.mapToGlobal(QPoint()), options.size()).intersects(w.geometry()), (tool, pos)
+        assert len(spots) == 1, f"toolbar buttons moved: {spots}"
+        assert geo.contains(w._toolbar.geometry()), (w._toolbar.geometry(), geo)
+        w.close()
+        w.deleteLater()
+    flush()
+
+
+def exit_confirmation():
+    from annotate import AnnotationWindow
+    from PySide6.QtGui import QUndoCommand
+    settings = get_settings()
+    settings.setValue("capture/confirm_exit", True)
+    with patch("annotate.window.MessageDialog") as dialog:
+        # 没有标注时直接退出，不打断。
+        w = AnnotationWindow(sample(), QPoint())
+        w.trigger_action("cancel")
+        assert not dialog.called and w._ended
+        # 有未保存的标注时确认；勾选不再提醒后记住。
+        w = AnnotationWindow(sample(), QPoint())
+        w._canvas._undo.push(QUndoCommand("mark"))
+        dialog.return_value.exec.return_value = QDialog.Accepted
+        dialog.return_value.checkbox.isChecked.return_value = True
+        w.trigger_action("cancel")
+        assert dialog.call_count == 1 and w._ended
+        assert not settings.value("capture/confirm_exit", True, type=bool)
+        w = AnnotationWindow(sample(), QPoint())
+        w._canvas._undo.push(QUndoCommand("mark"))
+        w.trigger_action("cancel")
+        assert dialog.call_count == 1 and w._ended, "不再提醒 ignored"
+    settings.setValue("capture/confirm_exit", True)
+    flush()
+
+
+def hotkey_settings():
+    from tray import HOTKEY_DEFAULTS, parse_hotkey
+    assert parse_hotkey("Ctrl+Alt+S") == (0x2 | 0x1, 0x53)
+    assert parse_hotkey("F1") == (0, 0x70) and parse_hotkey("Print") == (0, 0x2C)
+    for bad in ("S", "Shift+S", "Ctrl+Alt+Space", ""):
+        try:
+            parse_hotkey(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} accepted")
+    with TemporaryDirectory() as folder:
+        s = QSettings(str(Path(folder) / "settings.ini"), QSettings.IniFormat)
+        with patch("settings.dialog.get_settings", return_value=s), \
+             patch("settings.dialog.sys", SimpleNamespace(platform="win32")), \
+             patch("settings.dialog._write_autostart") as autostart, patch("settings.dialog.show_message") as warning:
+            # 新组合被占用：设置窗口不关，配置保持原值。
+            dialog = SettingsDialog(apply_hotkeys=lambda texts: "占用")
+            dialog._hotkeys["screenshot"].setKeySequence("Ctrl+Shift+A")
+            dialog._autostart.setChecked(True)
+            dialog._save()
+            assert warning.called and dialog.result() == 0 and s.value("hotkey/screenshot") is None
+            assert not autostart.called, "热键冲突不能提前写入自启设置"
+            applied = []
+            dialog._apply_hotkeys = lambda texts: applied.append(dict(texts))
+            autostart.side_effect = OSError("denied")
+            dialog._save()
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": HOTKEY_DEFAULTS["longshot"]}, HOTKEY_DEFAULTS]
+            assert s.value("hotkey/screenshot") is None
+            autostart.side_effect = None
+            # 两个功能撞键：确定前就拦下。
+            dialog._hotkeys["longshot"].setKeySequence("Ctrl+Shift+A")
+            assert not dialog._check_hotkeys() and dialog._hotkey_error.text()
+            applied = []
+            dialog._apply_hotkeys = lambda texts: applied.append(texts)
+            dialog._hotkeys["longshot"].setKeySequence("F1")
+            dialog._save()
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": "F1"}]
+            assert s.value("hotkey/screenshot") == "Ctrl+Shift+A" and s.value("hotkey/longshot") == "F1"
+            dialog.deleteLater()
+            if sys.platform == "win32":
+                applied.clear()
+                autostart.side_effect = OSError("synthetic registry failure")
+                dialog = SettingsDialog(apply_hotkeys=lambda texts: applied.append(texts))
+                dialog._hotkeys["screenshot"].setKeySequence("Ctrl+Shift+B")
+                dialog._save()
+                assert applied == [{"screenshot": "Ctrl+Shift+B", "longshot": "F1"},
+                                   {"screenshot": "Ctrl+Shift+A", "longshot": "F1"}]
+                assert dialog.result() == 0 and s.value("hotkey/screenshot") == "Ctrl+Shift+A"
+                dialog.deleteLater()
+
+
 def saved_settings():
     import settings.dialog as settings_module
     with TemporaryDirectory() as folder:
@@ -549,7 +780,9 @@ def saved_settings():
         destination = str(Path(folder) / "saved.jpg")
         with patch("export.image.get_settings", return_value=s), \
              patch("export.image.QFileDialog.getSaveFileName", return_value=(destination, "JPG (*.jpg)")) as choose:
+            app.clipboard().setText("preserve")
             w.trigger_action("save")
+            assert app.clipboard().text() == "preserve", "save replaced clipboard"
             assert re.search(r"GridStruct-V2_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.jpg$", choose.call_args.args[2])
             assert not QImage(destination).isNull()
         w.close()
@@ -604,6 +837,80 @@ def ocr_copy_text():
     dialog.deleteLater()
 
 
+def ocr_selection_paint():
+    from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
+    from PySide6.QtGui import QTextCursor
+    from ocr import OCRResult
+    plain = QPixmap(240, 60)
+    plain.fill(QColor(128, 128, 128))
+    scene = QGraphicsScene()
+    scene.addPixmap(plain)
+    layer = add_text_layer(scene, [OCRResult(QRect(10, 10, 200, 30), "Recognized text", .9)])
+    view = QGraphicsView(scene)
+    view.setFrameShape(QGraphicsView.NoFrame)
+    view.resize(240, 60)
+    view.show()
+    item = layer.childItems()[0]
+    cursor = item.textCursor()
+    cursor.select(QTextCursor.Document)
+    item.setTextCursor(cursor)
+    item.setFocus()
+    flush()
+    image = view.grab().toImage()
+    colors = {image.pixel(x, y) for x in range(12, 200) for y in range(14, 36)}
+    # 只叠半透明底色时选区内是均匀色块；重画了识别文字就会出现字形的抗锯齿像素。
+    assert len(colors) <= 2, f"selection repainted glyphs: {len(colors)} colors"
+    view.close()
+    view.deleteLater()
+
+
+def ocr_confirm_selection():
+    from capture import ScreenshotFlow, DesktopCapture, ScreenFrame
+    from ocr import OCRResult
+
+    source = sample(800, 600)
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(0, 0, 800, 600), source, QPoint())])
+    flow = ScreenshotFlow(app)
+    with patch("capture.flow.capture_virtual_desktop", return_value=shot):
+        for action, select, change_tool in (("confirm", True, False), ("confirm", False, False),
+                                            ("copy", True, False), ("confirm", True, True),
+                                            ("return", True, False), ("enter", True, False),
+                                            ("return", False, False), ("enter", False, False)):
+            flow.start()
+            flow._win._sel = QRect(30, 30, 300, 200)
+            flow._win.confirm()
+            window = flow._ann
+            window._show_text_layer([OCRResult(QRect(20, 20, 220, 30), "Recognized text 123", .99)])
+            flush()
+            if select:
+                item = window._text_layer.childItems()[0]
+                cursor = item.textCursor()
+                cursor.setPosition(0)
+                cursor.setPosition(10, QTextCursor.KeepAnchor)
+                item.setTextCursor(cursor)
+                window._canvas.setFocus()
+                item.setFocus()
+                QTest.keyClick(window._canvas.viewport(), Qt.Key_C, Qt.ControlModifier)
+                assert app.clipboard().text() == "Recognized"
+            if change_tool:
+                window.select_tool("arrow")
+            # 键盘确认也要走真实视口及 ScreenshotFlow 回调，避免只验证按钮而漏掉图片覆盖文字。
+            if action in ("return", "enter"):
+                key = Qt.Key_Return if action == "return" else Qt.Key_Enter
+                QTest.keyClick(window._canvas.viewport(), key)
+            else:
+                window._toolbar._buttons[action].click()
+            flush()
+            mime = app.clipboard().mimeData()
+            if action != "copy" and select and not change_tool:
+                assert app.clipboard().text() == "Recognized" and not mime.hasImage(), f"{action} 覆盖了 OCR 选中文字"
+            else:
+                assert mime.hasImage(), "普通确认或明确复制图片动作被改成了文字复制"
+            assert flow._win is None and flow._ann is None, "确认后截图会话未清理"
+    flow.deleteLater()
+    flush()
+
+
 def render_windows():
     from annotate import AnnotationWindow, ColorDialog
     from ocr import OCRResult, OCRResultDialog
@@ -637,8 +944,8 @@ if __name__ == "__main__":
     checks = [high_dpi_canvas, ocr_pixels, offline_models, empty_polyline,
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
-              real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, pin_lifecycle, save_failure,
-              longshot_lifecycle, saved_settings, canvas_mouse_events, ocr_copy_text, render_windows]
+              real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,
+              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)

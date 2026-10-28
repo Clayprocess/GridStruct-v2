@@ -64,10 +64,8 @@ class GridCanvas(QWidget):
     def set_grid(self, grid):
         """外部替换网格（换方案、撤销）时清掉选区，避免指向已不存在的格子。"""
         self.grid = grid
-        self._selected = {cell for cell in self._selected
-                          if cell[0] < grid.row_count and cell[1] < grid.column_count}
-        if self._cursor_cell is not None and self._cursor_cell not in self._selected:
-            self._cursor_cell = None
+        self._selected.clear()
+        self._anchor = self._cursor_cell = None
         self._dragging = self._hovered = self._keyboard_line = None
         self.selectionChanged.emit()
         self.update()

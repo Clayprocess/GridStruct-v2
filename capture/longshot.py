@@ -4,7 +4,8 @@
 # 全局鼠标钩子（Windows WH_MOUSE_LL）捕获滚轮 -> 截取选区 ->
 # 与已拼接图做重叠匹配 -> 完成/取消。
 #
-# 拼接只接受唯一且通过像素确认的重叠；失配后回滚定位保留整个已确认结果。
+# 拼接优先用唯一且逐像素一致的重叠；找不到时退回容差定位（参照 PixPin 的位移评分，
+# 仍要求最优位移唯一）。失配后回滚定位保留整个已确认结果。
 
 import sys
 from time import monotonic
@@ -17,7 +18,7 @@ from PySide6.QtCore import Qt, QRect, QPointF, Signal, QObject, QTimer
 from styles import tokens as T
 from ui import floating_window_type, show_message
 from .screen import ScreenManager, capture_virtual_desktop
-from .longshot_matching import find_overlap, find_viewport_end as _find_viewport_end
+from .longshot_matching import find_overlap, find_shift, find_viewport_end as _find_viewport_end
 
 _IS_WIN = sys.platform == "win32"
 MAX_STITCH_LENGTH = 29000
@@ -154,6 +155,7 @@ class ImageStitcher:
         self._horizontal = horizontal
         self._preserve_tail = False
         self._viewport_end = 0
+        self._header = self._footer = 0
 
     def relocate(self, pm: QPixmap) -> bool:
         """恢复定位只移动视口，绝不执行普通反向滚动的裁尾。"""
@@ -161,7 +163,7 @@ class ImageStitcher:
             pm = pm.transformed(QTransform().rotate(90))
         if pm.width() != self._stitched.width() or pm.devicePixelRatio() != self._stitched.devicePixelRatio():
             return False
-        end = _find_viewport_end(self._stitched, pm)
+        end = _find_viewport_end(self._stitched, pm, header=self._header, footer=self._footer)
         if not end:
             return False
         self._viewport_end = end
@@ -186,7 +188,7 @@ class ImageStitcher:
         if pm.width() != self._stitched.width() or pm.devicePixelRatio() != self._stitched.devicePixelRatio():
             return False
         if self._preserve_tail:
-            end = _find_viewport_end(self._stitched, pm)
+            end = _find_viewport_end(self._stitched, pm, header=self._header, footer=self._footer)
             if end:
                 self._viewport_end = end
                 self._last_input = QPixmap(pm)
@@ -194,33 +196,44 @@ class ImageStitcher:
             if reverse:
                 return False
         elif reverse:
-            end = _find_viewport_end(self._stitched, pm)
+            end = _find_viewport_end(self._stitched, pm, header=self._header, footer=self._footer)
             if not end or end >= self._stitched.height():
                 return False
             self._stitched = self._stitched.copy(0, 0, pm.width(), end)
+            if self._footer:
+                # 裁尾处原本是滚动正文，必须以当前视口的底栏收尾。
+                footer = pm.copy(0, pm.height() - self._footer, pm.width(), self._footer)
+                with QPainter(self._stitched) as painter:
+                    painter.drawPixmap(QPointF(0, (end - self._footer) / pm.devicePixelRatio()), footer)
             self._last_input = QPixmap(pm)
             self._viewport_end = end
             return True
-        cut = find_overlap(self._stitched, pm)
-        if cut <= 0 or cut >= pm.height():
+        header, footer = self._header, self._footer
+        cut = find_overlap(self._stitched, pm, header=header, footer=footer)
+        if cut <= 0 and not self._preserve_tail:
+            # 精确重叠失败（抗锯齿抖动、闪烁光标、吸顶/吸底栏）：结果末尾就是上一帧，改用容差定位。
+            cut, header, footer = find_shift(self._last_input, pm)
+        if cut <= 0 or cut >= pm.height() - footer:
             return False
         dpr = pm.devicePixelRatio() or 1.0
-        cut_px = cut
-        bottom = pm.copy(0, cut_px, pm.width(), pm.height() - cut_px)
+        bottom = pm.copy(0, cut, pm.width(), pm.height() - cut)
         w = self._stitched.width()
-        remaining = MAX_STITCH_LENGTH - self._stitched.height()
+        # 底栏在每帧同一位置：先去掉结果末尾的旧底栏，再接上新内容和新底栏。
+        kept = self._stitched.height() - footer
+        remaining = MAX_STITCH_LENGTH - kept
         if remaining <= 0:
             return False
         bottom = bottom.copy(0, 0, w, min(bottom.height(), remaining))
-        h = self._stitched.height() + bottom.height()
+        h = kept + bottom.height()
         out = QPixmap(w, h)
         if out.isNull():
             return False
         out.setDevicePixelRatio(dpr)
         with QPainter(out) as p:
-            p.drawPixmap(0, 0, self._stitched)
-            p.drawPixmap(QPointF(0, self._stitched.deviceIndependentSize().height()), bottom)
+            p.drawPixmap(QPointF(0, 0), self._stitched, QRect(0, 0, w, kept))
+            p.drawPixmap(QPointF(0, kept / dpr), bottom)
         self._stitched = out
+        self._header, self._footer = header, footer
         self._last_input = QPixmap(pm)
         self._viewport_end = h
         self._preserve_tail = False

@@ -64,8 +64,8 @@ from PySide6.QtGui import QDesktopServices
 
 from styles import apply_theme
 from styles import tokens as T
-from ui import tinted_icon, show_desktop_check, show_message
-from tray import create_tray, GlobalHotkey, MOD_CONTROL, MOD_ALT
+from ui import app_icon, tinted_icon, show_desktop_check, show_message
+from tray import create_tray, GlobalHotkey, HOTKEY_DEFAULTS, parse_hotkey
 from capture import ScreenshotFlow, ScreenManager
 
 from pin import show_pin_from_clipboard, restore_pins, save_pins, shutdown_pins, disable_click_through
@@ -90,6 +90,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setProperty("desktop_check", desktop_check)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(app_icon(T.APP_ICON_COLOR))
     app.setQuitOnLastWindowClosed(False)  # 常驻托盘：无窗口时不退出
     ScreenManager.instance()
 
@@ -112,8 +113,8 @@ def main() -> int:
         show_pin_from_clipboard()
 
     def _open_settings():
-        SettingsDialog().exec()
-        tray_icon.setIcon(tinted_icon("pin", T.THEMES[app.property("theme_mode")]["foreground"], 16))
+        SettingsDialog(apply_hotkeys=_apply_hotkeys).exec()
+        tray_icon.setIcon(app_icon(T.THEMES[app.property("theme_mode")]["foreground"]))
 
     def _exit():
         if shutdown_pins():
@@ -143,9 +144,34 @@ def main() -> int:
     print("[GridStruct-V2] 托盘已创建")
 
     hotkey = GlobalHotkey(app)
-    hotkey.register(callbacks["screenshot"])
-    hotkey.set_hotkey(MOD_CONTROL | MOD_ALT, ord("L"))
-    hotkey.register(callbacks["longshot"])
+    bound = {}  # 名称 -> (注册 id 或 None, 组合键文本)
+    for name, default in HOTKEY_DEFAULTS.items():
+        text = config.value(f"hotkey/{name}", default)
+        try:
+            parse_hotkey(text)
+        except ValueError:
+            # 配置被手改坏时退回默认键，不能让截图入口失效。
+            text = default
+        bound[name] = (hotkey.register(text, callbacks[name]), text)
+
+    def _apply_hotkeys(texts):
+        """设置确认前调用：新组合全部注册成功才替换旧的，任何一个失败都保留旧热键并返回原因。"""
+        added = {}
+        for name, text in texts.items():
+            hid, current = bound[name]
+            if text == current and hid is not None:
+                continue
+            new = hotkey.register(text, callbacks[name], warn=False)
+            if new is None:
+                for done in added.values():
+                    hotkey.release(done)
+                return f"[{text}] 无法注册，可能已被其他程序占用，请换一个组合。"
+            added[name] = new
+        for name, new in added.items():
+            if bound[name][0] is not None:
+                hotkey.release(bound[name][0])
+            bound[name] = (new, texts[name])
+        return None
 
     QTimer.singleShot(0, restore_pins)
     app.aboutToQuit.connect(save_pins)
