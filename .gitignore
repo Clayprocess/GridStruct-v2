@@ -5,6 +5,6 @@ user-data/
 build/
 dist/
 
-# 本机逆向导出、测量日志与离屏截图由 tools/ 生成，不纳入产品版本。
+# 本机调查记录、测量日志与离屏截图由 tools/ 生成，不纳入产品版本。
 /.scratch/
 /.local-run/

@@ -1,15 +1,15 @@
 # 智能吸附：鼠标悬停时自动识别窗口/控件矩形。
 #
-# 逆向依据（PixPin 3.5.5.1, UiRegionDetector.dll）：
+# 设计参考成熟截图工具的常见做法：
 #   三级检测：UIA 元素矩形 -> Win32 窗口矩形 -> 有效性校验，
 #   后台线程异步，结果经信号回传，带矩形缓存。
 #
 # 本实现：窗口快照同步点查，两条后台精化并行：
 #   1. 每窗口一次 UIAutomation 广度遍历，覆盖工具栏等浅层控件，同窗内移动零调用；
-#   2. 鼠标点命中（同 PixPin 2026-10-26 反编译的日常后端）：MSAA 从窗口对象起逐层
+#   2. 鼠标点命中（参考成熟截图工具）：MSAA 从窗口对象起逐层
 #      accHitTest，最多 31 层，每层 accLocation 得到“窗口 → … → 最内层控件”的整条路径，
 #      深层和小控件靠它补齐；命中矩形仍包含鼠标时不再查询。单次查询超过 300ms 的窗口
-#      之后只用窗口快照和遍历结果（PixPin 同样把慢窗口降级为 HWND 后端）。
+#      之后只用窗口快照和遍历结果（慢窗口降级为只用窗口矩形）。
 # 非 Windows 平台返回空（Linux 开发机不断）。
 
 import ctypes
@@ -186,7 +186,7 @@ class RegionDetector(QObject):
 
     def _request_point(self, key, hwnd, x, y):
         hits = self._hits.get(key)
-        # 最内层命中仍包含鼠标就沿用（同 PixPin 的矩形包含短路），换控件才再问一次。
+        # 最内层命中仍包含鼠标就沿用（矩形包含短路），换控件才再问一次。
         # 结果只沿用 1 秒：Chrome 等程序首次被查询后才逐步建好无障碍树，停住不动也要能细化。
         if key in self._slow or (hits is not None and hits[0].contains(x, y)
                                  and time.monotonic() - hits[2] < _HIT_REUSE_S):
@@ -443,7 +443,7 @@ def _window_at(user32, x, y, ignored_hwnd):
 
 # 控件最小边长（物理像素）：任务栏、托盘、标签页关闭按钮这类小图标也要能框到。
 _MIN_ELEMENT = 4
-# 单次点命中超过这个耗时的窗口，之后不再做点命中（同 PixPin 的 300ms 降级）。
+# 单次点命中超过这个耗时的窗口，之后不再做点命中（300ms 降级）。
 _SLOW_POINT_MS = 300
 # 点命中结果的沿用时长（秒）。
 _HIT_REUSE_S = 1.0
