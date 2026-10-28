@@ -20,7 +20,7 @@ from tray import HOTKEY_DEFAULTS, parse_hotkey
 from .storage import get_settings
 
 _ORG, _APP = "GridStruct", "GridStruct"
-_VERSION = "0.1.0"
+_VERSION = "0.2.0"
 # 保留旧版内部标识，避免升级后自启项失联或重复。
 _AUTOSTART_VALUE = "PixShot"
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
