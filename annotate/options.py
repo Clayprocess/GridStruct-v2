@@ -14,10 +14,6 @@ from styles import tokens as T
 from ui import paint_svg, painted_icon, round_corners, tinted_icon
 from ui.motion import SelectionPill, fade_in
 from .items import ArrowMarkItem, LineMarkItem, MarkStyle, SerialMarkItem, arrow_heads
-from .toolbar import TOOL_GROUPS, MORE_TOOLS
-
-_TOOL_LABELS = {tool: label for tool, label, _icon in
-                [*(entry for _group, entries in TOOL_GROUPS for entry in entries), *MORE_TOOLS]}
 
 _COLOR_NAMES = ("红", "黑", "白", "蓝", "绿", "黄")
 # 粗细预设覆盖默认值 3，其余值用旁边的数字框或滚轮微调。
@@ -303,12 +299,11 @@ class ToolOptions(QWidget):
         self._layout.setSpacing(4)
         self._bindings = []
         self._tool_id = ""
-        self._editing = False
         canvas.optionsChanged.connect(self.sync_tool)
         self.setVisible(False)
 
     def sync_tool(self, tool_id):
-        if tool_id != self._tool_id or bool(self._canvas.selection_count) != self._editing:
+        if tool_id != self._tool_id:
             self.set_tool(tool_id)
         else:
             self._sync(tool_id)
@@ -320,20 +315,11 @@ class ToolOptions(QWidget):
                 item.widget().deleteLater()
         self._bindings.clear()
         self._tool_id = tool_id
-        self._editing = bool(self._canvas.selection_count)
         self.setVisible(bool(tool_id))
         if not tool_id:
             return
-        self._context_label = self._label("")
-        self._resume = QToolButton()
-        self._resume.setProperty("class", "ghost")
-        self._resume.setIcon(tinted_icon("pencil", _theme()["foreground"]))
-        self._resume.setAccessibleName("继续绘制")
-        self._resume.clicked.connect(self._canvas.resume_drawing)
-        self._layout.addWidget(self._resume)
-        self._separator()
         more = []
-        if tool_id in ("rect", "ellipse") and self._canvas.tool_id == tool_id and not self._editing:
+        if tool_id in ("rect", "ellipse") and self._canvas.tool_id == tool_id:
             self._geo_shape(tool_id)
             self._separator()
         if tool_id not in ("mosaic", "eraser", "magnifier"):
@@ -698,15 +684,6 @@ class ToolOptions(QWidget):
     def _sync(self, tool_id):
         if tool_id != self._tool_id:
             return
-        if not tool_id:
-            return
-        count = self._canvas.selection_count
-        label = _TOOL_LABELS[tool_id]
-        self._context_label.setText(f"编辑已选：{label} ×{count}" if count else f"绘制：{label}")
-        self._context_label.setToolTip("属性仅影响选中的标注" if count else "属性用于下一笔；Ctrl 点选已有标注进行修改")
-        drawing_tool = self._canvas.drawing_tool_id
-        self._resume.setVisible(bool(count and drawing_tool))
-        self._resume.setToolTip(f"继续绘制{_TOOL_LABELS.get(drawing_tool, '')}，保留下一笔的原样式")
         style = self._canvas.style
         for key, widget, refresh in self._bindings:
             widget.setEnabled(self._canvas.style_key_enabled(key))

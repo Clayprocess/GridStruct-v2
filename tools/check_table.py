@@ -406,31 +406,22 @@ def check_review_navigation(app):
     assert (table.currentRow(), table.currentColumn()) == (0, 0)
     dialog._commit_editor()
     assert dialog._review.document.pending_count == 0 and not dialog._next_shortcut.isEnabled()
-    with patch("table.dialog.ask_confirmation") as confirm, patch("table.dialog.show_toast"):
+    with patch("table.dialog.show_toast") as toast:
         dialog._copy()
-        assert not confirm.called
-        assert "丁改" in app.clipboard().text()
+        assert "丁改" in app.clipboard().text() and "待复核" not in toast.call_args.args[0]
     dialog._undo()
     assert dialog._review.document.pending_count == 1
-    app.clipboard().setText("keep clipboard")
-    with patch("table.dialog.ask_confirmation", return_value=False) as confirm, \
-            patch("table.dialog.QFileDialog.getSaveFileName") as save:
+    # 仍有待复核时照常输出，只在提示里带上剩余数量，不弹窗拦截。
+    with patch("table.dialog.show_toast") as toast:
         dialog._copy()
-        assert app.clipboard().text() == "keep clipboard" and table.hasFocus()
-        assert (table.currentRow(), table.currentColumn()) == (0, 0)
-        assert "1" in confirm.call_args.args[2]
-        dialog._export_file()
-        assert not save.called
-    with patch("table.dialog.ask_confirmation", return_value=True), patch("table.dialog.show_toast"):
-        dialog._copy()
-        assert "丁改" in app.clipboard().text()
+        assert "丁改" in app.clipboard().text() and "还有 1 处待复核" in toast.call_args.args[0]
     dialog._redo()
     assert dialog._review.document.pending_count == 0
     dialog.close()
     app.processEvents()
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     app.clipboard().clear()
-    print("PASS: pending navigation, merged-cell editing, output choice and undo/redo")
+    print("PASS: pending navigation, merged-cell editing, output with pending note and undo/redo")
 
 
 def main():

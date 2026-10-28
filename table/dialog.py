@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from styles import tokens as T
-from ui import BaseDialog, ask_confirmation, show_message, show_toast, tinted_icon
+from ui import BaseDialog, show_message, show_toast, tinted_icon
 from . import export
 from .editor import ADD_HORIZONTAL, ADD_VERTICAL, DELETE, SELECT, GridCanvas
 from .grid import STRATEGY_LABELS
@@ -376,33 +376,23 @@ class TableDialog(BaseDialog):
             else:
                 self._table.setFocus()
 
-    def _allow_output(self, action):
-        self._commit_editor()
+    def _pending_note(self):
+        # 不拦输出：xlsx 会标黄加批注，复制和其他格式只在提示里带上剩余数量。
         count = self._review.document.pending_count
-        if not count:
-            return True
-        accepted = ask_confirmation(self, "仍有待复核单元格",
-                                    f"还有 {count} 处文字尚未复核。可返回校对，也可以保留待复核状态继续{action}。",
-                                    confirm_text=f"仍然{action}", cancel_text="返回校对")
-        if not accepted:
-            self.activateWindow()
-            self._focus_cell(*self._review.pending_cells()[0])
-        return accepted
+        return f"；还有 {count} 处待复核" if count else ""
 
     def _copy(self):
         if self._review is None:
             return
-        if not self._allow_output("复制"):
-            return
+        self._commit_editor()
         data = QMimeData()
         data.setText(export.to_tsv(self._review.document))
         data.setHtml(export.to_html(self._review.document))
         QApplication.clipboard().setMimeData(data)
-        show_toast("已复制表格，可直接粘贴到 Excel / WPS")
+        show_toast("已复制表格，可直接粘贴到 Excel / WPS" + self._pending_note())
 
     def _export_file(self):
-        if not self._allow_output("导出"):
-            return
+        self._commit_editor()
         from settings import get_settings
         settings = get_settings()
         directory = settings.value("table/export_dir", "") or QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
@@ -419,7 +409,7 @@ class TableDialog(BaseDialog):
             return
         settings.setValue("table/export_dir", str(Path(path).parent))
         QApplication.clipboard().setText(path)
-        show_toast("已导出，文件路径已复制")
+        show_toast("已导出，文件路径已复制" + self._pending_note())
 
     # ---- 缩放 ----
 

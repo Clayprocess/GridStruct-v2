@@ -51,7 +51,6 @@ class AnnotationCanvas(QGraphicsView):
                 setattr(style, key, value)
         self._style = self.styles["rect"]
         self._tool_id = ""
-        self._resume_tool_id = ""
         self._moving = None
         self._move_start = None
         self._selection_style = None
@@ -90,7 +89,6 @@ class AnnotationCanvas(QGraphicsView):
         self._clear_brush_preview()
         self._finish_tool()
         self._style = self.styles[tool_id]
-        self._resume_tool_id = ""
         tool = create_tool(tool_id, self._style)
         if tool is None:
             return False
@@ -118,7 +116,6 @@ class AnnotationCanvas(QGraphicsView):
         self._clear_brush_preview()
         self._tool = None
         self._tool_id = ""
-        self._resume_tool_id = ""
         if self._loupe is not None:
             self._loupe.close()
             self._loupe = None
@@ -132,20 +129,6 @@ class AnnotationCanvas(QGraphicsView):
     @property
     def selection_count(self):
         return len(self._selected_marks())
-
-    @property
-    def drawing_tool_id(self):
-        return self._resume_tool_id or self._tool_id
-
-    def resume_drawing(self):
-        """结束对象编辑并回到原绘制工具，选中对象的样式不写回下一笔。"""
-        tool_id = self.drawing_tool_id
-        self._finish_tool()
-        self._scene.clearSelection()
-        self._scene.clearFocus()
-        if tool_id:
-            self.set_tool_by_id(tool_id)
-        self.restore_focus()
 
     def restore_focus(self):
         # 浮动工具条是独立窗口，仅 setFocus 不会把键盘从工具条还给画布。
@@ -466,9 +449,7 @@ class AnnotationCanvas(QGraphicsView):
             self._moving = None
             self._move_start = None
             self._drawing = False
-            previous_tool = self.drawing_tool_id
             self.set_tool_by_id("text")
-            self._resume_tool_id = previous_tool
             self._tool.edit(item, self._scene, self._undo)
             item.setSelected(True)
             super().mouseDoubleClickEvent(e)

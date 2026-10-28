@@ -667,8 +667,10 @@ def toolbar_stability():
             bar = w._toolbar._button_row
             spots.add(w._toolbar._buttons["geo"].mapToGlobal(QPoint()).toTuple())
             options = w._toolbar._options
-            if not options.isHidden() and bar.mapToGlobal(QPoint()).x() + options.width() - 1 <= geo.right():
-                # 放得下时二级面板贴主条左缘；宽面板之后不能残留上一次的左移。
+            right_margin = w._toolbar._root_layout.contentsMargins().right()
+            if (not options.isHidden()
+                    and bar.mapToGlobal(QPoint()).x() + options.width() + right_margin - 1 <= geo.right()):
+                # 连同窗口右侧留白都放得下时，二级面板贴主条左缘；宽面板之后不能残留上一次的左移。
                 assert options.mapToGlobal(QPoint()).x() == bar.mapToGlobal(QPoint()).x(), (tool, pos)
             if not options.isHidden() and bar.mapToGlobal(QPoint()).y() < w.y():
                 # 主条在选区上方时，二级面板应在主条上方，不能盖住截图。
@@ -855,19 +857,21 @@ def drawing_interaction():
             assert canvas._undo.count() == before + 2, f"{name} 第二笔移动了已有标注"
             stroke((120, 60), (240, 120), double_click=True)
             assert canvas._undo.count() == before + 3, f"{name} 快速第二笔被双击事件吞掉"
-            assert canvas.selection_count == 0 and window._options._context_label.text().startswith("绘制：")
+            assert canvas.selection_count == 0
             position = canvas.mapFromScene(QPointF(170, 60))
             QTest.mouseClick(canvas.viewport(), Qt.LeftButton, Qt.ControlModifier, pos=position)
             flush()
-            assert canvas.selection_count == 1 and window._options._context_label.text().startswith("编辑已选：")
+            assert canvas.selection_count == 1
             original = canvas.styles[name].width
             selected = canvas._selected_marks()[0]
             if name != "mosaic":
                 canvas.update_style("width", original + 3)
                 assert selected.style.width == original + 3 and canvas.styles[name].width == original
-            window._options._resume.click()
-            flush()
-            assert canvas.tool_id == name and canvas.selection_count == 0 and canvas.hasFocus()
+            # 落下一笔即退出对象编辑，仍用工具原来的默认样式。
+            before = canvas._undo.count()
+            stroke((80, 200), (260, 220))
+            assert canvas.tool_id == name and canvas.selection_count == 0 and canvas._undo.count() == before + 1
+            assert canvas.styles[name].width == original
             # 每种工具独立验收，避免命中此前工具留下的重叠笔迹。
             while canvas._undo.canUndo():
                 canvas.undo()
@@ -1022,10 +1026,16 @@ def ocr_confirm_selection():
                 window._toolbar._buttons[action].click()
             flush()
             mime = app.clipboard().mimeData()
-            if select and not change_tool:
+            if action == "ctrl-c" and select:
+                # 选字时 Ctrl+C 只复制文字，截图会话继续。
+                assert app.clipboard().text() == "Recognized" and not mime.hasImage()
+                assert flow._ann is window and window.isVisible(), "Ctrl+C 复制选中文字后不应结束截图"
+                window._toolbar._buttons["cancel"].click()
+                flush()
+            elif select and not change_tool and action != "copy":
                 assert app.clipboard().text() == "Recognized" and not mime.hasImage(), f"{action} 覆盖了 OCR 选中文字"
             else:
-                assert mime.hasImage(), "无 OCR 选区时应复制截图"
+                assert mime.hasImage(), "普通确认或明确复制图片动作被改成了文字复制"
             assert flow._win is None and flow._ann is None, "确认后截图会话未清理"
     flow.deleteLater()
     flush()

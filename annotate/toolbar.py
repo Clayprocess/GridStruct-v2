@@ -454,10 +454,11 @@ class FloatPanel(QWidget):
         self._buttons["undo"].setEnabled(enabled)
 
     def set_copy_text_selected(self, selected: bool):
+        # 选字时 Ctrl+C 只复制文字不结束，只有按钮和 Enter 会复制文字并结束。
         label = "复制选中文字" if selected else "复制截图"
         button = self._buttons[CONFIRM_ID]
         button.setAccessibleName(label)
-        button.setToolTip(f"{label}并结束截图（Ctrl+C / Enter）")
+        button.setToolTip(f"{label}并结束（{'Enter' if selected else 'Ctrl+C / Enter'}）")
 
     def set_tool(self, tool_id: str) -> None:
         """程序化选中标注工具，与用户点击发出同样的信号。tool_id 也可以是组 id，如 "geo"。"""

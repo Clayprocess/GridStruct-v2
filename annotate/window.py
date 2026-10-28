@@ -210,7 +210,7 @@ class AnnotationWindow(QWidget):
         elif action == "redo":
             self._canvas.redo()
             self._focus_canvas()
-        elif action in ("confirm", "copy") and self._ocr_selected_text:
+        elif action == "confirm" and self._ocr_selected_text:
             # 完成原图选字时不能再发图片输出信号，否则会覆盖刚复制的文字。
             QApplication.clipboard().setText(self._ocr_selected_text)
             show_toast("已复制选中文字")
@@ -282,7 +282,12 @@ class AnnotationWindow(QWidget):
                 and (obj is self._canvas or obj is self._canvas.viewport())):
             return False
         if event.matches(QKeySequence.Copy) and not isinstance(obj, (QLineEdit, QAbstractSpinBox, QComboBox)):
-            self._on_action("copy")
+            if self._ocr_selected_text:
+                # 原图选字时 Ctrl+C 只复制文字、留在截图里，可以接着选下一段。
+                QApplication.clipboard().setText(self._ocr_selected_text)
+                show_toast("已复制选中文字")
+            else:
+                self._on_action("copy")
             event.accept()
             return True
         # 面板控件会先消化字母和撤销，工具命令必须在 QWidget 的局部编辑之前分发。
