@@ -477,6 +477,62 @@ QFrame#SizeEditor {{
     border-radius: {T.RADIUS_LG}px;
 }}
 
+/* ===== 表格识别（table/dialog.py）===== */
+QScrollArea#TableCanvasArea {{
+    background-color: {t['muted']};
+    border: 1px solid {t['border']};
+    border-radius: {r}px;
+}}
+QScrollArea#TableCanvasArea > QWidget#qt_scrollarea_viewport {{
+    background-color: {t['muted']};
+}}
+QTableWidget {{
+    background-color: {t['card']};
+    alternate-background-color: {t['card']};
+    border: 1px solid {t['border']};
+    border-radius: {r}px;
+    gridline-color: {t['border']};
+    selection-background-color: {t['accent']};
+    selection-color: {t['accent_foreground']};
+}}
+QTableWidget QLineEdit, QTableWidget QPlainTextEdit {{
+    border-radius: 0;
+    padding: 2px 4px;
+}}
+QHeaderView::section {{
+    background-color: {t['muted']};
+    color: {t['muted_foreground']};
+    border: none;
+    border-right: 1px solid {t['border']};
+    border-bottom: 1px solid {t['border']};
+    padding: 3px 6px;
+    font-size: {T.FONT_SM}px;
+}}
+QTableCornerButton::section {{
+    background-color: {t['muted']};
+    border: none;
+    border-right: 1px solid {t['border']};
+    border-bottom: 1px solid {t['border']};
+}}
+QFrame#TableToolSeparator {{
+    background-color: {t['border']};
+    border: none;
+    min-width: 1px;
+    max-width: 1px;
+    margin: 6px 4px;
+}}
+QLabel#TableStatus {{
+    color: {t['muted_foreground']};
+    font-size: {T.FONT_SM}px;
+}}
+QLabel#TablePending {{
+    background-color: {t['pending']};
+    color: {t['foreground']};
+    border-radius: {T.RADIUS_SM}px;
+    padding: 3px 8px;
+    font-size: {T.FONT_SM}px;
+}}
+
 /* ===== 贴图（pin/window.py）：卡片本体由 paintEvent 画，这里只管浮动提示 ===== */
 /* 提示浮在任意截图内容上，明暗主题都用深底浅字，与截图尺寸提示同源。 */
 QLabel#PinHud, QLabel#Toast {{

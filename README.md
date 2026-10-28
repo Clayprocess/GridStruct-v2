@@ -13,6 +13,7 @@ Windows 本地截图、标注、贴图与 OCR 工具，对标 PixPin 的常用�
 - **图片和文字贴图**：拖动、滚轮缩放、`Ctrl+滚轮`调不透明度（每格 5%，10%～100%）、方向键微移、中键切换原始大小、`Space` 标注（确认后替换贴图）、`T` 置顶、`L` 锁定、鼠标穿透（穿透时不透明度最高 50%）；`Esc`、`Ctrl+W` 或双击关闭。阴影颜色区分状态：蓝色为当前、灰色为非当前、橙色为锁定、绿色为穿透；托盘可退出所有贴图的鼠标穿透。文字支持滑选复制，右键编辑；图片支持 OCR。应用退出后恢复未关闭的贴图，主动关闭的贴图不会再次恢复。
 - **长截图**：手动/自动滚动、纵向/横向拼接、开始/暂停/继续、预览和完成后标注。连续采集只抓选区，唯一重叠经原像素确认后追加。失配时控制条提示回滚，重新定位自动恢复且保留历史；普通反向滚动仍在唯一匹配时裁尾。目标窗口变化或达到上限时暂停。不同滚动应用的兼容性仍需实机确认，阶段 A 验收与性能边界见[验收记录](docs/stage-a-longshot-acceptance.md)。
 - **OCR**：后台串行本地识别，区分排队、首次加载、识别、完成/空结果、取消和失败/超时。保留原始四点框、文字与置信度，用稳定条目标识整理版面。截图和图片贴图叠加可选文字层；右键打开逐条/逐段校正，原图、复制全文和贴图同步更新；全文自由编辑作为独立导出草稿。相同截图转贴图复用结果，校正和草稿随会话恢复；图像内容变化后结果失效。使用随项目提供的 PP-OCRv6 small 检测/识别模型和本地方向分类模型，不在识别时下载模型。验收范围见[B–D 记录](docs/stages-bcd-ocr-acceptance.md)。
+- **表格识别**：截图工具条“更多工具”、图片贴图右键菜单、文字识别结果窗口（按表格整理）都能进入。本地 OCR 文字框 + 原图表格线 + SLANet_plus 结构模型给出候选网格并打分择优（方案移植自 v1）；左侧对照原图拖动、添加、删除行列线，框选格子合并/取消合并，右侧实时按文字框重新分格，可直接改字。人工改过或确认过的格子不会被重新分格覆盖，网格和改字都能撤销。低置信度格子标为待复核。复制时同时放 TSV 和 HTML，粘贴到 Excel/WPS 保留合并单元格；可导出 xlsx（按文本写入，待复核格标黄加批注）、CSV、HTML。
 - **设置与托盘**：明暗/系统主题、截图保存选项、工具颜色联动、部分工具偏好记忆、开机启动和关于页。当前截图热键固定为 `Ctrl+Alt+S`，设置页展示该快捷键。
 
 ## 从源码运行
@@ -27,13 +28,16 @@ python -m venv .venv
 
 应用常驻系统托盘，无常规主窗口。按 `Ctrl+Alt+S` 框选，使用浮动工具条开始标注或输出；双击选区或按 Enter 复制截图并结束。右键托盘可打开设置、从剪贴板创建贴图、开始长截图或退出。
 
-运行依赖为 PySide6、RapidOCR 和 onnxruntime。安装依赖需要对应安装源；安装完成且本地模型齐全后，OCR 推理不需要联网。以下文件必须位于 `assets/models/`：
+运行依赖为 PySide6、RapidOCR、onnxruntime 和 XlsxWriter（表格导出 xlsx）。安装依赖需要对应安装源；安装完成且本地模型齐全后，OCR 推理不需要联网。以下文件必须位于 `assets/models/`：
 
 ```text
 PP-OCRv6_det_small.onnx
 PP-OCRv6_rec_small.onnx
 ch_ppocr_mobile_v2.0_cls_mobile.onnx
+slanet-plus.onnx
 ```
+
+`slanet-plus.onnx` 是表格结构模型（7.4 MB，Apache-2.0），与 rapid-table 1.0.3 包内文件相同，SHA256 `d57a942af6a2f57d6a4a0372573c696a2379bf5857c45e2ac69993f3b334514b`；由 onnxruntime 直接加载，不依赖 rapid-table。
 
 长截图控制条和遮罩的窗口捕获排除依赖 Windows 10 2004 或更新版本。多显示器和 DPI 适配已有实现，混合缩放组合需要在实际设备上确认。
 
@@ -69,7 +73,8 @@ ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使
 | `annotate/` | 标注画布、工具、样式和浮动工具条 | `AnnotationWindow`、`AnnotationCanvas`、`MarkStyle`、`FloatPanel`、`create_tool`；输出动作调用其他模块的公开接口 |
 | `pin/` | 图片/文字贴图、窗口管理、会话保存恢复 | `show_pin`、`show_text_pin`、`show_pin_from_clipboard`、`restore_pins`、`save_pins`、`shutdown_pins`、`disable_click_through`；图片识别调用 OCR 接口 |
 | `ocr/` | 原始证据和校正文档、本地推理、后台任务、复核对话框与文字层 | `OCREngine`、`OCRResult`、`OCRDocument`、`OCRController`、`OCRResultDialog`、`add_text_layer`、`format_text`；不包含表格/公式识别 |
-| `export/` | 截图图片保存与保存路径复制 | `save_image`；当前支持 PNG/JPG，不包含 xlsx 导出 |
+| `table/` | 表格网格分析、网格编辑与校对窗口、表格导出 | `open_table`、`TableDialog`；文字框来自 `ocr` 的 `OCREngine`/`OCRResult`，网格与文档是纯数据（`table/model.py`） |
+| `export/` | 截图图片保存与保存路径复制 | `save_image`；当前支持 PNG/JPG；表格的 xlsx/CSV 导出在 `table/` |
 | `settings/` | 设置窗口、便携 INI 和数据目录 | `SettingsDialog`、`get_settings`、`data_directory` |
 | `tray/` | 托盘入口和 Windows 全局热键 | `create_tray`、`GlobalHotkey` |
 | `styles/` | 设计 tokens 与主题 | `tokens`、`apply_theme`；视觉值只定义在 `styles/tokens.py`，QSS 只写在 `styles/theme.py` |
@@ -79,7 +84,7 @@ UI 使用 PySide6 Qt Widgets，不使用 QML。业务模块通过动态属性选
 
 ## 范围外功能
 
-表格/公式识别、动图/文件/LaTeX 贴图、单文件 EXE 属于 P1；本轮不实现 AI 自动打码、曲线等扩展标注功能。翻译以后另议。
+公式识别、动图/文件/LaTeX 贴图、单文件 EXE 属于 P1；本轮不实现 AI 自动打码、曲线等扩展标注功能。翻译以后另议。
 
 不做会员、登录、订阅、云同步、兑换码、工业条码、TTS、摄像头画中画、录屏剪辑和多语种切换界面。当前也不提供可浏览的贴图历史库或完整的自定义热键管理。
 

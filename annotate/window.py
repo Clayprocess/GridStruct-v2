@@ -188,6 +188,13 @@ class AnnotationWindow(QWidget):
             self._ocr.start(self._render())
         elif action == "ocr_results":
             self._ocr.show_results()
+        elif action == "table":
+            # 表格窗口接手这张图继续校对，同贴图一样结束截图会话；同图已有 OCR 时直接复用。
+            from table import open_table
+            pixmap = self._render()
+            document = self._ocr.document
+            open_table(pixmap, document.raw_results if document is not None and document.matches(pixmap) else None)
+            self.close()
         elif action == "pipette":
             self._toggle_pipette(not self._canvas.pipette_active)
         elif action == "longshot":

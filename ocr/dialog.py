@@ -155,6 +155,12 @@ class OCRResultDialog(BaseDialog):
         self._copy_selection.setProperty("class", "outline")
         self._copy_selection.setEnabled(False)
         self._copy_selection.clicked.connect(self._copy_selected)
+        to_table = QPushButton("按表格整理…")
+        to_table.setProperty("class", "outline")
+        to_table.setToolTip("复用本次识别的文字，在原图上划分行列后导出 Excel")
+        to_table.setEnabled(not self._document.image.isNull())
+        to_table.clicked.connect(self._open_table)
+        buttons.insertWidget(0, to_table)
         close = QPushButton("关闭")
         close.setProperty("class", "secondary")
         close.clicked.connect(self.accept)
@@ -332,6 +338,10 @@ class OCRResultDialog(BaseDialog):
         QApplication.clipboard().setText(self._formatted(text))
         if self._auto_close.isChecked():
             self.accept()
+
+    def _open_table(self):
+        from table import open_table
+        open_table(self._document.image, self._document.raw_results)
 
     def _copy_all(self):
         self._copy_value(self._document.text())

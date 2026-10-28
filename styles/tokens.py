@@ -31,6 +31,8 @@ LIGHT = {
     "border":            "#e4e4e7",  # --border: 240 5.9% 90%
     "input":             "#e4e4e7",  # --input
     "ring":              "#18181b",  # --ring（focus 环）
+    # 表格待复核单元格（amber-100）；xlsx 导出也用浅色这一档。
+    "pending":           "#fef3c7",
 }
 
 DARK = {
@@ -57,6 +59,7 @@ DARK = {
     "border":            "#27272a",
     "input":             "#27272a",
     "ring":              "#d4d4d8",  # --ring: 240 4.9% 83.9%
+    "pending":           "#422006",  # amber-950，深色底上仍能和普通格区分
 }
 
 # 圆角（--radius: 0.5rem = 8px）
@@ -93,5 +96,9 @@ PIN_HUD_MS = 1200
 # 同 PixPin 默认：Ctrl+滚轮每格 5%；鼠标穿透时不透明度最高 50%。
 PIN_OPACITY_STEP = 0.05
 PIN_CLICK_THROUGH_OPACITY = 0.5
+# 表格网格叠在任意截图上，明暗主题共用贴图“操作中”的蓝色，只调透明度分层。
+TABLE_GRID = PIN_STATE_COLORS["active"]
+TABLE_GRID_ALPHA = {"line": 190, "active": 255, "selection": 48, "merge": 26, "frame": 255}
+TABLE_HANDLE = "#ffffff"
 # 复制、保存等结果提示的停留时长。
 TOAST_MS = 1600
