@@ -3,13 +3,14 @@
 import os
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtCore import QCoreApplication, QEvent, QRect, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPainter, QTextCursor
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QGraphicsScene
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QGraphicsScene, QPlainTextEdit
 from PySide6.QtTest import QTest
 from styles import apply_theme, tokens as T
 from ocr import OCRDocument, OCRResult, OCRResultDialog, add_text_layer
@@ -30,6 +31,41 @@ def _edit(dialog, row, text):
 
 def _row_of(dialog, identifier):
     return next(row for row in range(dialog._items.count()) if identifier in dialog._items.item(row).data(Qt.UserRole))
+
+
+def check_output_commits_editor(app):
+    image = QImage(400, 300, QImage.Format_ARGB32)
+    image.fill(QColor(T.LIGHT["background"]))
+    for view in ("line", "paragraph"):
+        document = OCRDocument([OCRResult(QRect(10, 10, 100, 20), "original", .5)], image)
+        dialog = OCRResultDialog(document)
+        dialog._view_buttons[view].setChecked(True)
+        dialog.show()
+        dialog.activateWindow()
+        flush(app)
+        assert dialog._pending.text() == "低置信度 1 处"
+        assert "无需修改" in dialog._pending.toolTip()
+        assert "低置信度" in dialog._next.toolTip()
+        for action in ("copy", "table"):
+            dialog._items.editItem(dialog._items.item(0))
+            flush(app)
+            editor = app.focusWidget()
+            assert isinstance(editor, QPlainTextEdit)
+            text = f"{view} corrected for {action}"
+            QTest.keyClicks(editor, text)
+            if action == "copy":
+                QTest.keyClick(editor, Qt.Key_C, Qt.ControlModifier | Qt.ShiftModifier)
+                assert app.clipboard().text() == text
+            else:
+                with patch("table.open_table") as open_table:
+                    dialog._open_table()
+                    assert open_table.call_args.args[1][0].text == text
+            flush(app)
+            assert document.text() == text
+            assert dialog._items.state() != QAbstractItemView.EditingState
+        dialog.close()
+        dialog.deleteLater()
+        flush(app)
 
 
 def check_editing_survives_shared_changes(app):
@@ -108,7 +144,7 @@ def main():
     flush(app)
     identifier = records[1].item_id
     row = _row_of(first, identifier)
-    # 低置信度条目标为待复核，F8 跳过去。
+    # 低置信度提示仅供参考，F8 跳过去。
     assert first._pending_rows() == [row] and first._pending.isVisible()
     first._items.setCurrentRow(0)
     first._next_pending()
@@ -211,8 +247,10 @@ def main():
     empty.deleteLater()
     flush(app)
     check_editing_survives_shared_changes(app)
+    check_output_commits_editor(app)
     print("PASS: inline corrections sync image/pins, revert-to-original, pending rows + F8, paragraph merge, rotated polygon")
     print("PASS: full-text draft separate from corrections, copy follows view, editing survives shared changes, legacy/empty")
+    print("PASS: copy shortcut and table output commit active line/paragraph editors; low-confidence hints remain informational")
     print(f"Review screenshots: {OUTPUT}")
 
 

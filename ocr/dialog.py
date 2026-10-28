@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QFrame, QGraphicsScene, QGraphicsView,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton, QSplitter,
-    QStackedWidget, QToolButton, QVBoxLayout,
+    QStackedWidget, QStyledItemDelegate, QToolButton, QVBoxLayout,
 )
 from styles import tokens as T
 from ui import BaseDialog, MultilineDelegate, show_toast
@@ -22,12 +22,12 @@ from .model import OCRDocument
 
 VIEWS = (("line", "按行", "每行一条，改字同步原图"), ("paragraph", "按段", "每段一条，改字同步原图"),
          ("full", "全文", "自由增删合并；不回写原图"))
-# 与表格识别的待复核阈值同一含义：低于它的条目底色标出，F8 逐条跳转。
+# 这里只提示模型分数，不代表人工复核进度。
 _PENDING_SCORE = .8
 
 
 class _LineDelegate(MultilineDelegate):
-    """列表项 QSS 有圆角时 Qt 不再画 BackgroundRole，待复核底色在这里自己画。"""
+    """列表项 QSS 有圆角时 Qt 不再画 BackgroundRole，低置信度底色在这里自己画。"""
 
     def paint(self, painter, option, index):
         color = index.data(Qt.BackgroundRole)
@@ -187,10 +187,10 @@ class OCRResultDialog(BaseDialog):
         row.addWidget(self._status, 1)
         self._pending = QLabel()
         self._pending.setObjectName("OCRPending")
-        self._pending.setToolTip("模型置信度较低的文字；改过后消失")
+        self._pending.setToolTip("未修改文字的模型置信度较低，仅供参考；文字正确时无需修改")
         self._next = QPushButton("下一处")
         self._next.setProperty("class", "ghost")
-        self._next.setToolTip("跳到下一处待复核文字 (F8)")
+        self._next.setToolTip("跳到下一处低置信度文字 (F8)")
         self._next.clicked.connect(self._next_pending)
         row.addWidget(self._pending)
         row.addWidget(self._next)
@@ -258,7 +258,7 @@ class OCRResultDialog(BaseDialog):
                     entry.setToolTip(f"已人工修改；原识别：{original or '（空）'}")
                 elif score < _PENDING_SCORE:
                     entry.setData(Qt.BackgroundRole, pending)
-                    entry.setToolTip(f"待复核：模型置信度 {score:.0%}，双击改字")
+                    entry.setToolTip(f"低置信度：模型置信度 {score:.0%}，仅供参考；需要时双击改字")
                 self._items.addItem(entry)
             row = next((index for index, ids in enumerate(groups) if set(ids).intersection(selected_ids)), 0)
             self._items.setCurrentRow(row if groups else -1)
@@ -290,7 +290,7 @@ class OCRResultDialog(BaseDialog):
             message = f"共 {self._items.count()} {unit}" + (f" · 已改 {changed} 处" if changed else "") + " · 双击改字，Enter 提交"
         self._status.setText(message)
         count = len(self._pending_rows()) if self.view != "full" else 0
-        self._pending.setText(f"待复核 {count} 处")
+        self._pending.setText(f"低置信度 {count} 处")
         for widget in (self._pending, self._next):
             widget.setVisible(count > 0)
         self._next_shortcut.setEnabled(count > 0)
@@ -364,11 +364,22 @@ class OCRResultDialog(BaseDialog):
             text = text.replace(" ", "").replace("　", "")
         return text
 
+    def _commit_editor(self):
+        # 快捷键不会先让编辑器失焦，输出前须提交仍在输入框里的改字。
+        editor = QApplication.focusWidget()
+        if isinstance(editor, QPlainTextEdit) and self._items.isAncestorOf(editor):
+            delegate = self._items.itemDelegate()
+            delegate.commitData.emit(editor)
+            delegate.closeEditor.emit(editor, QStyledItemDelegate.NoHint)
+            self._items.setFocus()
+
     def _copy_all(self):
+        self._commit_editor()
         text = self._text.toPlainText() if self.view == "full" else self._document.text()
         QApplication.clipboard().setText(self._formatted(text))
         show_toast("已复制全文")
 
     def _open_table(self):
         from table import open_table
+        self._commit_editor()
         open_table(self._pixmap, self._document.results)

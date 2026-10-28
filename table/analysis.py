@@ -1,7 +1,5 @@
 """一次表格分析：OCR 文字框 + SLANet_plus 结构 + 规则网格，在后台线程跑。"""
 
-from statistics import median
-
 import numpy as np
 from PySide6.QtCore import QRect
 from PySide6.QtGui import QImage
@@ -42,28 +40,25 @@ def tokens_from_results(results, image):
 
 
 def content_rect(tokens, pixels):
-    """文档页里表格通常只占一部分：先按文字范围外扩 1.5 倍字高（留住表格外边线），
-    再收到这块里有墨迹的范围。外框贴着表格边线，不会多出空白行列；结构模型也只看表格，
-    它本来就是按表格截图训练的。"""
+    """只裁掉整页墨迹外的空白页边，避免空白行列的表格边线被文字范围截掉。"""
     height, width = pixels.shape[:2]
-    if not tokens:
-        return QRect(0, 0, width, height)
-    text = (min(token.box.left for token in tokens), min(token.box.top for token in tokens),
-            max(token.box.right for token in tokens), max(token.box.bottom for token in tokens))
-    pad = round(median(token.box.height for token in tokens) * 1.5)
-    left, top = max(0, text[0] - pad), max(0, text[1] - pad)
-    right, bottom = min(width, text[2] + pad), min(height, text[3] + pad)
-    # 扫描件底色常偏灰，按区域内最亮处往下一截算墨迹。
-    gray = pixels[top:bottom, left:right].min(axis=2)
+    # 扫描件底色常偏灰，按整页最亮处往下一截算墨迹。
+    gray = pixels.min(axis=2)
     ink = gray < int(gray.max()) - 80
     rows, columns = np.flatnonzero(ink.any(axis=1)), np.flatnonzero(ink.any(axis=0))
-    if rows.size and columns.size:
+    if not rows.size:
+        return QRect(0, 0, width, height)
+    left, right = columns[0], columns[-1] + 1
+    top, bottom = rows[0], rows[-1] + 1
+    if tokens:
         # 检测框比字形略宽，收到墨迹时不能把文字框切掉。
-        margin = 2
-        left, right = left + columns[0] - margin, left + columns[-1] + 1 + margin
-        top, bottom = top + rows[0] - margin, top + rows[-1] + 1 + margin
-        left, top = max(0, min(left, text[0])), max(0, min(top, text[1]))
-        right, bottom = min(width, max(right, text[2])), min(height, max(bottom, text[3]))
+        left = min(left, min(token.box.left for token in tokens))
+        top = min(top, min(token.box.top for token in tokens))
+        right = max(right, max(token.box.right for token in tokens))
+        bottom = max(bottom, max(token.box.bottom for token in tokens))
+    margin = 2
+    left, top = max(0, left - margin), max(0, top - margin)
+    right, bottom = min(width, right + margin), min(height, bottom + margin)
     return QRect(int(left), int(top), int(right - left), int(bottom - top))
 
 
@@ -75,7 +70,7 @@ def _shift(token, dx, dy):
 def analyze(image, results=None, on_stage=None, crop=False):
     """返回 (文字框, 网格建议, 结构模型提示, 裁出的分析区域或 None)。results 为已有 OCR 结果时不再重复识别。
 
-    crop 用于识别文档：只分析文字所在区域，文字框和网格都换算到这块区域的坐标。
+    crop 用于识别文档：裁掉内容外的空白页边，文字框和网格都换算到这块区域的坐标。
     截图、贴图本来就是用户框好的表格，不裁。
     """
     if results is None:

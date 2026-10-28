@@ -11,7 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QDateTime, QEvent, QMargins, QMimeData, QSignalBlocker, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout,
     QLabel, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSplitter, QStyledItemDelegate, QTableWidget,
     QTableWidgetItem, QToolButton, QVBoxLayout,
 )
@@ -50,7 +50,7 @@ class _PageState:
     queued: bool = False
     scheme: int = 0
     cell: tuple = ()
-    crop: object = None  # 识别文档只分析文字所在区域，翻页渲染后按它裁
+    crop: object = None  # 识别文档裁掉空白页边，翻页渲染后按它裁
 
 
 class TableDialog(BaseDialog):
@@ -168,6 +168,11 @@ class TableDialog(BaseDialog):
         row.addWidget(self._undo_button)
         row.addWidget(self._redo_button)
         row.addStretch()
+        if len(self.pages) > 1:
+            self._remove_headers = QCheckBox("去除重复表头")
+            self._remove_headers.setToolTip("仅影响复制和导出：后续页首行与首个已完成页首行相同时去除；无表头数据请勿勾选")
+            row.addWidget(self._remove_headers)
+            row.addWidget(self._separator())
         row.addWidget(QLabel("网格方案"))
         self._schemes = QComboBox()
         self._schemes.setMinimumWidth(140)
@@ -306,7 +311,7 @@ class TableDialog(BaseDialog):
         except ValueError as exc:
             state.error = state.error or str(exc)
             image = QImage(64, 64, QImage.Format_RGB32)
-            image.fill(Qt.white)
+            image.fill(QColor(T.THEMES[self._mode]["background"]))
         if state.crop is not None:
             image = image.copy(state.crop)
         tool = self._canvas.tool if self._canvas is not None else SELECT
@@ -487,7 +492,7 @@ class TableDialog(BaseDialog):
     def _output(self):
         """多页时把已分析的页上下接成一张表；还没出结果的页不等。"""
         documents = [state.review.document for state in self._states if state.review is not None]
-        return documents[0] if len(self.pages) == 1 else export.stack(documents)
+        return documents[0] if len(self.pages) == 1 else export.stack(documents, self._remove_headers.isChecked())
 
     def _pending_note(self):
         # 不拦输出：xlsx 会标黄加批注，复制和其他格式只在提示里带上剩余数量。

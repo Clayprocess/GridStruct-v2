@@ -155,6 +155,31 @@ def check_correction_merges():
     print("PASS correction merge/split/delete/undo/redo preserves text and positions")
 
 
+def check_content_crop():
+    import numpy as np
+    from table.analysis import content_rect
+    from table.model import Rect, Token
+
+    tokens = (Token("内容", .99, Rect(50, 50, 80, 70)),)
+    for background in (255, 210):
+        pixels = np.full((300, 500, 3), background, dtype=np.uint8)
+        for x in (20, 100, 300, 480):
+            pixels[20:282, x:x + 2] = 0
+        for y in (20, 100, 180, 280):
+            pixels[y:y + 2, 20:482] = 0
+        pixels[50:70, 50:80] = 0
+        # 只有左上格有文字，空白外行列和未识别文字的表格仍需保留完整边线。
+        expected = QRect(18, 18, 466, 266)
+        assert content_rect(tokens, pixels) == expected
+        assert content_rect((), pixels) == expected
+        wider_text = (Token("内容", .99, Rect(10, 10, 490, 290)),)
+        assert content_rect(wider_text, pixels) == QRect(8, 8, 484, 284)
+        pixels.fill(background)
+        assert content_rect((), pixels) == QRect(0, 0, 500, 300)
+        assert content_rect(tokens, pixels) == QRect(0, 0, 500, 300)
+    print("PASS: document crop retains blank outer rows/columns, OCR boxes and blank pages on white/gray backgrounds")
+
+
 def check_analysis():
     from table import export
     from table.analysis import analyze
@@ -176,6 +201,23 @@ def check_analysis():
         else:
             assert document.rows == expected_rows, document.rows
     return document
+
+
+def check_stacked_output():
+    from table.export import stack
+    from table.model import CellMerge, GridSpec, TableCell, TableDocument
+
+    grid = GridSpec((0, 1, 2), (0, 1, 2))
+    first = TableDocument(grid, ((TableCell("甲"), TableCell("10")), (TableCell("乙"), TableCell("20"))))
+    second = TableDocument(grid, ((TableCell("甲"), TableCell("10")), (TableCell("丙"), TableCell("30"))))
+    assert stack((first, second)).rows == (*first.rows, *second.rows), "无表头重复记录默认不得删除"
+    assert stack((first, second), True).rows == (*first.rows, second.rows[1])
+    merged = TableDocument(GridSpec((0, 1, 2), (0, 1, 2), (CellMerge(0, 0, 2, 1),)),
+                           (second.cells[0], (TableCell(), TableCell("30"))))
+    combined = stack((first, merged), True)
+    assert combined.rows == (*first.rows, *merged.rows), "去重不得拆掉跨行表头"
+    assert combined.grid.merges == (CellMerge(2, 0, 4, 1),)
+    print("PASS: stacked output retains repeated records by default and preserves merged headers")
 
 
 def check_export(document):
@@ -440,7 +482,7 @@ def _write_pdf(path, pages):
 
 
 def check_document(app, mode):
-    """识别文档：PDF 两页 + 一张图，逐页分析、翻页保留改字，输出接成一张表并去掉重复表头。"""
+    """识别文档：逐页分析、翻页保留改字，输出接成一张表，重复表头由用户选择去除。"""
     from unittest.mock import patch
     from table import open_document
     folder = OUTPUT / "document"
@@ -486,15 +528,24 @@ def check_document(app, mode):
     combined = dialog._output()
     rows = combined.rows
     header = dialog._states[0].review.document.rows[0]
-    # PDF 第 2 页与第 1 页表头相同，去掉；附页首行是“续表”，保留。
+    assert not dialog._remove_headers.isChecked()
+    assert rows.count(header) == 2 and combined.grid.row_count == 15, rows
+    # 勾选后只去掉 PDF 第 2 页的重复表头；取消后恢复所有行。
+    QTest.mouseClick(dialog._remove_headers, Qt.LeftButton)
+    assert dialog._remove_headers.isChecked()
+    combined = dialog._output()
+    rows = combined.rows
     assert rows.count(header) == 1, rows
     assert combined.grid.row_count == 5 + 4 + 5, (combined.grid.row_count, rows)
     assert "1,201" in [row[1] for row in rows]
+    QTest.mouseClick(dialog._remove_headers, Qt.LeftButton)
+    restored = dialog._output()
+    assert restored.grid.row_count == 15 and restored.rows.count(header) == 2
     app.processEvents()
     assert dialog.grab().save(str(OUTPUT / f"document-{mode}.png"))
     dialog.close()
     app.processEvents()
-    print("PASS: document pages from PDF + image, skipped bad file, per-page edits kept, stacked output drops repeated header")
+    print("PASS: document pages, skipped bad file, per-page edits kept and reversible header deduplication")
 
 
 def main():
@@ -511,6 +562,8 @@ def main():
     check_ocr_reuse(app)
     check_xlsx_failure(app)
     check_review_navigation(app)
+    check_content_crop()
+    check_stacked_output()
     document = check_analysis()
     check_export(document)
     check_dialog(app)
