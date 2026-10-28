@@ -898,6 +898,8 @@ def ocr_confirm_selection():
             if action in ("return", "enter"):
                 key = Qt.Key_Return if action == "return" else Qt.Key_Enter
                 QTest.keyClick(window._canvas.viewport(), key)
+            elif action == "copy":
+                window.trigger_action("copy")
             else:
                 window._toolbar._buttons[action].click()
             flush()

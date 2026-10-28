@@ -2,13 +2,14 @@
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QGraphicsTextItem, QDialog
 from PySide6.QtGui import QPixmap, QColor, QKeySequence
-from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QPropertyAnimation, QEasingCurve, QEvent
+from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QEvent
 
 from .canvas import AnnotationCanvas
 from .toolbar import FloatPanel, shortcut_tool
 from .options import ToolOptions
 from .color_dialog import ColorDialog
 from ui import floating_window_type, MessageDialog, show_toast
+from ui.motion import animation
 from settings import get_settings
 from styles import tokens as T
 from export import save_image
@@ -35,15 +36,14 @@ class AnnotationWindow(QWidget):
     longshotRequested = Signal(QRect)
 
     def __init__(self, pixmap: QPixmap, pos: QPoint, theme_mode: str = "light", *,
-                 scrollable: bool = False, capture_region: QRect | None = None):
+                 scrollable: bool = False, capture_region: QRect | None = None,
+                 toolbar_pos: QPoint | None = None):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | floating_window_type())
         self._mode = theme_mode
         self._capture_position = QPoint(pos)
         # 长图和跨屏原生拼图的像素尺寸不代表原桌面采集视口，必须保留确认时的逻辑矩形。
         self._capture_region = QRect(capture_region) if capture_region is not None else QRect(pos, pixmap.deviceIndependentSize().toSize())
-        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade.setDuration(120)
-        self._fade.setEasingCurve(QEasingCurve.OutCubic)
+        self._fade = animation(self, b"windowOpacity", T.MOTION_FAST)
         self._scrollable = scrollable
         self.setWindowTitle("GridStruct-V2 截图标注")
         self._ended = False
@@ -64,6 +64,8 @@ class AnnotationWindow(QWidget):
         self.move(pos)
 
         self._toolbar = FloatPanel(mode=theme_mode, parent=self)
+        # 框选阶段拖动过工具条，进入标注后留在同一位置。
+        self._toolbar.set_manual_position(toolbar_pos)
         self._options = ToolOptions(self._canvas)
         self._toolbar.set_options_widget(self._options)
         self._toolbar.toolSelected.connect(self._on_tool)
@@ -75,6 +77,7 @@ class AnnotationWindow(QWidget):
         self._ocr.recognized.connect(self._show_text_layer)
         self._ocr.statusChanged.connect(self._show_ocr_status)
         self._canvas._undo.indexChanged.connect(self._image_changed)
+        self._canvas._undo.canUndoChanged.connect(self._toolbar.set_undo_enabled)
         self._options.set_tool("")
         self._position_toolbar()
         self._toolbar.show()

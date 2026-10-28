@@ -65,7 +65,7 @@ ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使
 
 ## 模块边界
 
-跨模块调用必须从各模块 `__init__.py` 导入公开接口，不直接导入内部实现文件。
+跨模块默认从各模块 `__init__.py` 导入公开接口；下表明确列出的公开子模块也可直接导入。
 
 | 模块 | 职责 | 主要公开接口与边界 |
 |---|---|---|
@@ -78,7 +78,7 @@ ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使
 | `settings/` | 设置窗口、便携 INI 和数据目录 | `SettingsDialog`、`get_settings`、`data_directory` |
 | `tray/` | 托盘入口和 Windows 全局热键 | `create_tray`、`GlobalHotkey` |
 | `styles/` | 设计 tokens 与主题 | `tokens`、`apply_theme`；视觉值只定义在 `styles/tokens.py`，QSS 只写在 `styles/theme.py` |
-| `ui/` | 通用图标与对话框基类 | `tinted_icon`、`BaseDialog`；图标来自 `assets/icons/` 中的 Lucide SVG |
+| `ui/` | 通用图标、对话框与动效 | `tinted_icon`、`painted_icon`、`paint_svg`、`BaseDialog`；公开子模块 `ui.motion` 提供共享动效，可直接导入。SVG 优先用 Lucide，允许遵循相同规格的自绘资源（见 `assets/icons/README.md`）与控件效果预览 |
 
 UI 使用 PySide6 Qt Widgets，不使用 QML。业务模块通过动态属性选择按钮样式，不直接写 QSS。
 
