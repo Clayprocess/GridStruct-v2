@@ -70,7 +70,7 @@ def _autostart_command() -> str:
     return list2cmdline([str(pythonw), "-X", "utf8", str(Path(__file__).resolve().parents[1] / "main.py")])
 
 
-_HOTKEY_LABELS = {"screenshot": "截图", "longshot": "长截图"}
+_HOTKEY_LABELS = {"screenshot": "截图", "longshot": "长截图", "document": "识别文档"}
 # 导航顺序：页面名、Lucide 图标、构建方法名。
 _PAGES = (("通用", "settings", "_general_page"), ("截图", "scan", "_shot_page"),
           ("保存", "save", "_save_page"), ("文字识别", "scan-text", "_ocr_page"),
@@ -325,12 +325,16 @@ class SettingsDialog(BaseDialog):
             edit = QKeySequenceEdit(QKeySequence(self._s.value(f"hotkey/{name}", HOTKEY_DEFAULTS[name]),
                                                  QKeySequence.PortableText))
             edit.setMaximumSequenceLength(1)
+            if not HOTKEY_DEFAULTS[name]:
+                # 默认不设的可选热键可以清空，清空即只走托盘；Qt 自带占位文字是英文。
+                edit.setClearButtonEnabled(True)
+                edit.findChild(QLineEdit).setPlaceholderText("未设置")
             edit.keySequenceChanged.connect(self._check_hotkeys)
             self._hotkeys[name] = edit
             card.row(label, edit)
         defaults = QPushButton("恢复默认")
         defaults.clicked.connect(self._reset_hotkeys)
-        card.widget(defaults, "点击输入框后按下新组合键。确定后立即生效；新组合被占用时保留原热键。")
+        card.widget(defaults, "点击输入框后按下新组合键。确定后立即生效；新组合被占用时保留原热键。识别文档默认不设快捷键，可从托盘打开。")
         self._hotkey_error = QLabel()
         self._hotkey_error.setProperty("class", "error")
         self._hotkey_error.setWordWrap(True)
@@ -350,13 +354,16 @@ class SettingsDialog(BaseDialog):
         texts = self._hotkey_texts()
         problem = ""
         for name, text in texts.items():
+            if not text and not HOTKEY_DEFAULTS[name]:
+                continue
             try:
                 parse_hotkey(text)
             except ValueError as error:
                 problem = f"{_HOTKEY_LABELS[name]}：{error}"
                 break
-        if not problem and len(set(texts.values())) < len(texts):
-            problem = "截图和长截图不能用同一个组合"
+        used = [text for text in texts.values() if text]
+        if not problem and len(set(used)) < len(used):
+            problem = "不同功能不能用同一个组合"
         self._hotkey_error.setText(problem)
         self._hotkey_error.setVisible(bool(problem))
         return not problem

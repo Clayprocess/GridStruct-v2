@@ -604,8 +604,8 @@ QFrame#SizeEditor {{
     border-radius: {T.RADIUS_LG}px;
 }}
 
-/* ===== 表格识别（table/dialog.py）===== */
-QScrollArea#TableCanvasArea {{
+/* ===== 表格识别（table/dialog.py）与文字识别（ocr/dialog.py）共用 ===== */
+QScrollArea#TableCanvasArea, QGraphicsView#OCRPreview {{
     background-color: {t['muted']};
     border: 1px solid {t['border']};
     border-radius: {r}px;
@@ -648,11 +648,11 @@ QFrame#TableToolSeparator {{
     max-width: 1px;
     margin: 6px 4px;
 }}
-QLabel#TableStatus {{
+QLabel#TableStatus, QLabel#OCRStatus {{
     color: {t['muted_foreground']};
     font-size: {T.FONT_SM}px;
 }}
-QLabel#TablePending {{
+QLabel#TablePending, QLabel#OCRPending {{
     background-color: {t['pending']};
     color: {t['foreground']};
     border-radius: {T.RADIUS_SM}px;

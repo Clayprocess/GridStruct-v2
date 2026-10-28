@@ -2,24 +2,27 @@
 
 网格任何改动都立即按 OCR 文字框重新分格（不重新识别），人工改过或确认过的格子不会被覆盖。
 v1 分成“网格确认”和“结果校对”两个窗口，这里合成一个，改线和改字随时来回切换。
+识别文档（图片/PDF 多页）也用这个窗口：每页单独改网格，复制和导出时上下接成一张表。
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, QEvent, QMargins, QMimeData, QSignalBlocker, QStandardPaths, Qt, QTimer
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout,
-    QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QStyledItemDelegate, QTableWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout,
+    QLabel, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSplitter, QStyledItemDelegate, QTableWidget,
     QTableWidgetItem, QToolButton, QVBoxLayout,
 )
 
 from styles import tokens as T
-from ui import BaseDialog, show_message, show_toast, tinted_icon
+from ui import BaseDialog, MultilineDelegate, show_message, show_toast, tinted_icon
 from . import export
 from .editor import ADD_HORIZONTAL, ADD_VERTICAL, DELETE, SELECT, GridCanvas
 from .grid import STRATEGY_LABELS
 from .model import CORRECTED, PENDING
+from .pages import ImagePage
 from .review import TableReview
 
 TOOLS = (
@@ -36,47 +39,32 @@ STAGES = {
 EXPORT_FILTERS = "Excel 工作簿 (*.xlsx);;CSV (*.csv);;网页 (*.html)"
 
 
-class _CellDelegate(QStyledItemDelegate):
-    """同 Excel：Enter 提交，Alt+Enter 在格内换行。"""
-
-    def createEditor(self, parent, option, index):
-        editor = QPlainTextEdit(parent)
-        editor.setTabChangesFocus(True)
-        editor.installEventFilter(self)
-        return editor
-
-    def setEditorData(self, editor, index):
-        editor.setPlainText(index.data(Qt.EditRole) or "")
-        editor.selectAll()
-
-    def setModelData(self, editor, model, index):
-        model.setData(index, editor.toPlainText(), Qt.EditRole)
-
-    def updateEditorGeometry(self, editor, option, index):
-        rect = option.rect
-        rect.setHeight(max(rect.height(), editor.fontMetrics().lineSpacing() * 3))
-        editor.setGeometry(rect)
-
-    def eventFilter(self, editor, event):
-        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            if event.modifiers() & Qt.AltModifier:
-                editor.insertPlainText("\n")
-            else:
-                self.commitData.emit(editor)
-                self.closeEditor.emit(editor, QStyledItemDelegate.EditNextItem)
-            return True
-        return super().eventFilter(editor, event)
+@dataclass
+class _PageState:
+    """一页的分析结果与校对进度；翻页时画布重建，这些留着。"""
+    review: TableReview | None = None
+    suggestion: object = None
+    message: str = ""
+    stage: str = STAGES["recognizing"]
+    error: str = ""
+    queued: bool = False
+    scheme: int = 0
+    cell: tuple = ()
+    crop: object = None  # 识别文档裁掉空白页边，翻页渲染后按它裁
 
 
 class TableDialog(BaseDialog):
-    def __init__(self, image, parent=None):
+    def __init__(self, source, parent=None):
+        """source 为一张 QImage（截图/贴图），或识别文档的页面列表（table/pages.py）。"""
         super().__init__(parent)
-        self.setWindowTitle("表格识别 · 本地")
+        self.pages = [ImagePage(source)] if isinstance(source, QImage) else list(source)
+        self._states = [_PageState() for _page in self.pages]
+        self._index = 0
+        self.setWindowTitle("表格识别 · 本地" if len(self.pages) == 1 else "识别文档 · 本地")
         self.setAttribute(Qt.WA_DeleteOnClose)
-        self.resize(1180, 700)
+        self.resize(1180, 700 if len(self.pages) == 1 else 760)
         self._mode = QApplication.instance().property("theme_mode") or "light"
-        self._review = None
-        self._suggestion = None
+        self._canvas = None
         self._syncing = False
         self._fit = True
 
@@ -85,18 +73,13 @@ class TableDialog(BaseDialog):
         layout.setSpacing(T.SPACE_2)
         layout.addLayout(self._build_toolbar())
 
-        self._canvas = GridCanvas(image)
-        self._canvas.gridChanged.connect(self._grid_changed)
-        self._canvas.selectionChanged.connect(self._refresh_actions)
-        self._canvas.cellSelected.connect(self._select_in_table)
         self._area = QScrollArea()
         self._area.setObjectName("TableCanvasArea")
         self._area.setAlignment(Qt.AlignCenter)
-        self._area.setWidget(self._canvas)
         self._area.viewport().installEventFilter(self)
 
         self._table = QTableWidget()
-        self._table.setItemDelegate(_CellDelegate(self._table))
+        self._table.setItemDelegate(MultilineDelegate(self._table))
         self._table.setWordWrap(True)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
@@ -116,11 +99,22 @@ class TableDialog(BaseDialog):
                                (QKeySequence("Ctrl+Shift+C"), self._copy), (QKeySequence("Ctrl+Return"), self._confirm)):
             QShortcut(sequence, self, slot)
         self._next_shortcut = QShortcut(QKeySequence("F8"), self, self._next_pending)
+        # 翻页会换画布，工具快捷键挂在外层滚动区，焦点在任何一页的画布上都生效。
         for tool, _label, _icon, key in TOOLS:
-            QShortcut(QKeySequence(key), self._canvas, lambda value=tool: self._tool_buttons[value].click(),
-                      context=Qt.WidgetShortcut)
-        self._set_enabled(False)
-        self.set_stage("recognizing")
+            QShortcut(QKeySequence(key), self._area, lambda value=tool: self._tool_buttons[value].click(),
+                      context=Qt.WidgetWithChildrenShortcut)
+        if len(self.pages) > 1:
+            QShortcut(QKeySequence("Ctrl+PgUp"), self, lambda: self.show_page(self._index - 1))
+            QShortcut(QKeySequence("Ctrl+PgDown"), self, lambda: self.show_page(self._index + 1))
+        self.show_page(0)
+
+    @property
+    def _state(self):
+        return self._states[self._index]
+
+    @property
+    def _review(self):
+        return self._state.review
 
     # ---- 构造 ----
 
@@ -146,6 +140,14 @@ class TableDialog(BaseDialog):
     def _build_toolbar(self):
         row = QHBoxLayout()
         row.setSpacing(2)
+        if len(self.pages) > 1:
+            self._previous_page = self._tool_button("上一页 (Ctrl+PgUp)", "chevron-left", lambda: self.show_page(self._index - 1))
+            self._next_page = self._tool_button("下一页 (Ctrl+PgDown)", "chevron-right", lambda: self.show_page(self._index + 1))
+            self._page_label = QLabel()
+            self._page_label.setAlignment(Qt.AlignCenter)
+            self._page_label.setMinimumWidth(56)
+            for widget in (self._previous_page, self._page_label, self._next_page, self._separator()):
+                row.addWidget(widget)
         self._tools = QButtonGroup(self)
         self._tool_buttons = {}
         for tool, label, icon_name, key in TOOLS:
@@ -166,6 +168,11 @@ class TableDialog(BaseDialog):
         row.addWidget(self._undo_button)
         row.addWidget(self._redo_button)
         row.addStretch()
+        if len(self.pages) > 1:
+            self._remove_headers = QCheckBox("去除重复表头")
+            self._remove_headers.setToolTip("仅影响复制和导出：后续页首行与首个已完成页首行相同时去除；无表头数据请勿勾选")
+            row.addWidget(self._remove_headers)
+            row.addWidget(self._separator())
         row.addWidget(QLabel("网格方案"))
         self._schemes = QComboBox()
         self._schemes.setMinimumWidth(140)
@@ -180,6 +187,14 @@ class TableDialog(BaseDialog):
         self._status = QLabel()
         self._status.setObjectName("TableStatus")
         row.addWidget(self._status, 1)
+        if len(self.pages) > 1:
+            # 页数已知，按页给真实进度。
+            self._progress = QProgressBar()
+            self._progress.setProperty("class", "slim")
+            self._progress.setTextVisible(False)
+            self._progress.setFixedWidth(120)
+            self._progress.setRange(0, len(self.pages))
+            row.addWidget(self._progress)
         self._pending = QLabel()
         self._pending.setObjectName("TablePending")
         self._pending.setToolTip("文字模型置信度较低的格子；改字或确认后消失，导出 xlsx 时标黄并加批注")
@@ -210,35 +225,132 @@ class TableDialog(BaseDialog):
 
     # ---- 分析结果 ----
 
-    def set_stage(self, stage):
-        self._status.setText(STAGES[stage])
+    def set_stage(self, stage, page=None):
+        state = self._states[self._index if page is None else page]
+        state.stage = STAGES[stage]
+        if state is self._state and state.review is None:
+            self._status.setText(self._page_prefix() + state.stage)
 
-    def apply_analysis(self, tokens, suggestion, note):
-        self._suggestion = suggestion
-        self._review = TableReview(tokens, suggestion.selected.grid)
-        self._schemes.clear()
-        for candidate in (suggestion.selected, *suggestion.alternatives):
-            self._schemes.addItem(STRATEGY_LABELS[candidate.strategy], candidate.grid)
-        if suggestion.selected.strategy != "manual":
-            self._schemes.addItem(STRATEGY_LABELS["manual"], self._canvas.grid)
-        self._base_message = suggestion.message if tokens else "未检测到文字，可手动划线后直接导出空表"
+    def apply_analysis(self, tokens, suggestion, note, rect=None, page=None):
+        state = self._states[self._index if page is None else page]
+        state.crop = rect
+        state.suggestion = suggestion
+        state.review = TableReview(tokens, suggestion.selected.grid)
+        state.message = suggestion.message if tokens else "未检测到文字，可手动划线后直接导出空表"
         if note and suggestion.selected.strategy != "structure":
-            self._base_message += f"（结构模型：{note}）"
-        self._set_enabled(True)
-        self._canvas.set_grid(self._review.document.grid)
-        self._refresh()
-        target = self._review.pending_cells()[0] if self._review.pending_cells() else (0, 0)
-        self._focus_cell(*target)
+            state.message += f"（结构模型：{note}）"
+        pending = state.review.pending_cells()
+        state.cell = pending[0] if pending else (0, 0)
+        if state is self._state:
+            if rect is not None:
+                self._build_canvas()
+            self._activate()
+        self._update_progress()
 
-    def show_error(self, message):
-        self._status.setText(f"识别失败：{message}")
-        show_message(self, "表格识别失败", message)
+    def show_error(self, message, page=None):
+        state = self._states[self._index if page is None else page]
+        state.error = message
+        if state is self._state:
+            self._status.setText(f"{self._page_prefix()}识别失败：{message}")
+        self._update_progress()
+        if len(self.pages) == 1:
+            show_message(self, "表格识别失败", message)
+
+    def take_next_page(self):
+        """后台逐页分析：从当前页往后排，翻到哪页哪页先出结果。"""
+        order = [*range(self._index, len(self.pages)), *range(self._index)]
+        index = next((index for index in order if not self._states[index].queued), None)
+        if index is not None:
+            self._states[index].queued = True
+        return index
 
     def _set_enabled(self, enabled):
-        for widget in (*self._tool_buttons.values(), self._schemes, self._table, self._export, self._copy_button):
+        for widget in (*self._tool_buttons.values(), self._schemes, self._table):
             widget.setEnabled(enabled)
+        # 多页时已出结果的页就能先复制、导出，不等其余页。
+        ready = any(state.review is not None for state in self._states)
+        self._export.setEnabled(ready)
+        self._copy_button.setEnabled(ready)
         self._canvas.setEnabled(enabled)
         self._refresh_actions()
+
+    # ---- 翻页 ----
+
+    def _page_prefix(self):
+        return f"{self.pages[self._index].label} · " if len(self.pages) > 1 else ""
+
+    def show_page(self, index):
+        if not 0 <= index < len(self.pages) or (self._canvas is not None and index == self._index):
+            return
+        if self._canvas is not None and self._review is not None:
+            self._commit_editor()
+            self._state.cell = (self._table.currentRow(), self._table.currentColumn())
+        self._index = index
+        state = self._state
+        self._build_canvas()
+        if len(self.pages) > 1:
+            self._page_label.setText(f"{index + 1} / {len(self.pages)}")
+            self._page_label.setToolTip(self.pages[index].label)
+            self._previous_page.setEnabled(index > 0)
+            self._next_page.setEnabled(index < len(self.pages) - 1)
+        if state.review is not None:
+            self._activate()
+            return
+        self._schemes.clear()
+        with QSignalBlocker(self._table):
+            self._table.clearSpans()
+            self._table.setRowCount(0)
+            self._table.setColumnCount(0)
+        self._set_enabled(False)
+        self._status.setText(self._page_prefix() + (f"识别失败：{state.error}" if state.error else state.stage))
+
+    def _build_canvas(self):
+        state = self._state
+        try:
+            image = self.pages[self._index].render()
+        except ValueError as exc:
+            state.error = state.error or str(exc)
+            image = QImage(64, 64, QImage.Format_RGB32)
+            image.fill(QColor(T.THEMES[self._mode]["background"]))
+        if state.crop is not None:
+            image = image.copy(state.crop)
+        tool = self._canvas.tool if self._canvas is not None else SELECT
+        self._canvas = GridCanvas(image)
+        self._canvas.set_tool(tool)
+        self._canvas.gridChanged.connect(self._grid_changed)
+        self._canvas.selectionChanged.connect(self._refresh_actions)
+        self._canvas.cellSelected.connect(self._select_in_table)
+        # setWidget 会销毁上一页的画布。
+        self._area.setWidget(self._canvas)
+        self._fit = True
+        QTimer.singleShot(0, self._fit_canvas)
+
+    def _activate(self):
+        state = self._state
+        self._schemes.clear()
+        for candidate in (state.suggestion.selected, *state.suggestion.alternatives):
+            self._schemes.addItem(STRATEGY_LABELS[candidate.strategy], candidate.grid)
+        if state.suggestion.selected.strategy != "manual":
+            # 新画布的初始网格就是整张图一个格子，即“手动划线”的起点。
+            self._schemes.addItem(STRATEGY_LABELS["manual"], self._canvas.grid)
+        self._schemes.setCurrentIndex(state.scheme)
+        self._set_enabled(True)
+        self._canvas.set_grid(state.review.document.grid)
+        self._refresh()
+        row, column = state.cell
+        grid = state.review.document.grid
+        if row < 0 or row >= grid.row_count or column >= grid.column_count:
+            row = column = 0
+        self._focus_cell(row, column)
+
+    def _update_progress(self):
+        if len(self.pages) == 1:
+            return
+        finished = sum(state.review is not None or bool(state.error) for state in self._states)
+        self._progress.setValue(finished)
+        self._progress.setToolTip(f"已分析 {finished} / {len(self.pages)} 页")
+        self._progress.setVisible(finished < len(self.pages))
+        self._set_enabled(self._review is not None)
 
     # ---- 状态同步 ----
 
@@ -281,7 +393,7 @@ class TableDialog(BaseDialog):
                 table.setColumnWidth(column, max(64, min(240, table.columnWidth(column) + T.SPACE_3)))
         table.resizeRowsToContents()
         self._syncing = False
-        self._status.setText(f"{self._base_message} · {grid.row_count} 行 × {grid.column_count} 列"
+        self._status.setText(f"{self._page_prefix()}{self._state.message} · {grid.row_count} 行 × {grid.column_count} 列"
                              + (f" · {len(grid.merges)} 处合并" if grid.merges else ""))
         self._refresh_actions()
 
@@ -326,6 +438,7 @@ class TableDialog(BaseDialog):
     # ---- 操作 ----
 
     def _scheme_chosen(self, index):
+        self._state.scheme = index
         self._canvas.set_grid(self._schemes.itemData(index))
         self._review.set_grid(self._canvas.grid)
         self._refresh()
@@ -376,22 +489,37 @@ class TableDialog(BaseDialog):
             else:
                 self._table.setFocus()
 
+    def _output(self):
+        """多页时把已分析的页上下接成一张表；还没出结果的页不等。"""
+        documents = [state.review.document for state in self._states if state.review is not None]
+        return documents[0] if len(self.pages) == 1 else export.stack(documents, self._remove_headers.isChecked())
+
     def _pending_note(self):
         # 不拦输出：xlsx 会标黄加批注，复制和其他格式只在提示里带上剩余数量。
-        count = self._review.document.pending_count
-        return f"；还有 {count} 处待复核" if count else ""
+        count = sum(state.review.document.pending_count for state in self._states if state.review is not None)
+        note = f"；还有 {count} 处待复核" if count else ""
+        waiting = sum(state.review is None and not state.error for state in self._states)
+        failed = sum(bool(state.error) for state in self._states)
+        if waiting:
+            note += f"；{waiting} 页还在分析，未包含"
+        if failed:
+            note += f"；{failed} 页识别失败，未包含"
+        return note
 
     def _copy(self):
-        if self._review is None:
+        if not any(state.review is not None for state in self._states):
             return
         self._commit_editor()
+        document = self._output()
         data = QMimeData()
-        data.setText(export.to_tsv(self._review.document))
-        data.setHtml(export.to_html(self._review.document))
+        data.setText(export.to_tsv(document))
+        data.setHtml(export.to_html(document))
         QApplication.clipboard().setMimeData(data)
         show_toast("已复制表格，可直接粘贴到 Excel / WPS" + self._pending_note())
 
     def _export_file(self):
+        if not any(state.review is not None for state in self._states):
+            return
         self._commit_editor()
         from settings import get_settings
         settings = get_settings()
@@ -403,7 +531,7 @@ class TableDialog(BaseDialog):
         if not Path(path).suffix:
             path += "." + chosen.split("*.")[1].rstrip(")")
         try:
-            export.save(self._review.document, path)
+            export.save(self._output(), path)
         except OSError as exc:
             show_message(self, "导出失败", f"无法写入文件：{path}\n{exc}")
             return

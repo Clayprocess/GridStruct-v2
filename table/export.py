@@ -11,7 +11,7 @@ from math import ceil
 from unicodedata import east_asian_width
 
 from styles import tokens as T
-from .model import PENDING
+from .model import PENDING, CellMerge, GridSpec, TableCell, TableDocument
 
 SHEET_NAME = "识别结果"
 FONT_NAME = "Microsoft YaHei UI"
@@ -19,6 +19,25 @@ MINIMUM_COLUMN_WIDTH = 8.0
 MAXIMUM_COLUMN_WIDTH = 42.0
 DEFAULT_ROW_HEIGHT = 22.0
 MAXIMUM_ROW_HEIGHT = 110.0
+
+
+def stack(documents, remove_repeated_headers=False):
+    """多页表格上下接成一张。列数不足的页右侧补空格；续页首行与第一页首行一字不差时
+    仅在用户选择去重时视为重复表头（首行有跨行合并的不去，免得拆坏表头）。"""
+    columns = max(document.grid.column_count for document in documents)
+    header = documents[0].rows[0]
+    cells, merges = [], []
+    for index, document in enumerate(documents):
+        tall_header = any(merge.top == 0 and merge.bottom > 1 for merge in document.grid.merges)
+        skip = int(remove_repeated_headers and index > 0 and document.grid.row_count > 1 and document.rows[0] == header
+                   and any(text.strip() for text in header) and not tall_header)
+        offset = len(cells) - skip
+        cells += [(*row, *(TableCell(),) * (columns - len(row))) for row in document.cells[skip:]]
+        merges += [CellMerge(merge.top + offset, merge.left, merge.bottom + offset, merge.right)
+                   for merge in document.grid.merges if merge.top >= skip]
+    # 合成表只用于输出，网格线取行列序号即可。
+    grid = GridSpec(tuple(range(len(cells) + 1)), tuple(range(columns + 1)), tuple(merges))
+    return TableDocument(grid, tuple(cells))
 
 
 def to_tsv(document):

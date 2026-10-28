@@ -155,6 +155,35 @@ def check_correction_merges():
     print("PASS correction merge/split/delete/undo/redo preserves text and positions")
 
 
+def check_content_crop():
+    import numpy as np
+    from table.analysis import content_rect
+    from table.model import Rect, Token
+
+    tokens = (Token("内容", .99, Rect(50, 50, 80, 70)),)
+    for background, line in ((255, 0), (210, 0), (255, 200), (255, 245), (210, 200)):
+        pixels = np.full((300, 500, 3), background, dtype=np.uint8)
+        for x in (20, 100, 300, 480):
+            pixels[20:282, x:x + 2] = line
+        for y in (20, 100, 180, 280):
+            pixels[y:y + 2, 20:482] = line
+        pixels[50:70, 50:80] = 0
+        # 只有左上格有文字，空白外行列和未识别文字的表格仍需保留完整边线。
+        expected = QRect(18, 18, 466, 266)
+        assert content_rect(tokens, pixels) == expected
+        assert content_rect((), pixels) == expected
+        wider_text = (Token("内容", .99, Rect(10, 10, 490, 290)),)
+        assert content_rect(wider_text, pixels) == QRect(8, 8, 484, 284)
+        # 边角只差一个灰度值也保留，不把噪声阈值当成可删除内容的依据。
+        pixels[0, 0] = background - 1
+        pixels[-1, -1] = background - 1
+        assert content_rect(tokens, pixels) == QRect(0, 0, 500, 300)
+        pixels.fill(background)
+        assert content_rect((), pixels) == QRect(0, 0, 500, 300)
+        assert content_rect(tokens, pixels) == QRect(0, 0, 500, 300)
+    print("PASS: document crop retains faint grid lines, outer rows/columns, OCR boxes, edge noise and blank pages")
+
+
 def check_analysis():
     from table import export
     from table.analysis import analyze
@@ -163,7 +192,7 @@ def check_analysis():
                           for row, values in enumerate(DATA))
     for name, wired, merged in (("有线", True, False), ("无线", False, False), ("合并", True, True)):
         started = time.perf_counter()
-        tokens, suggestion, note = analyze(synthetic(wired, merged))
+        tokens, suggestion, note, _rect = analyze(synthetic(wired, merged))
         grid = suggestion.selected.grid
         document = TableReview(tokens, grid).document
         print(f"{name}: {time.perf_counter() - started:.2f}s {suggestion.selected.strategy} "
@@ -176,6 +205,23 @@ def check_analysis():
         else:
             assert document.rows == expected_rows, document.rows
     return document
+
+
+def check_stacked_output():
+    from table.export import stack
+    from table.model import CellMerge, GridSpec, TableCell, TableDocument
+
+    grid = GridSpec((0, 1, 2), (0, 1, 2))
+    first = TableDocument(grid, ((TableCell("甲"), TableCell("10")), (TableCell("乙"), TableCell("20"))))
+    second = TableDocument(grid, ((TableCell("甲"), TableCell("10")), (TableCell("丙"), TableCell("30"))))
+    assert stack((first, second)).rows == (*first.rows, *second.rows), "无表头重复记录默认不得删除"
+    assert stack((first, second), True).rows == (*first.rows, second.rows[1])
+    merged = TableDocument(GridSpec((0, 1, 2), (0, 1, 2), (CellMerge(0, 0, 2, 1),)),
+                           (second.cells[0], (TableCell(), TableCell("30"))))
+    combined = stack((first, merged), True)
+    assert combined.rows == (*first.rows, *merged.rows), "去重不得拆掉跨行表头"
+    assert combined.grid.merges == (CellMerge(2, 0, 4, 1),)
+    print("PASS: stacked output retains repeated records by default and preserves merged headers")
 
 
 def check_export(document):
@@ -335,7 +381,7 @@ def check_xlsx_failure(app):
         image = QImage(200, 100, QImage.Format_RGB32)
         image.fill(QColor(T.LIGHT["background"]))
         dialog = TableDialog(image)
-        dialog._review = TableReview((), GridSpec((0, 100), (0, 200)))
+        dialog._state.review = TableReview((), GridSpec((0, 100), (0, 200)))
         # 目录不能作为 XLSX 文件写入，走真实 XlsxWriter 文件失败路径。
         destination = Path(folder) / "unwritable.xlsx"
         destination.mkdir()
@@ -424,6 +470,88 @@ def check_review_navigation(app):
     print("PASS: pending navigation, merged-cell editing, output with pending note and undo/redo")
 
 
+def _write_pdf(path, pages):
+    """每页把一张合成表格画进 A4，模拟扫描件 PDF。"""
+    from PySide6.QtCore import QMarginsF, QSizeF
+    from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter
+    writer = QPdfWriter(str(path))
+    writer.setResolution(200)
+    writer.setPageLayout(QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait, QMarginsF(0, 0, 0, 0)))
+    painter = QPainter(writer)
+    for index, image in enumerate(pages):
+        if index:
+            writer.newPage()
+        painter.drawImage(QPoint(120, 160), image)
+    painter.end()
+
+
+def check_document(app, mode):
+    """识别文档：逐页分析、翻页保留改字，输出接成一张表，重复表头由用户选择去除。"""
+    from unittest.mock import patch
+    from table import open_document
+    folder = OUTPUT / "document"
+    folder.mkdir(parents=True, exist_ok=True)
+    first = synthetic(True, False)
+    _write_pdf(folder / "报表.pdf", [first, first])
+    second = synthetic(True, False)
+    painter = QPainter(second)
+    painter.fillRect(QRect(0, 0, 720, 52), QColor(T.LIGHT["background"]))
+    painter.setPen(QColor(T.LIGHT["foreground"]))
+    painter.drawLine(0, 0, 719, 0)
+    painter.drawText(QRect(10, 0, 160, 52), Qt.AlignVCenter, "续表")
+    painter.end()
+    second.save(str(folder / "附页.png"))
+    (folder / "坏图.png").write_bytes(b"not an image")
+    paths = [str(folder / name) for name in ("附页.png", "坏图.png", "报表.pdf")]
+    # 图标按创建时的主题染色，先切主题再开窗口。
+    apply_theme(app, mode)
+    with patch("table.controller.QFileDialog.getOpenFileNames", return_value=(paths, "")), \
+            patch("table.controller.show_message") as message:
+        dialog = open_document()
+    assert "坏图.png" in message.call_args.args[2]
+    # 按文件名排序，PDF 两页依次展开。
+    assert [page.label for page in dialog.pages] == ["报表.pdf 第 1 页", "报表.pdf 第 2 页", "附页.png"], \
+        [page.label for page in dialog.pages]
+    deadline = time.time() + 180
+    while any(state.review is None and not state.error for state in dialog._states) and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
+    assert all(state.review is not None for state in dialog._states), [state.error for state in dialog._states]
+    assert dialog._progress.isHidden()
+    # 整页只分析表格所在区域：有线表能按结构识别，外框贴着表格边线。
+    for state in dialog._states[:2]:
+        assert state.crop is not None and state.suggestion.selected.strategy == "structure", state.suggestion.selected
+    # 改第 1 页一格，翻走再翻回仍在。
+    assert dialog._review.document.grid.row_count == 5, dialog._review.document.rows
+    dialog._review.edit(1, 1, "1,201")
+    dialog._refresh()
+    dialog.show_page(2)
+    dialog.show_page(0)
+    assert dialog._review.document.rows[1][1] == "1,201"
+    assert dialog._table.item(1, 1).text() == "1,201"
+    combined = dialog._output()
+    rows = combined.rows
+    header = dialog._states[0].review.document.rows[0]
+    assert not dialog._remove_headers.isChecked()
+    assert rows.count(header) == 2 and combined.grid.row_count == 15, rows
+    # 勾选后只去掉 PDF 第 2 页的重复表头；取消后恢复所有行。
+    QTest.mouseClick(dialog._remove_headers, Qt.LeftButton)
+    assert dialog._remove_headers.isChecked()
+    combined = dialog._output()
+    rows = combined.rows
+    assert rows.count(header) == 1, rows
+    assert combined.grid.row_count == 5 + 4 + 5, (combined.grid.row_count, rows)
+    assert "1,201" in [row[1] for row in rows]
+    QTest.mouseClick(dialog._remove_headers, Qt.LeftButton)
+    restored = dialog._output()
+    assert restored.grid.row_count == 15 and restored.rows.count(header) == 2
+    app.processEvents()
+    assert dialog.grab().save(str(OUTPUT / f"document-{mode}.png"))
+    dialog.close()
+    app.processEvents()
+    print("PASS: document pages, skipped bad file, per-page edits kept and reversible header deduplication")
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     if sys.platform == "win32":
@@ -438,9 +566,13 @@ def main():
     check_ocr_reuse(app)
     check_xlsx_failure(app)
     check_review_navigation(app)
+    check_content_crop()
+    check_stacked_output()
     document = check_analysis()
     check_export(document)
     check_dialog(app)
+    for mode in ("light", "dark"):
+        check_document(app, mode)
     print(f"表格识别自检通过；截图和导出样例在 {OUTPUT}")
     # 没进事件循环不会发 aboutToQuit，手动等后台线程收尾。
     app.aboutToQuit.emit()
