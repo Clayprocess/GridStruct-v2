@@ -1,13 +1,13 @@
 # annotate/toolbar.py
 # FloatPanel 浮动工具条：截图窗口的标注工具切换 + 操作按钮。
 #
-# 布局（同 PixPin 的主区 + 次区，从左到右）：
-#   [9 个常用工具 | 次区浮动按钮 | 次区展开] | [撤销 重做 保存 复制 贴图 OCR 长截图] | [确认 取消]
+# 布局（同 PixPin 3.5.5.1 默认工具条，从左到右）：
+#   [几何▾ 画笔▾ 线条▾ 文字 序号 马赛克 橡皮擦] | [撤销] | [长截图 识别 贴图 保存 关闭 复制] [更多]
 #
 # 约束（AGENTS.md）：
 # - 样式全部走 styles/theme.py，本文件不写任何 setStyleSheet；
 # - 颜色全部走 styles/tokens.py；
-# - 图标只用 assets/icons/ 的 Lucide SVG，经 ui/icons.py 加载。
+# - 图标都在 assets/icons/，经 ui/icons.py 加载；Lucide 没有的几个按同样线宽自绘，见该目录 README。
 
 import os as _os
 import sys as _sys
@@ -16,38 +16,37 @@ import sys as _sys
 # 作为模块导入时此操作无害（路径已存在则重复）。
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QRegion
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QMenu, QToolButton, QWidget, QLabel
 
 from styles import tokens as T
 from settings import get_settings
-from ui import floating_window_type, tinted_icon
+from ui import floating_window_type, round_corners, tinted_icon
+from ui.motion import SelectionPill, animation, tween
 
-# 主区：同 PixPin 的 Shift+1～9 顺序。矩形和椭圆合成一个“几何”按钮，形状在二级面板切换。
-PRIMARY_TOOLS: list[tuple[str, str, str]] = [
-    ("geo", "几何", "square"),
-    ("polyline", "折线", "spline"),
-    ("arrow", "箭头", "arrow-up-right"),
-    ("serial", "序号", "list-ordered"),
-    ("pencil", "画笔", "pencil"),
-    ("highlight", "高亮", "highlighter"),
-    ("mosaic", "马赛克", "grid-2x2"),
-    ("text", "文字", "type"),
-    ("eraser", "橡皮擦", "eraser"),
+# 主区按 PixPin 3.5.5.1 默认工具条排列：同类工具折成一个按钮，右侧小箭头切换，按钮图标跟随所选。
+# 马赛克的像素化/模糊是样式不是工具，留在二级面板里切换。
+TOOL_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
+    ("geo", [("rect", "矩形", "square"), ("ellipse", "椭圆", "circle")]),
+    ("pen", [("pencil", "画笔", "pencil"), ("highlight", "荧光笔", "highlighter")]),
+    ("lines", [("arrow", "箭头", "arrow-up-right"), ("line", "直线", "slash"), ("polyline", "折线", "polyline")]),
+    ("text", [("text", "文字", "type")]),
+    ("serial", [("serial", "序号", "circle-number")]),
+    ("mosaic", [("mosaic", "马赛克", "checkerboard")]),
+    ("eraser", [("eraser", "橡皮擦", "eraser")]),
 ]
-DIGIT_TOOLS = tuple(tool[0] for tool in PRIMARY_TOOLS)
-# 几何按钮背后的真实工具，按钮图标跟随当前形状。
-GEO_SHAPES = {"rect": ("矩形", "square"), "ellipse": ("椭圆", "circle")}
-# 次区：低频工具和取色，悬停展开；同 PixPin，最近用过的次区工具会浮到主区。
-SECONDARY_TOOLS: list[tuple[str, str, str]] = [
-    ("line", "直线", "minus"),
+_GROUP_OF = {tool[0]: group for group, tools in TOOL_GROUPS for tool in tools}
+_TOOL_INFO = {tool[0]: tool[1:] for _group, tools in TOOL_GROUPS for tool in tools}
+# 合并按钮不改快捷键：Shift+1～9 仍是 PixPin 文档的几何、折线、箭头、序号、铅笔、荧光笔、马赛克、文字、橡皮擦。
+DIGIT_TOOLS = ("geo", "polyline", "arrow", "serial", "pencil", "highlight", "mosaic", "text", "eraser")
+# “更多”菜单：低频工具和操作，同 PixPin 放在最右。
+MORE_TOOLS: list[tuple[str, str, str]] = [
     ("magnifier", "放大镜", "zoom-in"),
 ]
-SECONDARY_ACTIONS: list[tuple[str, str, str]] = [
+MORE_ACTIONS: list[tuple[str, str, str]] = [
     ("pipette", "取色", "pipette"),
-    # 表格识别是低频的重操作，放次区不占主条位置。
-    ("table", "表格识别", "table"),
+    ("redo", "重做", "redo-2"),
 ]
 
 
@@ -62,28 +61,112 @@ def shortcut_tool(event):
     index = "123456789!@#$%^&*(".find(chr(key)) if key < 0x110000 else -1
     return DIGIT_TOOLS[index % 9] if index >= 0 else None
 
-# 操作 id -> (中文名, Lucide 图标名)
+# 操作 id -> (中文名, Lucide 图标名)。撤销单独一组，其余是输出。
+UNDO_ACTION = ("undo", "撤销", "undo-2")
 ACTIONS: list[tuple[str, str, str]] = [
-    ("undo", "撤销", "undo-2"),
-    ("redo", "重做", "redo-2"),
-    ("save", "保存", "save"),
-    ("copy", "复制", "copy"),
-    ("pin", "贴图", "pin"),
+    ("longshot", "长截图", "longshot"),
     ("ocr", "文字识别", "scan-text"),
-    ("longshot", "长截图", "unfold-vertical"),
+    ("table", "表格识别", "table"),
+    ("pin", "贴图", "pin"),
+    ("save", "保存", "save"),
 ]
 
+# 同 PixPin 没有单独的“确认”：最右的复制就是完成，与 Enter 同效；关闭紧挨在它左边。
 CONFIRM_ID = "confirm"
 CANCEL_ID = "cancel"
-_END_BUTTONS: dict[str, tuple[str, str]] = {
-    CONFIRM_ID: ("确认", "check"),
-    CANCEL_ID: ("取消", "x"),
-}
+_END_BUTTONS: list[tuple[str, str, str]] = [
+    (CANCEL_ID, "关闭", "x"),
+    (CONFIRM_ID, "复制截图", "copy"),
+]
+_SHORTCUTS = {"undo": "Ctrl+Z", "redo": "Ctrl+Y", "save": "Ctrl+S", "ocr": "Shift+O", "longshot": "Ctrl+Alt+L",
+              CONFIRM_ID: "Ctrl+C / Enter", CANCEL_ID: "Esc"}
+_SHORTCUTS.update({tool: f"Shift+{i + 1}" for i, tool in enumerate(DIGIT_TOOLS) if tool in _TOOL_INFO})
+_SHORTCUTS["rect"] = _SHORTCUTS["ellipse"] = "Shift+1"
+
+
+def _tip(item_id, label):
+    return f"{label} ({_SHORTCUTS[item_id]})" if item_id in _SHORTCUTS else label
+
+
+def _menu_text(item_id, label):
+    # 制表符后的文字是 QMenu 右侧的快捷键列，只作提示，按键仍由截图窗口统一分发。
+    return f"{label}\t{_SHORTCUTS[item_id]}" if item_id in _SHORTCUTS else label
 
 _ICON_SIZE = 16
+_CARET_SIZE = 12
 _GAP = 8  # 工具条与选区之间的间距
 # 主工具条与二级面板是两张独立卡片，中间留缝（同 PixPin：二级面板在主条下方、左缘对齐、宽度随工具变化）。
 _CARD_GAP = 6
+
+
+class _DragHandle(QWidget):
+    """主条最左侧的竖胶囊拖柄：平时是一道淡色细线，悬停或拖动时加深变宽，提示这里能抓。"""
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self._panel = panel
+        self._press = None
+        self._hover = 0.0
+        self._anim = tween(self, T.MOTION_FAST)
+        self._anim.valueChanged.connect(self._set_hover)
+        self.setFixedWidth(14)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip("拖动移动工具条，双击回到选区旁")
+
+    def _set_hover(self, value):
+        self._hover = value
+        self.update()
+
+    def _animate(self, target):
+        self._anim.stop()
+        self._anim.setStartValue(self._hover)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def enterEvent(self, event):
+        self._animate(1.0)
+
+    def leaveEvent(self, event):
+        if self._press is None:
+            self._animate(0.0)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._press = (event.globalPosition().toPoint(), self._panel.pos())
+            self.setCursor(Qt.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event):
+        if self._press is not None:
+            start, origin = self._press
+            self._panel.move(origin + event.globalPosition().toPoint() - start)
+
+    def mouseReleaseEvent(self, event):
+        if self._press is None:
+            return
+        self._press = None
+        self.setCursor(Qt.OpenHandCursor)
+        if not self.underMouse():
+            self._animate(0.0)
+        self._panel.keep_position()
+
+    def mouseDoubleClickEvent(self, event):
+        self._panel.reset_position()
+
+    def paintEvent(self, _event):
+        # 静止时在描边色和弱化色之间取四成，既看得见又不抢按钮；悬停过渡到弱化色。
+        t = T.THEMES[self._panel._mode]
+        rest, active = QColor(t["border"]), QColor(t["muted_foreground"])
+        amount = 0.4 + 0.6 * self._hover
+        color = QColor(*(round(a + (b - a) * amount) for a, b in
+                         ((rest.red(), active.red()), (rest.green(), active.green()), (rest.blue(), active.blue()))))
+        width = 3 + self._hover
+        height = 16
+        with QPainter(self) as p:
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(Qt.NoPen)
+            p.setBrush(color)
+            p.drawRoundedRect(QRectF((self.width() - width) / 2, (self.height() - height) / 2, width, height),
+                              width / 2, width / 2)
 
 
 class FloatPanel(QWidget):
@@ -103,23 +186,29 @@ class FloatPanel(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         self._mode = "light"
-        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
-        self._slide = QPropertyAnimation(self, b"pos", self)
-        for animation in (self._fade, self._slide):
-            animation.setDuration(150)
-            animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._fade = animation(self, b"windowOpacity")
+        self._slide = animation(self, b"pos")
         self._buttons: dict[str, QToolButton] = {}
-        # 按钮 id -> 当前图标名；几何和浮动按钮的图标会随所选工具变化。
+        # 按钮 id -> 当前图标名；组按钮的图标会随所选工具变化。
         self._icon_names: dict[str, str] = {}
-        # 按钮 id -> 图标颜色在 tokens 中的键（确认/取消用前景色变体）
-        self._icon_color_key: dict[str, str] = {}
+        self._carets: list[QToolButton] = []
+        # 菜单项 -> 图标名，换主题时一起重染。
+        self._menu_icons: list[tuple[object, str]] = []
 
         self._root_layout = QVBoxLayout(self)
         self._root_layout.setContentsMargins(8, 6, 8, 10)
         self._root_layout.setSpacing(_CARD_GAP)
         self._options = None
         self._options_above = False
+        # 二级面板卡片的展开/变宽过渡：_card 是动画中的卡片矩形，_card_end 是上次展开到的位置。
+        self._card = None
+        self._card_end = None
+        self._card_anim = tween(self)
+        self._card_anim.valueChanged.connect(self._set_card)
+        self._card_anim.finished.connect(lambda: self._set_card(None))
         self._button_container = QWidget(self)
+        # 主条比二级面板窄时容器左侧留白，全局 QWidget 背景会把这段留白涂成方块。
+        self._button_container.setObjectName("FloatPanelRow")
         self._button_layout = QHBoxLayout(self._button_container)
         self._button_layout.setContentsMargins(0, 0, 0, 0)
         self._button_layout.setSpacing(0)
@@ -129,68 +218,61 @@ class FloatPanel(QWidget):
         self._button_layout.addStretch()
         self._root_layout.addWidget(self._button_container)
         layout = QHBoxLayout(buttons)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(2, 6, 6, 6)
         layout.setSpacing(2)
+        # 拖动过的主条留在原处（_manual 是主条左上角的屏幕坐标），选区再变也不跟着跳；双击拖柄复位。
+        self._manual: QPoint | None = None
+        self._near: QRect | None = None
+        layout.addWidget(_DragHandle(self))
 
-        # 标注工具：单选互斥
+        # 标注工具：单选互斥。每组一个按钮，记住组内上次用的工具。选中底块在按钮间滑动。
+        self._pill = SelectionPill(buttons, "secondary", "border")
         self._tool_group = QButtonGroup(self)
         self._tool_group.setExclusive(True)
-        self._geo_shape = get_settings().value("annotation/geo_shape", "rect")
-        for tool_id, label, icon_name in PRIMARY_TOOLS:
-            btn = self._make_button(tool_id, label, icon_name, checkable=True)
+        settings = get_settings()
+        self._variant: dict[str, str] = {}
+        for group, tools in TOOL_GROUPS:
+            saved = settings.value(f"annotation/{group}_tool", tools[0][0])
+            self._variant[group] = saved if _GROUP_OF.get(saved) == group else tools[0][0]
+            btn = self._make_button(group, "", "", checkable=True)
+            btn.setProperty("pill", True)
             self._tool_group.addButton(btn)
             layout.addWidget(btn)
-            btn.clicked.connect(lambda _checked=False, tid=tool_id: self._pick(tid))
-        self._set_geo_shape(self._geo_shape)
-
-        # 次区浮动按钮：始终占位，默认显示上次用过的次区工具，首次使用时工具条不会变宽。
-        self._floating = self._make_button("floating", "", "minus", checkable=True)
-        self._tool_group.addButton(self._floating)
-        self._floating.clicked.connect(lambda: self._pick(self._floating_tool))
-        layout.addWidget(self._floating)
-        self._set_floating_tool(get_settings().value("annotation/floating_tool", SECONDARY_TOOLS[0][0]))
-
-        self._more = self._make_button("more", "更多工具", "chevron-down")
-        self._more.setObjectName("MoreTools")
-        self._more.setPopupMode(QToolButton.InstantPopup)
-        self._more_menu = QMenu(self._more)
-        self._menu_actions = {}
-        for tool_id, label, icon_name in SECONDARY_TOOLS:
-            action = self._more_menu.addAction(label, lambda tid=tool_id: self._pick(tid))
-            self._menu_actions[tool_id] = (action, icon_name)
-        self._more_menu.addSeparator()
-        for action_id, label, icon_name in SECONDARY_ACTIONS:
-            action = self._more_menu.addAction(label, lambda aid=action_id: self.actionTriggered.emit(aid))
-            self._menu_actions[action_id] = (action, icon_name)
-        self._more.setMenu(self._more_menu)
-        # 同 PixPin 悬停即展开；showMenu 会进入嵌套事件循环，不能在事件过滤器里同步调用。
-        self._more.installEventFilter(self)
-        layout.addWidget(self._more)
+            btn.clicked.connect(lambda _checked=False, g=group: self._pick(self._variant[g]))
+            if len(tools) > 1:
+                layout.addWidget(self._make_caret(tools))
+            self._show_variant(group)
 
         layout.addWidget(self._make_separator())
+        undo = self._make_button(*UNDO_ACTION)
+        undo.setEnabled(False)
+        undo.clicked.connect(lambda: self.actionTriggered.emit("undo"))
+        layout.addWidget(undo)
+        layout.addWidget(self._make_separator())
 
-        # 操作按钮
-        for action_id, label, icon_name in ACTIONS:
+        for action_id, label, icon_name in ACTIONS + _END_BUTTONS:
             btn = self._make_button(action_id, label, icon_name)
             layout.addWidget(btn)
             btn.clicked.connect(
                 lambda _checked=False, aid=action_id: self.actionTriggered.emit(aid)
             )
 
-        layout.addWidget(self._make_separator())
-
-        # 取消不属于破坏数据的操作，保持描边按钮的层级。
-        confirm = self._make_button(CONFIRM_ID, *_END_BUTTONS[CONFIRM_ID])
-        confirm.setProperty("class", "primary")
-        self._icon_color_key[CONFIRM_ID] = "primary_foreground"
-        confirm.clicked.connect(lambda: self.actionTriggered.emit(CONFIRM_ID))
-        layout.addWidget(confirm)
-
-        cancel = self._make_button(CANCEL_ID, *_END_BUTTONS[CANCEL_ID])
-        cancel.setProperty("class", "outline")
-        self._icon_color_key[CANCEL_ID] = "foreground"
-        cancel.clicked.connect(lambda: self.actionTriggered.emit(CANCEL_ID))
-        layout.addWidget(cancel)
+        self._more = self._make_button("more", "更多", "ellipsis")
+        self._more.setObjectName("MoreTools")
+        self._more.setPopupMode(QToolButton.InstantPopup)
+        self._more_menu = round_corners(QMenu(self._more))
+        for tool_id, label, icon_name in MORE_TOOLS:
+            action = self._more_menu.addAction(label, lambda tid=tool_id: self._pick(tid))
+            self._menu_icons.append((action, icon_name))
+        self._more_menu.addSeparator()
+        for action_id, label, icon_name in MORE_ACTIONS:
+            action = self._more_menu.addAction(_menu_text(action_id, label),
+                                               lambda aid=action_id: self.actionTriggered.emit(aid))
+            self._menu_icons.append((action, icon_name))
+        self._more.setMenu(self._more_menu)
+        # 同 PixPin 悬停即展开；showMenu 会进入嵌套事件循环，不能在事件过滤器里同步调用。
+        self._more.installEventFilter(self)
+        layout.addWidget(self._more)
 
         self._ocr_feedback = QWidget(self)
         feedback_layout = QHBoxLayout(self._ocr_feedback)
@@ -210,25 +292,23 @@ class FloatPanel(QWidget):
         self.refresh_icons(mode)
 
     def eventFilter(self, watched, event):
+        if watched is self._options and event.type() == QEvent.Show and self._card_end is None:
+            # 面板刚显示时布局要等下一轮事件循环才排好，先整块藏起来，交给展开动画露出。
+            self._options.setMask(QRegion(0, 0, 1, 1))
         if watched is self._more and event.type() == QEvent.Enter and not self._more_menu.isVisible():
             QTimer.singleShot(0, self._more.showMenu)
         return super().eventFilter(watched, event)
 
     def _pick(self, tool_id):
-        self.toolSelected.emit(self._geo_shape if tool_id == "geo" else tool_id)
+        self.toolSelected.emit(self._variant[tool_id] if tool_id in self._variant else tool_id)
 
-    def _set_floating_tool(self, tool_id):
-        self._floating_tool = tool_id
-        label, icon_name = next(tool[1:] for tool in SECONDARY_TOOLS if tool[0] == tool_id)
-        self._floating.setToolTip(label)
-        self._floating.setAccessibleName(label)
-        self._icon_names["floating"] = icon_name
-
-    def _set_geo_shape(self, shape):
-        self._geo_shape = shape
-        label, icon_name = GEO_SHAPES[shape]
-        self._icon_names["geo"] = icon_name
-        self._buttons["geo"].setToolTip(f"几何：{label} (Shift+1)")
+    def _show_variant(self, group):
+        tool_id = self._variant[group]
+        label, icon_name = _TOOL_INFO[tool_id]
+        button = self._buttons[group]
+        button.setToolTip(_tip(tool_id, label))
+        button.setAccessibleName(label)
+        self._icon_names[group] = icon_name
 
     def paintEvent(self, _event) -> None:
         # 圆角卡片背景：WA_TranslucentBackground 下 QSS 不绘制自身背景，
@@ -239,13 +319,56 @@ class FloatPanel(QWidget):
         for row in (self._button_row, self._options, self._ocr_feedback):
             if row is None or row.isHidden():
                 continue
-            rect = QRectF(QRect(row.mapTo(self, QPoint()), row.size())).adjusted(-1.5, -1.5, 1.5, 1.5)
+            geometry = self._row_rect(row)
+            if row is self._options:
+                # 面板刚显示、还没开始展开时布局未排好，不画卡片，否则会闪出一个小圆点。
+                if self._card_end is None:
+                    continue
+                geometry = self._card if self._card is not None else geometry
+            if geometry.height() < 4:
+                continue
+            rect = QRectF(geometry).adjusted(-1.5, -1.5, 1.5, 1.5)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(*T.FLOAT_PANEL_SHADOW))
             painter.drawRoundedRect(rect.translated(0, 3).adjusted(-1, -1, 1, 1), T.RADIUS_LG + 1, T.RADIUS_LG + 1)
             painter.setBrush(QColor(t["popover"]))
             painter.setPen(QPen(QColor(t["border"]), 1))
             painter.drawRoundedRect(rect, T.RADIUS_LG, T.RADIUS_LG)
+
+    def _row_rect(self, row):
+        return QRect(row.mapTo(self, QPoint()), row.size())
+
+    def _set_card(self, rect):
+        self._card = rect
+        if rect is None:
+            self._options.clearMask()
+        else:
+            # 内容按卡片当前大小裁切，看起来是从主条里抽出来的。
+            self._options.setMask(QRegion(rect.translated(-self._options.pos())))
+        self.update()
+
+    def _reveal_options(self):
+        """二级面板首次出现时从主条边缘展开，换工具时卡片宽高平滑过渡到新尺寸。"""
+        if self._options is None or self._options.isHidden():
+            self._card_anim.stop()
+            if self._card is not None:
+                self._set_card(None)
+            self._card_end = None
+            return
+        end = self._row_rect(self._options)
+        if end == self._card_end:
+            if self._card_anim.state() != QVariantAnimation.Running:
+                self._options.clearMask()
+            return
+        start = self._card if self._card is not None else self._card_end
+        if start is None:
+            edge = end.bottom() + 1 if self._options_above else end.top()
+            start = QRect(end.left(), edge, end.width(), 0)
+        self._card_end = end
+        self._card_anim.stop()
+        self._card_anim.setStartValue(start)
+        self._card_anim.setEndValue(end)
+        self._card_anim.start()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -267,11 +390,7 @@ class FloatPanel(QWidget):
         self, btn_id: str, label: str, icon_name: str, checkable: bool = False
     ) -> QToolButton:
         btn = QToolButton(self)
-        shortcut = (f"Shift+{DIGIT_TOOLS.index(btn_id) + 1}" if btn_id in DIGIT_TOOLS else
-                    {"undo": "Ctrl+Z", "redo": "Ctrl+Y", "save": "Ctrl+S",
-                     "copy": "Ctrl+C", "ocr": "Shift+O",
-                     "longshot": "Ctrl+Alt+L", "confirm": "Enter", "cancel": "Esc"}.get(btn_id, ""))
-        btn.setToolTip(f"{label} ({shortcut})" if shortcut else label)
+        btn.setToolTip(_tip(btn_id, label))
         btn.setAccessibleName(label)
         btn.setCheckable(checkable)
         btn.setAutoRaise(True)
@@ -279,8 +398,23 @@ class FloatPanel(QWidget):
         btn.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
         self._buttons[btn_id] = btn
         self._icon_names[btn_id] = icon_name
-        self._icon_color_key.setdefault(btn_id, "foreground")
         return btn
+
+    def _make_caret(self, tools) -> QToolButton:
+        """组按钮右侧的小箭头，点开切换组内工具（同 PixPin）。"""
+        caret = QToolButton(self)
+        caret.setObjectName("ToolCaret")
+        caret.setToolTip("切换" + "、".join(tool[1] for tool in tools))
+        caret.setAutoRaise(True)
+        caret.setIconSize(QSize(_CARET_SIZE, _CARET_SIZE))
+        caret.setPopupMode(QToolButton.InstantPopup)
+        menu = round_corners(QMenu(caret))
+        for tool_id, label, icon_name in tools:
+            action = menu.addAction(_menu_text(tool_id, label), lambda tid=tool_id: self._pick(tid))
+            self._menu_icons.append((action, icon_name))
+        caret.setMenu(menu)
+        self._carets.append(caret)
+        return caret
 
     def _make_separator(self) -> QFrame:
         sep = QFrame(self)
@@ -302,60 +436,75 @@ class FloatPanel(QWidget):
             raise ValueError(f"unknown theme mode: {mode}")
         self._mode = mode
         t = T.THEMES[mode]
+        # Qt 自动生成的禁用图标在深色主题里几乎和正常态一样亮，禁用色自己给：弱化色再往底色淡一半。
+        muted, base = QColor(t["muted_foreground"]), QColor(t["popover"])
+        disabled = QColor((muted.red() + base.red()) // 2, (muted.green() + base.green()) // 2,
+                          (muted.blue() + base.blue()) // 2).name()
         for btn_id, btn in self._buttons.items():
-            btn.setIcon(tinted_icon(self._icon_names[btn_id], t[self._icon_color_key[btn_id]], _ICON_SIZE))
-        for action, icon_name in self._menu_actions.values():
+            name = self._icon_names[btn_id]
+            icon = tinted_icon(name, t["foreground"], _ICON_SIZE, QIcon())
+            btn.setIcon(tinted_icon(name, disabled, _ICON_SIZE, icon, QIcon.Disabled))
+        for caret in self._carets:
+            caret.setIcon(tinted_icon("chevron-down", t["muted_foreground"], _CARET_SIZE))
+        for action, icon_name in self._menu_icons:
             action.setIcon(tinted_icon(icon_name, t["popover_foreground"], _ICON_SIZE))
         self.update()  # 卡片背景色也在 paintEvent 里取自主题，需重绘
 
+    def set_undo_enabled(self, enabled: bool) -> None:
+        self._buttons["undo"].setEnabled(enabled)
+
+    def set_copy_text_selected(self, selected: bool):
+        # 选字时 Ctrl+C 只复制文字不结束，只有按钮和 Enter 会复制文字并结束。
+        label = "复制选中文字" if selected else "复制截图"
+        button = self._buttons[CONFIRM_ID]
+        button.setAccessibleName(label)
+        button.setToolTip(f"{label}并结束（{'Enter' if selected else 'Ctrl+C / Enter'}）")
+
     def set_tool(self, tool_id: str) -> None:
-        """程序化选中标注工具，与用户点击发出同样的信号。tool_id 可以是 "geo"。"""
-        if tool_id in GEO_SHAPES:
-            self._set_geo_shape(tool_id)
+        """程序化选中标注工具，与用户点击发出同样的信号。tool_id 也可以是组 id，如 "geo"。"""
         self._pick(tool_id)
 
     def mark_tool(self, tool_id: str) -> None:
-        """画布换了工具后同步按钮选中态、几何图标和次区浮动按钮，不发信号。"""
-        if tool_id in GEO_SHAPES:
-            if tool_id != self._geo_shape:
-                self._set_geo_shape(tool_id)
-                get_settings().setValue("annotation/geo_shape", tool_id)
-                self.refresh_icons(self._mode)
-            button = self._buttons["geo"]
-        elif any(tool_id == tool[0] for tool in SECONDARY_TOOLS):
-            if tool_id != self._floating_tool:
-                self._set_floating_tool(tool_id)
-                get_settings().setValue("annotation/floating_tool", tool_id)
-                self.refresh_icons(self._mode)
-            button = self._floating
-        else:
-            button = self._buttons[tool_id]
-        button.setChecked(True)
+        """画布换了工具后同步按钮选中态和组按钮图标，不发信号。"""
+        group = _GROUP_OF.get(tool_id)
+        if group is None:
+            # 更多菜单里的工具在主条上没有按钮，只取消其他工具的高亮。
+            self._uncheck_tools()
+            return
+        if tool_id != self._variant[group]:
+            self._variant[group] = tool_id
+            get_settings().setValue(f"annotation/{group}_tool", tool_id)
+            self._show_variant(group)
+            self.refresh_icons(self._mode)
+        self._buttons[group].setChecked(True)
+        self._pill.track(self._buttons[group])
 
     def selected_tool(self) -> str | None:
         """当前选中的工具 id，未选返回 None。"""
         checked = self._tool_group.checkedButton()
         if checked is None:
             return None
-        if checked is self._buttons["geo"]:
-            return self._geo_shape
-        if checked is self._floating:
-            return self._floating_tool
-        return next(tool_id for tool_id, btn in self._buttons.items() if btn is checked)
+        return next(self._variant[group] for group in self._variant if self._buttons[group] is checked)
 
-    def clear_selection(self):
-        """画布进入选择模式时清除工具高亮，不再触发绘制工具。"""
+    def _uncheck_tools(self):
+        self._pill.track(None)
         self._tool_group.setExclusive(False)
         for button in self._tool_group.buttons():
             button.setChecked(False)
         self._tool_group.setExclusive(True)
+
+    def clear_selection(self):
+        """画布进入选择模式时清除工具高亮，不再触发绘制工具。"""
+        self._uncheck_tools()
         if self._options is not None:
             self._options.hide()
+            self._reveal_options()
             self.adjustSize()
 
     def set_options_widget(self, widget):
         """工具配置跟随浮动面板，避免挤占截图画布。"""
         self._options = widget
+        widget.installEventFilter(self)
         self._root_layout.insertWidget(1, widget, 0, Qt.AlignLeft)
         widget.setVisible(bool(self.selected_tool()))
 
@@ -372,10 +521,29 @@ class FloatPanel(QWidget):
             if row is not None:
                 self._root_layout.addWidget(row, 0, Qt.AlignLeft if row is self._options else Qt.Alignment())
 
+    def manual_position(self) -> QPoint | None:
+        """用户拖到的主条位置；没拖过为 None。框选阶段的工具条换成标注窗口的工具条时要接着用。"""
+        return self._manual
+
+    def set_manual_position(self, pos: QPoint | None) -> None:
+        self._manual = pos
+
+    def keep_position(self) -> None:
+        """拖动结束：记下主条位置，再按新位置重新决定二级面板放在哪一侧。"""
+        row = self._button_row.mapToGlobal(QPoint())
+        self._manual = QPoint(row.x() - self._root_layout.contentsMargins().left(), row.y())
+        self.set_position_near(self._near)
+
+    def reset_position(self) -> None:
+        self._manual = None
+        self.set_position_near(self._near)
+
     def set_position_near(self, rect: QRect) -> None:
         """主条只按自身尺寸锚定选区，二级面板靠屏幕边缘时独立换侧或横移。"""
         self._slide.stop()
-        screen = QGuiApplication.screenAt(rect.center()) or QGuiApplication.primaryScreen()
+        self._near = QRect(rect)
+        anchor = self._manual if self._manual is not None else rect.center()
+        screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
         geo = screen.availableGeometry()
         margins = self._root_layout.contentsMargins()
         self._button_layout.setContentsMargins(0, 0, 0, 0)
@@ -384,15 +552,22 @@ class FloatPanel(QWidget):
         size = self.sizeHint()
         bar = self._button_row.sizeHint()
         bar_width = bar.width() + margins.left() + margins.right()
-        anchor_x = max(geo.left(), min(rect.center().x() - bar_width // 2, geo.right() - bar_width + 1))
+        wanted_x = self._manual.x() if self._manual is not None else rect.center().x() - bar_width // 2
+        anchor_x = max(geo.left(), min(wanted_x, geo.right() - bar_width + 1))
         x = max(geo.left(), min(anchor_x, geo.right() - size.width() + 1))
         # 宽面板把整个窗口向左推时，用主条行的留白抵消位移。
         self._button_layout.setContentsMargins(anchor_x - x, 0, 0, 0)
         self._button_container.updateGeometry()
-        bar_y = rect.bottom() + _GAP + margins.top()
-        bar_above = bar_y + bar.height() + margins.bottom() > geo.bottom() + 1
-        if bar_above:
-            bar_y = max(geo.top() + margins.top(), rect.top() - _GAP - margins.bottom() - bar.height())
+        if self._manual is not None:
+            bar_y = max(geo.top() + margins.top(),
+                        min(self._manual.y(), geo.bottom() + 1 - margins.bottom() - bar.height()))
+            # 拖到选区中线以上就当作在选区上方，二级面板照样朝外展开。
+            bar_above = bar_y + bar.height() // 2 < rect.center().y()
+        else:
+            bar_y = rect.bottom() + _GAP + margins.top()
+            bar_above = bar_y + bar.height() + margins.bottom() > geo.bottom() + 1
+            if bar_above:
+                bar_y = max(geo.top() + margins.top(), rect.top() - _GAP - margins.bottom() - bar.height())
         # 二级面板放在主条背向选区的一侧，不遮住截图；那一侧放不下才换到另一侧。
         fits_below = bar_y - margins.top() + size.height() <= geo.bottom() + 1
         fits_above = bar_y - (size.height() - bar.height() - margins.bottom()) >= geo.top()
@@ -400,6 +575,7 @@ class FloatPanel(QWidget):
         self.resize(size)
         self._root_layout.activate()
         self.move(x, bar_y - self._button_row.mapTo(self, QPoint()).y())
+        self._reveal_options()
         self.update()
 
 

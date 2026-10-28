@@ -7,7 +7,7 @@ from PySide6.QtGui import (
     QBrush, QFont, QColor, QImage, QPainter, QPainterPath, QPainterPathStroker, QPen, QPixmap, QPolygonF, QTextCharFormat,
     QTextBlockFormat, QTextCursor,
 )
-from PySide6.QtCore import Qt, QRectF, QPointF
+from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QPointF
 
 from styles import tokens as T
 
@@ -21,10 +21,10 @@ class MarkStyle:
         self.font_size = 16
         self.fill_mode = "outline"
         self.round_radius = 0
-        self.arrow_type = "straight"
+        self.arrow_type = "line"
         self.arrow_size = 16
         self.arrow_start = "none"
-        self.arrow_end = "filled"
+        self.arrow_end = "open"
         self.polyline_cap = "round"
         self.polyline_join = "round"
         self.text_alignment = "left"
@@ -39,12 +39,20 @@ class MarkStyle:
         self.serial_start = 1
         self.serial_global = False
         self.serial_auto_renumber = True
+        self.mosaic_shape = "brush"
         self.mosaic_mode = "pixel"
         self.mosaic_strength = 10
+        self.mosaic_size = 32
         self.opacity = 32
         self.eraser_size = 24
         self.zoom = 2
         self.wheel_enabled = True
+
+
+def arrow_heads(arrow_type):
+    """箭头类型对应的（起点, 终点）样式：线形和尺寸箭头用开放头，双向和尺寸箭头两端都有。"""
+    head = "open" if arrow_type.startswith("line") or arrow_type == "dimension" else "filled"
+    return (head if arrow_type.endswith("_both") or arrow_type == "dimension" else "none"), head
 
 
 class _MarkItemBase(QGraphicsItem):
@@ -316,9 +324,66 @@ class HighlightMarkItem(_MarkItemBase):
         return self._stroke_shape(self._path, self._highlight_width)
 
 
+def _mosaic(source: QPixmap, mode, strength) -> QPixmap:
+    """像素化或模糊一块截图（物理像素）。"""
+    w, h = source.width(), source.height()
+    if mode == "blur":
+        import numpy as np
+        image = source.toImage().convertToFormat(QImage.Format_RGBA8888)
+        pixels = np.frombuffer(image.constBits(), dtype=np.uint8).reshape(h, image.bytesPerLine())[:, :w * 4].reshape(h, w, 4)
+        padded = np.pad(pixels.astype(np.float64), ((strength, strength), (strength, strength), (0, 0)), mode="edge")
+        integral = np.pad(padded, ((1, 0), (1, 0), (0, 0))).cumsum(0).cumsum(1)
+        size = strength * 2 + 1
+        blurred = ((integral[size:, size:] - integral[:-size, size:] - integral[size:, :-size] + integral[:-size, :-size]) / (size * size)).astype(np.uint8)
+        return QPixmap.fromImage(QImage(blurred.data, w, h, w * 4, QImage.Format_RGBA8888).copy())
+    small = source.scaled(max(1, w // strength), max(1, h // strength), Qt.IgnoreAspectRatio, Qt.FastTransformation)
+    return small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+
+
+# 画笔马赛克按 256 物理像素分块、用到哪块算哪块：整张 4K 截图模糊一次要一两秒，按下画笔时会卡住。
+_TILE = 256
+_tiles: dict = {}
+
+
+def _mosaic_tile(source: QPixmap, mode, strength, col, row) -> QPixmap:
+    key = (source.cacheKey(), mode, strength, col, row)
+    if key not in _tiles:
+        bounds = QRect(0, 0, source.width(), source.height())
+        tile = QRect(col * _TILE, row * _TILE, _TILE, _TILE).intersected(bounds)
+        if mode == "blur":
+            # 多取一圈原图参与模糊，块与块之间才接得上。
+            area = tile.adjusted(-strength, -strength, strength, strength).intersected(bounds)
+        else:
+            # 格子按整图对齐，相邻块的马赛克格才连成一片。
+            left, top = tile.left() // strength * strength, tile.top() // strength * strength
+            right = -(-(tile.right() + 1) // strength) * strength - 1
+            bottom = -(-(tile.bottom() + 1) // strength) * strength - 1
+            area = QRect(QPoint(left, top), QPoint(right, bottom))
+        region = source.copy(area.intersected(bounds))
+        region.setDevicePixelRatio(1)
+        if region.size() != area.size():
+            # 边缘半格补满后再缩放，采样位置才不会随最后一块的尺寸偏移。
+            image = region.toImage()
+            w, h = image.width(), image.height()
+            extra_w, extra_h = area.width() - w, area.height() - h
+            padded = QImage(area.size(), image.format())
+            with QPainter(padded) as painter:
+                painter.drawImage(QPoint(), image)
+                painter.drawImage(QRect(w, 0, extra_w, h), image, QRect(w - 1, 0, 1, h))
+                painter.drawImage(QRect(0, h, w, extra_h), image, QRect(0, h - 1, w, 1))
+                painter.drawImage(QRect(w, h, extra_w, extra_h), image, QRect(w - 1, h - 1, 1, 1))
+            region = QPixmap.fromImage(padded)
+        if len(_tiles) > 512:
+            del _tiles[next(iter(_tiles))]
+        _tiles[key] = _mosaic(region, mode, strength).copy(tile.translated(-area.topLeft()))
+    return _tiles[key]
+
+
 class MosaicMarkItem(QGraphicsItem):
+    """矩形马赛克处理选区那一块；画笔马赛克只露出涂抹轨迹下的部分。"""
+
     tool_id = "mosaic"
-    style_keys = ("mosaic_mode", "mosaic_strength")
+    style_keys = ("mosaic_mode", "mosaic_strength", "mosaic_size")
 
     def __init__(self, style=None):
         super().__init__()
@@ -326,33 +391,51 @@ class MosaicMarkItem(QGraphicsItem):
         self._source = QPixmap()
         self._pixmap = QPixmap()
         self._rect = QRectF()
+        # 画笔轨迹（图元坐标）；None 表示矩形马赛克。
+        self._path = None
+        self._stroke = QPainterPath()
         self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
 
     def set_source(self, pixmap, rect):
         self.prepareGeometryChange()
         self._source = pixmap
+        self._pixmap = QPixmap()
         self._rect = rect
         self.set_style(self.style)
 
+    def start_brush(self, source, rect, path: QPainterPath):
+        """画笔只初始化轨迹，像素留给绘制时按块处理，避免按下时处理整图。"""
+        self.prepareGeometryChange()
+        self._source = source
+        self._rect = rect
+        self._path = QPainterPath(path)
+        self._update_stroke()
+
+    def set_path(self, path: QPainterPath):
+        """画笔模式：source 是整张截图，rect 是它在场景里的范围。"""
+        self.prepareGeometryChange()
+        self._path = QPainterPath(path)
+        self._update_stroke()
+
+    def _update_stroke(self):
+        stroker = QPainterPathStroker()
+        stroker.setWidth(self.style.mosaic_size)
+        stroker.setCapStyle(Qt.RoundCap)
+        stroker.setJoinStyle(Qt.RoundJoin)
+        self._stroke = stroker.createStroke(self._path).simplified()
+
     def set_style(self, style):
+        changed = (style.mosaic_mode, style.mosaic_strength) != (self.style.mosaic_mode, self.style.mosaic_strength)
         self.style = copy(style)
-        # 保留未处理的采样，二次调节强度时不会反复损失图像信息。
-        if self._source.isNull():
+        if self._path is not None:
+            self.prepareGeometryChange()
+            self._update_stroke()
+            self.update()
             return
-        w, h = self._source.width(), self._source.height()
-        strength = style.mosaic_strength
-        if style.mosaic_mode == "blur":
-            import numpy as np
-            image = self._source.toImage().convertToFormat(QImage.Format_RGBA8888)
-            pixels = np.frombuffer(image.constBits(), dtype=np.uint8).reshape(h, image.bytesPerLine())[:, :w * 4].reshape(h, w, 4)
-            padded = np.pad(pixels.astype(np.float64), ((strength, strength), (strength, strength), (0, 0)), mode="edge")
-            integral = np.pad(padded, ((1, 0), (1, 0), (0, 0))).cumsum(0).cumsum(1)
-            size = strength * 2 + 1
-            blurred = ((integral[size:, size:] - integral[:-size, size:] - integral[size:, :-size] + integral[:-size, :-size]) / (size * size)).astype(np.uint8)
-            self._pixmap = QPixmap.fromImage(QImage(blurred.data, w, h, w * 4, QImage.Format_RGBA8888).copy())
-        else:
-            small = self._source.scaled(max(1, w // strength), max(1, h // strength), Qt.IgnoreAspectRatio, Qt.FastTransformation)
-            self._pixmap = small.scaled(w, h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+        # 保留未处理的采样，二次调节强度时不会反复损失图像信息。
+        if self._source.isNull() or not (changed or self._pixmap.isNull()):
+            return
+        self._pixmap = _mosaic(self._source, style.mosaic_mode, style.mosaic_strength)
         self.update()
 
     def set_preview_rect(self, rect: QRectF):
@@ -360,9 +443,17 @@ class MosaicMarkItem(QGraphicsItem):
         self._rect = rect
 
     def boundingRect(self):
-        return self._rect
+        return self._rect if self._path is None else self._stroke.boundingRect()
+
+    def shape(self):
+        if self._path is None:
+            return super().shape()
+        return self._stroke
 
     def paint(self, p: QPainter, _opt, _w):
+        if self._path is not None:
+            self._paint_brush(p)
+            return
         if self._pixmap.isNull():
             mode = QApplication.instance().property("theme_mode") or "light"
             color = QColor(T.THEMES[mode]["foreground"])
@@ -370,6 +461,20 @@ class MosaicMarkItem(QGraphicsItem):
             p.fillRect(self._rect, color)
             return
         p.drawPixmap(self._rect, self._pixmap, QRectF(self._pixmap.rect()))
+
+    def _paint_brush(self, p):
+        dpr = self._source.devicePixelRatio()
+        area = self._stroke.boundingRect().intersected(self._rect)
+        if area.isEmpty():
+            return
+        p.setClipPath(self._stroke)
+        first_col, first_row = int(area.left() * dpr) // _TILE, int(area.top() * dpr) // _TILE
+        last_col, last_row = int(area.right() * dpr) // _TILE, int(area.bottom() * dpr) // _TILE
+        for row in range(first_row, last_row + 1):
+            for col in range(first_col, last_col + 1):
+                tile = _mosaic_tile(self._source, self.style.mosaic_mode, self.style.mosaic_strength, col, row)
+                target = QRectF(col * _TILE / dpr, row * _TILE / dpr, tile.width() / dpr, tile.height() / dpr)
+                p.drawPixmap(target.translated(self._rect.topLeft()), tile, QRectF(tile.rect()))
 
 
 class SerialMarkItem(_MarkItemBase):

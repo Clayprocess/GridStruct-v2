@@ -220,10 +220,8 @@ class SettingsDialog(BaseDialog):
         """导航图标随主题和选中态换色：选中项是主色底，图标要反白。"""
         t = T.THEMES[QApplication.instance().property("theme_mode") or "light"]
         for row, (_title, name, _build) in enumerate(_PAGES):
-            icon = QIcon()
-            icon.addPixmap(tinted_icon(name, t["foreground"], 36).pixmap(36, 36), QIcon.Normal)
-            icon.addPixmap(tinted_icon(name, t["primary_foreground"], 36).pixmap(36, 36), QIcon.Selected)
-            self._nav.item(row).setIcon(icon)
+            icon = tinted_icon(name, t["foreground"], 36, QIcon())
+            self._nav.item(row).setIcon(tinted_icon(name, t["primary_foreground"], 36, icon, QIcon.Selected))
 
     # ---------- 通用 ----------
 

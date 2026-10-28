@@ -13,7 +13,7 @@ from ui import show_message, show_toast
 class ScreenshotFlow(QObject):
     """一次截图会话：截图 -> 框选 -> 标注 -> 复制/保存。start() 后全程信号驱动。"""
 
-    def __init__(self, app: QApplication, theme_mode: str = "light"):
+    def __init__(self, app: QApplication, theme_mode: str = "light", *, hotkeys=None):
         super().__init__(app)
         self._app = app
         self._mode = theme_mode
@@ -22,6 +22,8 @@ class ScreenshotFlow(QObject):
         self._shot = None
         self._panel = None
         self._longshot = None
+        self._hotkeys = hotkeys
+        self._longshot_escape = None
         self._longshot_requested = False
         self._pending_longshot_region = QRect()
         self._longshot_timer = QTimer(self)
@@ -130,7 +132,29 @@ class ScreenshotFlow(QObject):
         if self._longshot is None:
             from .longshot import LongShotFlow
             self._longshot = LongShotFlow(self._app, self._on_longshot_result)
+            self._longshot.controlsShown.connect(self._register_longshot_escape)
+            self._longshot.closed.connect(self._release_longshot_escape)
         return self._longshot
+
+    def _register_longshot_escape(self):
+        if self._hotkeys is None:
+            return
+        self._longshot_escape = self._hotkeys.register_escape(self._escape_longshot)
+        if self._longshot_escape is None:
+            show_toast("全局 Esc 不可用；请点击长截图操作条后按 Esc，或点“取消”。")
+
+    def _escape_longshot(self):
+        # 全局热键会先于 Qt 弹出层收到 Esc，保留先收菜单/对话框、再退出会话的顺序。
+        transient = self._app.activePopupWidget() or self._app.activeModalWidget()
+        if transient is not None:
+            transient.close()
+        else:
+            self._longshot.cancel()
+
+    def _release_longshot_escape(self):
+        if self._longshot_escape is not None:
+            self._hotkeys.release(self._longshot_escape)
+            self._longshot_escape = None
 
     def _on_longshot_result(self, pixmap):
         mode = self._app.property("theme_mode") or self._mode
@@ -155,7 +179,9 @@ class ScreenshotFlow(QObject):
         cropped = capture.crop(rect)
         crosses_screens = sum(frame.geometry.intersects(rect) for frame in capture.frames) > 1
 
+        toolbar_pos = None
         if self._panel is not None:
+            toolbar_pos = self._panel.manual_position()
             self._panel.close()
             self._panel = None
         self._shot = None
@@ -165,7 +191,7 @@ class ScreenshotFlow(QObject):
         mode = self._app.property("theme_mode") or self._mode
         # 跨屏导出保留各屏原生像素，单个标注视口不能再假定统一的屏幕 DPR。
         self._ann = AnnotationWindow(cropped, position, mode, scrollable=crosses_screens,
-                                     capture_region=rect)
+                                     capture_region=rect, toolbar_pos=toolbar_pos)
         self._ann.finished.connect(self._on_finished)
         self._ann.cancelled.connect(self._cleanup)
         self._ann.longshotRequested.connect(self.start_longshot)
@@ -175,7 +201,7 @@ class ScreenshotFlow(QObject):
 
     def _on_finished(self, pixmap):
         QApplication.clipboard().setPixmap(pixmap)
-        show_toast("已复制到剪贴板")
+        show_toast("已复制截图")
         self._cleanup()
 
     def cancel(self):

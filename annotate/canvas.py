@@ -11,7 +11,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QRect, QRectF, QPointF, Signal, QEvent
 from copy import copy
 
-from .items import MarkStyle, SerialMarkItem, TextMarkItem, MosaicMarkItem, ArrowMarkItem, EraseMarkItem
+from .items import MarkStyle, arrow_heads, SerialMarkItem, TextMarkItem, ArrowMarkItem, EraseMarkItem
 from .tools import create_tool
 from .tools import TOOL_CLASSES, TextTool
 from .commands import (RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand,
@@ -21,7 +21,11 @@ from styles import tokens as T
 from settings import get_settings
 
 _REMEMBERED_STYLE = ("color", "width", "font_size", "font_family",
-                     "serial_start", "serial_global", "serial_auto_renumber")
+                     "serial_start", "serial_global", "serial_auto_renumber", "serial_type", "serial_size",
+                     "fill_mode", "round_radius", "arrow_type", "arrow_size", "arrow_start", "arrow_end",
+                     "polyline_cap", "polyline_join", "line_style", "text_alignment", "text_background",
+                     "text_outline", "background_color", "outline_color", "mosaic_shape", "mosaic_mode",
+                     "mosaic_strength", "mosaic_size", "opacity", "eraser_size", "zoom", "wheel_enabled")
 
 
 class AnnotationCanvas(QGraphicsView):
@@ -51,7 +55,7 @@ class AnnotationCanvas(QGraphicsView):
         self._move_start = None
         self._selection_style = None
         self._drawing = False
-        self._eraser_pos = None
+        self._brush_pos = None
         self._comment_edit = None
         self._curve_drag = None
         self._tool = None
@@ -82,7 +86,7 @@ class AnnotationCanvas(QGraphicsView):
         """返回 False 表示该工具未实现（调用方打日志）。"""
         if tool_id not in self.styles:
             return False
-        self._clear_eraser_preview()
+        self._clear_brush_preview()
         self._finish_tool()
         self._style = self.styles[tool_id]
         tool = create_tool(tool_id, self._style)
@@ -100,16 +104,16 @@ class AnnotationCanvas(QGraphicsView):
         if tool_id == "magnifier":
             self._loupe = PipettePopup(self._bg_pixmap, grid=True)
         self.viewport().setCursor(Qt.BlankCursor if tool_id == "eraser" else Qt.CrossCursor)
-        if tool_id == "eraser" and self.viewport().underMouse():
-            self._eraser_pos = self.viewport().mapFromGlobal(QCursor.pos())
-            self.viewport().update(self._eraser_preview_rect())
+        if self._brush_radius() is not None and self.viewport().underMouse():
+            self._brush_pos = self.viewport().mapFromGlobal(QCursor.pos())
+            self.viewport().update(self._brush_preview_rect())
         self.toolChanged.emit(tool_id)
         self.optionsChanged.emit(self.options_tool_id)
         return True
 
     def clear_tool(self):
         self._finish_tool()
-        self._clear_eraser_preview()
+        self._clear_brush_preview()
         self._tool = None
         self._tool_id = ""
         if self._loupe is not None:
@@ -121,6 +125,19 @@ class AnnotationCanvas(QGraphicsView):
 
     def scene_background(self) -> QPixmap:
         return self._bg_pixmap
+
+    @property
+    def selection_count(self):
+        return len(self._selected_marks())
+
+    def restore_focus(self):
+        # 浮动工具条是独立窗口，仅 setFocus 不会把键盘从工具条还给画布。
+        self.window().activateWindow()
+        self.setFocus()
+
+    def _continuous_drawing(self):
+        return (self._tool_id in ("pencil", "highlight", "eraser")
+                or self._tool_id == "mosaic" and self._style.mosaic_shape == "brush")
 
     # ---------- 取色器 ----------
 
@@ -183,26 +200,25 @@ class AnnotationCanvas(QGraphicsView):
                 style = copy(item.style)
                 setattr(style, key, value)
                 if key == "arrow_type":
-                    head = "open" if value.startswith("line") or value == "dimension" else "filled"
-                    style.arrow_start = head if value.endswith("_both") or value == "dimension" else "none"
-                    style.arrow_end = head
+                    style.arrow_start, style.arrow_end = arrow_heads(value)
                 changes[item] = style
             if changes:
                 self._finish_tool()
                 self._undo.push(StyleMarksCommand(changes))
             return
         style = self.styles[self.options_tool_id] if selected else self._style
-        old_preview = self._eraser_preview_rect() if key == "eraser_size" else None
+        old_preview = self._brush_preview_rect() if key in ("eraser_size", "mosaic_size", "mosaic_shape") else None
         setattr(style, key, value)
         if key == "arrow_type":
-            head = "open" if value.startswith("line") or value == "dimension" else "filled"
-            style.arrow_start = head if value.endswith("_both") or value == "dimension" else "none"
-            style.arrow_end = head
+            style.arrow_start, style.arrow_end = arrow_heads(value)
         if old_preview is not None:
-            self.viewport().update(old_preview.united(self._eraser_preview_rect()))
+            self.viewport().update(old_preview.united(self._brush_preview_rect()))
         if key in _REMEMBERED_STYLE and self.options_tool_id:
-            stored = value.name(QColor.HexArgb) if isinstance(value, QColor) else value
-            self._settings.setValue(f"annotation/{self.options_tool_id}/{key}", stored)
+            for name in ((key, "arrow_start", "arrow_end") if key == "arrow_type" else (key,)):
+                stored = getattr(style, name)
+                if isinstance(stored, QColor):
+                    stored = stored.name(QColor.HexArgb)
+                self._settings.setValue(f"annotation/{self.options_tool_id}/{name}", stored)
         # 同 PixPin：默认所有工具共用一个颜色，高亮单独记色，因为它要的是浅色。
         if (key == "color" and self.options_tool_id != "highlight"
                 and self._settings.value("same_tool_color", True, type=bool)):
@@ -294,21 +310,29 @@ class AnnotationCanvas(QGraphicsView):
 
     # ---------- 事件 ----------
 
-    def _eraser_preview_rect(self):
-        if self._eraser_pos is None:
+    def _brush_radius(self):
+        """橡皮擦和马赛克画笔在光标处画出笔刷大小；其他工具返回 None。"""
+        if self._tool_id == "eraser":
+            return self._style.eraser_size / 2
+        if self._tool_id == "mosaic" and self._style.mosaic_shape == "brush":
+            return self._style.mosaic_size / 2
+        return None
+
+    def _brush_preview_rect(self):
+        radius = self._brush_radius()
+        if self._brush_pos is None or radius is None:
             return QRect()
-        center = self.mapToScene(self._eraser_pos)
-        radius = self._style.eraser_size / 2
+        center = self.mapToScene(self._brush_pos)
         return self.mapFromScene(QRectF(center.x() - radius, center.y() - radius,
                                        radius * 2, radius * 2)).boundingRect().adjusted(-3, -3, 3, 3)
 
-    def _clear_eraser_preview(self):
-        old_rect = self._eraser_preview_rect()
-        self._eraser_pos = None
+    def _clear_brush_preview(self):
+        old_rect = self._brush_preview_rect()
+        self._brush_pos = None
         self.viewport().update(old_rect)
 
     def leaveEvent(self, event):
-        self._clear_eraser_preview()
+        self._clear_brush_preview()
         super().leaveEvent(event)
 
     def event(self, event):
@@ -330,15 +354,16 @@ class AnnotationCanvas(QGraphicsView):
             self.pipettePicked.emit(color.name().upper())
             return
         hit = self._selection_hit(e.pos())
+        select_existing = not self._continuous_drawing() or bool(e.modifiers() & Qt.ControlModifier)
         if self._comment_edit is not None and hit is not self._comment_edit[0].comment_item:
             self._finish_comment()
         if (e.button() == Qt.LeftButton and isinstance(hit, QGraphicsTextItem)
-                and isinstance(hit.parentItem(), ArrowMarkItem) and self._tool_id != "eraser"):
+                and isinstance(hit.parentItem(), ArrowMarkItem) and select_existing):
             if self._comment_edit is None:
                 self._edit_comment(hit.parentItem())
             super().mousePressEvent(e)
             return
-        if e.button() == Qt.LeftButton and self._tool_id != "eraser" and not e.modifiers() & Qt.AltModifier:
+        if e.button() == Qt.LeftButton and select_existing and not e.modifiers() & Qt.AltModifier:
             for arrow in self._scene.selectedItems():
                 if isinstance(arrow, ArrowMarkItem) and arrow.control_point is not None:
                     distance = arrow.mapFromScene(self.mapToScene(e.pos())) - arrow.control_point
@@ -356,12 +381,9 @@ class AnnotationCanvas(QGraphicsView):
             return
         if e.button() == Qt.LeftButton and (self._tool_id == "text"):
             self._finish_tool()
-        if e.button() == Qt.LeftButton and self._tool_id == "mosaic" and isinstance(hit, MosaicMarkItem):
-            self._undo.push(RemoveMarkCommand(self._scene, [hit]))
-            return
-        # 已有图形优先进入移动；Alt 按下时允许在图形上叠加新标注。
+        # 连续涂画只落新笔；Ctrl 点选才编辑已有对象，Alt 仍可强制叠加几何标注。
         if (e.button() == Qt.LeftButton and hit is not None
-                and hit.flags() & QGraphicsItem.ItemIsSelectable and self._tool_id != "eraser"
+                and hit.flags() & QGraphicsItem.ItemIsSelectable and select_existing
                 and not e.modifiers() & Qt.AltModifier
                 and not (self._tool is not None and self._tool.preview_on_hover and self._tool._item is not None)):
             self._finish_tool()
@@ -379,6 +401,7 @@ class AnnotationCanvas(QGraphicsView):
             if not self._scene.sceneRect().contains(self.mapToScene(e.pos())):
                 return
             self._drawing = True
+            self._scene.clearSelection()
             self._tool.on_press(self._scene, self.mapToScene(e.pos()),
                                 self._undo)
         elif e.button() == Qt.RightButton and self._tool is not None and self._tool.preview_on_hover:
@@ -400,6 +423,10 @@ class AnnotationCanvas(QGraphicsView):
             e.accept()
             return
         item = self._selection_hit(e.pos())
+        if self._continuous_drawing() and not e.modifiers() & Qt.ControlModifier:
+            # Qt 用双击事件替代第二次按下；快落第二笔时仍应开始绘制。
+            self.mousePressEvent(e)
+            return
         if (e.button() == Qt.LeftButton and isinstance(item, QGraphicsTextItem)
                 and isinstance(item.parentItem(), ArrowMarkItem)):
             self._moving = None
@@ -438,10 +465,10 @@ class AnnotationCanvas(QGraphicsView):
             arrow, _ = self._curve_drag
             arrow.set_control_point(arrow.mapFromScene(self.mapToScene(e.pos())))
             return
-        if self._tool_id == "eraser":
-            old_rect = self._eraser_preview_rect()
-            self._eraser_pos = e.pos()
-            self.viewport().update(old_rect.united(self._eraser_preview_rect()))
+        if self._brush_radius() is not None:
+            old_rect = self._brush_preview_rect()
+            self._brush_pos = e.pos()
+            self.viewport().update(old_rect.united(self._brush_preview_rect()))
         if self._moving is not None:
             delta = self.mapToScene(e.pos()) - self._move_start
             for item, before in self._moving.items():
@@ -477,6 +504,8 @@ class AnnotationCanvas(QGraphicsView):
         if self._tool is not None and e.button() == Qt.LeftButton and self._drawing:
             self._tool.on_release(self.mapToScene(e.pos()), self._undo)
             self._drawing = False
+            if self._continuous_drawing():
+                self._scene.clearSelection()
         else:
             super().mouseReleaseEvent(e)
 
@@ -521,9 +550,10 @@ class AnnotationCanvas(QGraphicsView):
             else:
                 event.ignore()
             return
+        mosaic = ("mosaic_size", 8, 120) if self.style.mosaic_shape == "brush" else ("mosaic_strength", 2, 40)
         key, lo, hi = {
             "text": ("font_size", 6, 96), "serial": ("serial_size", 12, 96),
-            "mosaic": ("mosaic_strength", 2, 40), "eraser": ("eraser_size", 4, 120),
+            "mosaic": mosaic, "eraser": ("eraser_size", 4, 120),
             "magnifier": ("zoom", 1, 8),
         }.get(self.options_tool_id, ("width", 1, 30))
         if not self.style_key_enabled(key):
@@ -560,10 +590,10 @@ class AnnotationCanvas(QGraphicsView):
         painter.setBrush(Qt.NoBrush)
         for item in self._scene.selectedItems():
             painter.drawRect(item.sceneBoundingRect())
-        if self._tool_id == "eraser" and self._eraser_pos is not None:
+        radius = self._brush_radius()
+        if radius is not None and self._brush_pos is not None:
             # 画在视图前景，既跟随缩放，也不会混入导出的截图。
-            center = self.mapToScene(self._eraser_pos)
-            radius = self._style.eraser_size / 2
+            center = self.mapToScene(self._brush_pos)
             painter.setBrush(Qt.NoBrush)
             for color, width in ((T.THEMES[mode]["background"], 3),
                                  (T.THEMES[mode]["foreground"], 1)):
