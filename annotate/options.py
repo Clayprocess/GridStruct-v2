@@ -3,7 +3,7 @@
 样式选项一律画成图形（形状、端点、对齐、效果预览），文字只留在提示和下拉列表里。
 """
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QSize
+from PySide6.QtCore import QEvent, Qt, QPointF, QRectF, QSize
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSpinBox, QToolButton,
@@ -272,6 +272,23 @@ class _Glyph(QWidget):
             self._draw(p, QColor(_theme()["foreground"]), QRectF(0, 0, _SWATCH, _SWATCH))
 
 
+class _PickerPanel(QWidget):
+    """预览按钮保留样式下拉的方向键与确认键操作。"""
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.KeyPress:
+            key = event.key()
+            if key in (Qt.Key_Up, Qt.Key_Down):
+                buttons = self.findChildren(QToolButton)
+                step = -1 if key == Qt.Key_Up else 1
+                buttons[(buttons.index(watched) + step) % len(buttons)].setFocus(Qt.TabFocusReason)
+                return True
+            if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                watched.click()
+                return True
+        return super().eventFilter(watched, event)
+
+
 class ToolOptions(QWidget):
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
@@ -535,7 +552,7 @@ class ToolOptions(QWidget):
         button.setIconSize(_PREVIEW)
         button.setPopupMode(QToolButton.InstantPopup)
         menu = round_corners(QMenu(button))
-        panel = QWidget()
+        panel = _PickerPanel()
         panel.setObjectName("PickerPanel")
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
@@ -547,6 +564,8 @@ class ToolOptions(QWidget):
             item = QToolButton()
             item.setObjectName("PickerItem")
             item.setCheckable(True)
+            item.setFocusPolicy(Qt.StrongFocus)
+            item.installEventFilter(panel)
             item.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             item.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             item.setText(label)
@@ -559,6 +578,7 @@ class ToolOptions(QWidget):
         action = QWidgetAction(menu)
         action.setDefaultWidget(panel)
         menu.addAction(action)
+        menu.aboutToShow.connect(lambda: group.checkedButton().setFocus(Qt.PopupFocusReason))
         button.setMenu(menu)
         self._layout.addWidget(button)
         color = QColor(_theme()["foreground"])

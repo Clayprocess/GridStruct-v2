@@ -356,11 +356,23 @@ def _mosaic_tile(source: QPixmap, mode, strength, col, row) -> QPixmap:
         else:
             # 格子按整图对齐，相邻块的马赛克格才连成一片。
             left, top = tile.left() // strength * strength, tile.top() // strength * strength
-            right = min(bounds.right(), -(-(tile.right() + 1) // strength) * strength - 1)
-            bottom = min(bounds.bottom(), -(-(tile.bottom() + 1) // strength) * strength - 1)
+            right = -(-(tile.right() + 1) // strength) * strength - 1
+            bottom = -(-(tile.bottom() + 1) // strength) * strength - 1
             area = QRect(QPoint(left, top), QPoint(right, bottom))
-        region = source.copy(area)
+        region = source.copy(area.intersected(bounds))
         region.setDevicePixelRatio(1)
+        if region.size() != area.size():
+            # 边缘半格补满后再缩放，采样位置才不会随最后一块的尺寸偏移。
+            image = region.toImage()
+            w, h = image.width(), image.height()
+            extra_w, extra_h = area.width() - w, area.height() - h
+            padded = QImage(area.size(), image.format())
+            with QPainter(padded) as painter:
+                painter.drawImage(QPoint(), image)
+                painter.drawImage(QRect(w, 0, extra_w, h), image, QRect(w - 1, 0, 1, h))
+                painter.drawImage(QRect(0, h, w, extra_h), image, QRect(0, h - 1, w, 1))
+                painter.drawImage(QRect(w, h, extra_w, extra_h), image, QRect(w - 1, h - 1, 1, 1))
+            region = QPixmap.fromImage(padded)
         if len(_tiles) > 512:
             del _tiles[next(iter(_tiles))]
         _tiles[key] = _mosaic(region, mode, strength).copy(tile.translated(-area.topLeft()))
@@ -390,6 +402,14 @@ class MosaicMarkItem(QGraphicsItem):
         self._pixmap = QPixmap()
         self._rect = rect
         self.set_style(self.style)
+
+    def start_brush(self, source, rect, path: QPainterPath):
+        """画笔只初始化轨迹，像素留给绘制时按块处理，避免按下时处理整图。"""
+        self.prepareGeometryChange()
+        self._source = source
+        self._rect = rect
+        self._path = QPainterPath(path)
+        self._update_stroke()
 
     def set_path(self, path: QPainterPath):
         """画笔模式：source 是整张截图，rect 是它在场景里的范围。"""

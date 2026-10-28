@@ -512,13 +512,13 @@ QToolButton#PickerItem {{
     padding: 5px 12px 5px 8px;
     text-align: left;
 }}
-QToolButton#PickerItem:hover {{
-    background-color: {t['accent']};
-}}
 QToolButton#PickerItem:checked {{
     background-color: {t['secondary']};
     border: none;
     padding: 5px 12px 5px 8px;
+}}
+QToolButton#PickerItem:hover, QToolButton#PickerItem:focus {{
+    background-color: {t['accent']};
 }}
 QWidget#ToolOptions QComboBox::down-arrow {{
     image: url({_icon_url("chevron-down", t["foreground"])});

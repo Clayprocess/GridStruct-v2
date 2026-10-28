@@ -246,8 +246,7 @@ class MosaicTool(MarkTool):
             # 起点补一小段，单击也能点出一个圆形马赛克。
             self._path = QPainterPath(pos)
             self._path.lineTo(pos + QPointF(0.01, 0))
-            self._item.set_source(scene.views()[0].scene_background(), scene.sceneRect())
-            self._item.set_path(self._path)
+            self._item.start_brush(scene.views()[0].scene_background(), scene.sceneRect(), self._path)
         else:
             self._item.set_preview_rect(QRectF(pos, pos))
         scene.addItem(self._item)
