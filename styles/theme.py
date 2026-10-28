@@ -135,6 +135,9 @@ QToolButton:disabled {{
 /* ===== FloatPanel 浮动工具条 ===== */
 /* 注：面板本体的圆角卡片背景由 FloatPanel.paintEvent 手绘
    （WA_TranslucentBackground 下 QSS 不绘制自身背景），颜色取自 tokens */
+QWidget#FloatPanelRow {{
+    background: transparent;
+}}
 QFrame#FloatPanelSeparator {{
     background-color: {t['border']};
     border: none;
@@ -527,7 +530,12 @@ QToolButton#Segment:checked {{
 QToolButton#MoreOptions {{
     padding: 5px;
 }}
-QToolButton#MoreOptions::menu-indicator, QToolButton#MoreTools::menu-indicator {{
+/* 组按钮右侧的切换小箭头：窄条，不抢主按钮的位置 */
+QToolButton#ToolCaret {{
+    padding: 6px 1px;
+}}
+QToolButton#MoreOptions::menu-indicator, QToolButton#MoreTools::menu-indicator,
+QToolButton#ToolCaret::menu-indicator {{
     image: none;
     width: 0;
 }}
