@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from styles import tokens as T
-from ui import BaseDialog, show_message, show_toast, tinted_icon
+from ui import BaseDialog, MultilineDelegate, show_message, show_toast, tinted_icon
 from . import export
 from .editor import ADD_HORIZONTAL, ADD_VERTICAL, DELETE, SELECT, GridCanvas
 from .grid import STRATEGY_LABELS
@@ -34,38 +34,6 @@ STAGES = {
     "structure": "正在分析表格结构…",
 }
 EXPORT_FILTERS = "Excel 工作簿 (*.xlsx);;CSV (*.csv);;网页 (*.html)"
-
-
-class _CellDelegate(QStyledItemDelegate):
-    """同 Excel：Enter 提交，Alt+Enter 在格内换行。"""
-
-    def createEditor(self, parent, option, index):
-        editor = QPlainTextEdit(parent)
-        editor.setTabChangesFocus(True)
-        editor.installEventFilter(self)
-        return editor
-
-    def setEditorData(self, editor, index):
-        editor.setPlainText(index.data(Qt.EditRole) or "")
-        editor.selectAll()
-
-    def setModelData(self, editor, model, index):
-        model.setData(index, editor.toPlainText(), Qt.EditRole)
-
-    def updateEditorGeometry(self, editor, option, index):
-        rect = option.rect
-        rect.setHeight(max(rect.height(), editor.fontMetrics().lineSpacing() * 3))
-        editor.setGeometry(rect)
-
-    def eventFilter(self, editor, event):
-        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            if event.modifiers() & Qt.AltModifier:
-                editor.insertPlainText("\n")
-            else:
-                self.commitData.emit(editor)
-                self.closeEditor.emit(editor, QStyledItemDelegate.EditNextItem)
-            return True
-        return super().eventFilter(editor, event)
 
 
 class TableDialog(BaseDialog):
@@ -96,7 +64,7 @@ class TableDialog(BaseDialog):
         self._area.viewport().installEventFilter(self)
 
         self._table = QTableWidget()
-        self._table.setItemDelegate(_CellDelegate(self._table))
+        self._table.setItemDelegate(MultilineDelegate(self._table))
         self._table.setWordWrap(True)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
