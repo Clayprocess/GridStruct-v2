@@ -495,8 +495,9 @@ QToolButton#OptionPicker {{
 QToolButton#OptionPicker:hover {{
     background-color: {t['accent']};
 }}
+/* 二级面板里的图标统一用前景色，只有分段和开关的未选中态弱化（annotate/options.py _two_state） */
 QToolButton#OptionPicker::menu-indicator {{
-    image: url({_icon_url("chevron-down", t["muted_foreground"])});
+    image: url({_icon_url("chevron-down", t["foreground"])});
     subcontrol-origin: padding;
     subcontrol-position: center right;
     right: 5px;
@@ -518,6 +519,9 @@ QToolButton#PickerItem:checked {{
     background-color: {t['secondary']};
     border: none;
     padding: 5px 12px 5px 8px;
+}}
+QWidget#ToolOptions QComboBox::down-arrow {{
+    image: url({_icon_url("chevron-down", t["foreground"])});
 }}
 QWidget#ToolOptions QFontComboBox {{
     min-width: 100px;

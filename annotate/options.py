@@ -182,12 +182,11 @@ def _radius_glyph(p, c, r):
 
 
 def _arrow_head_glyph(p, c, r):
-    # 细箭杆配一个大实心箭头：强调调的是头部而不是线宽。
-    p.setPen(QPen(c, 1.5, Qt.SolidLine, Qt.RoundCap))
-    p.drawLine(QPointF(1.5, 8), QPointF(8, 8))
-    p.setPen(Qt.NoPen)
-    p.setBrush(c)
-    p.drawPolygon([QPointF(6.5, 2.5), QPointF(14.5, 8), QPointF(6.5, 13.5)])
+    # 和默认的线形箭头同形，箭头张得比线宽大得多：强调调的是头部。
+    p.setPen(QPen(c, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.setBrush(Qt.NoBrush)
+    p.drawLine(QPointF(1.5, 8), QPointF(14, 8))
+    p.drawPolyline([QPointF(8.5, 2.5), QPointF(14, 8), QPointF(8.5, 13.5)])
 
 
 def _size_glyph(p, c, r):
@@ -270,7 +269,7 @@ class _Glyph(QWidget):
         with QPainter(self) as p:
             p.setRenderHint(QPainter.Antialiasing)
             p.translate(2, (self.height() - _SWATCH) / 2)
-            self._draw(p, QColor(_theme()["muted_foreground"]), QRectF(0, 0, _SWATCH, _SWATCH))
+            self._draw(p, QColor(_theme()["foreground"]), QRectF(0, 0, _SWATCH, _SWATCH))
 
 
 class ToolOptions(QWidget):
@@ -321,7 +320,7 @@ class ToolOptions(QWidget):
         elif tool_id == "arrow":
             self._separator()
             self._picker("arrow_type", "箭头样式；曲线箭头选中后拖动圆点调整弧度，双击箭头添加或关闭注释", [
-                ("直线箭头", "straight"), ("直线双向", "straight_both"), ("线形箭头", "line"),
+                ("线形箭头", "line"),
                 ("线形双向", "line_both"), ("实心箭头", "solid"), ("实心双向", "solid_both"),
                 ("尺寸箭头", "dimension"), ("曲线箭头", "curve")], _arrow_preview)
             self._spin("arrow_size", 6, 60, "箭头大小", _arrow_head_glyph)
@@ -357,9 +356,17 @@ class ToolOptions(QWidget):
             self._serial_adjust()
             more += [("serial_auto_renumber", "删除后重新编号"), ("serial_global", "跨截图连续编号")]
         elif tool_id == "mosaic":
+            self._segment("mosaic_shape", [("画笔涂抹", "brush", _lucide("brush")),
+                                           ("矩形框选", "rect", _lucide("square-dashed"))])
+            self._separator()
             self._segment("mosaic_mode", [("像素化", "pixel", _lucide("checkerboard")),
                                           ("模糊", "blur", _blur_icon())])
             self._spin("mosaic_strength", 2, 40, "马赛克强度", _strength_glyph)
+            size = self._spin("mosaic_size", 8, 120, "画笔大小", _size_glyph)
+            glyph = self._layout.itemAt(self._layout.count() - 2).widget()
+            # 画笔大小只对画笔有用，框选时收起来。
+            self._bind("mosaic_shape", glyph,
+                       lambda value: (size.setVisible(value == "brush"), glyph.setVisible(value == "brush")))
         elif tool_id == "highlight":
             self._spin("opacity", 5, 100, "不透明度", _opacity_glyph).setSuffix("%")
         elif tool_id == "eraser":
@@ -593,7 +600,7 @@ class ToolOptions(QWidget):
         for icon_name, delta in (("minus", -1), ("plus", 1)):
             button = QToolButton()
             button.setObjectName("Segment")
-            button.setIcon(_lucide(icon_name))
+            button.setIcon(tinted_icon(icon_name, _theme()["foreground"], _SWATCH))
             button.setIconSize(_ICON)
             button.setToolTip(f"选中的序号{'减' if delta < 0 else '加'} 1")
             button.clicked.connect(lambda _=False, d=delta: self._canvas.adjust_serial(d))
@@ -604,7 +611,7 @@ class ToolOptions(QWidget):
             return
         button = QToolButton()
         button.setToolTip("更多选项")
-        button.setIcon(tinted_icon("settings", _theme()["muted_foreground"], 16))
+        button.setIcon(tinted_icon("settings", _theme()["foreground"], 16))
         button.setPopupMode(QToolButton.InstantPopup)
         button.setObjectName("MoreOptions")
         menu = round_corners(QMenu(button))

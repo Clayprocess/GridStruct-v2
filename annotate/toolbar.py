@@ -46,8 +46,6 @@ MORE_TOOLS: list[tuple[str, str, str]] = [
 ]
 MORE_ACTIONS: list[tuple[str, str, str]] = [
     ("pipette", "取色", "pipette"),
-    # 表格识别是低频的重操作，放进“更多”不占主条位置。
-    ("table", "表格识别", "table"),
     ("redo", "重做", "redo-2"),
 ]
 
@@ -68,6 +66,7 @@ UNDO_ACTION = ("undo", "撤销", "undo-2")
 ACTIONS: list[tuple[str, str, str]] = [
     ("longshot", "长截图", "longshot"),
     ("ocr", "文字识别", "scan-text"),
+    ("table", "表格识别", "table"),
     ("pin", "贴图", "pin"),
     ("save", "保存", "save"),
 ]

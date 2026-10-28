@@ -8,7 +8,7 @@
 
 from PySide6.QtCore import QRect, QRectF, QPointF, Qt
 from PySide6.QtWidgets import QGraphicsScene, QApplication
-from PySide6.QtGui import QUndoStack, QGuiApplication
+from PySide6.QtGui import QGuiApplication, QPainterPath, QUndoStack
 
 from .items import (
     ArrowMarkItem, EllipseMarkItem, EraseMarkItem, HighlightMarkItem, LineMarkItem,
@@ -235,14 +235,28 @@ class HighlightTool(PencilTool):
 
 
 class MosaicTool(MarkTool):
+    """默认画笔涂抹（同 PixPin），也可以拉矩形打码。"""
+
     def on_press(self, scene, pos, undo):
         self._scene = scene
         self._start = QPointF(pos)
         self._item = MosaicMarkItem(self._style)
-        self._item.set_preview_rect(QRectF(pos, pos))
+        self._path = None
+        if self._style.mosaic_shape == "brush":
+            # 起点补一小段，单击也能点出一个圆形马赛克。
+            self._path = QPainterPath(pos)
+            self._path.lineTo(pos + QPointF(0.01, 0))
+            self._item.set_source(scene.views()[0].scene_background(), scene.sceneRect())
+            self._item.set_path(self._path)
+        else:
+            self._item.set_preview_rect(QRectF(pos, pos))
         scene.addItem(self._item)
 
     def on_move(self, pos):
+        if self._path is not None:
+            self._path.lineTo(pos)
+            self._item.set_path(self._path)
+            return
         rect = QRectF(self._start, QPointF(pos)).normalized()
         if rect.width() >= 4 and rect.height() >= 4:
             self._update_mosaic(rect)
@@ -250,12 +264,16 @@ class MosaicTool(MarkTool):
             self._item.set_preview_rect(rect)
 
     def on_release(self, pos, undo):
-        rect = QRectF(self._start, QPointF(pos)).normalized()
-        if rect.width() < 4 or rect.height() < 4:
-            size = max(16, self._style.mosaic_strength * 2)
-            rect = QRectF(pos.x() - size / 2, pos.y() - size / 2, size, size)
-        self._update_mosaic(rect)
+        if self._path is None:
+            rect = QRectF(self._start, QPointF(pos)).normalized()
+            if rect.width() < 4 or rect.height() < 4:
+                size = max(16, self._style.mosaic_strength * 2)
+                rect = QRectF(pos.x() - size / 2, pos.y() - size / 2, size, size)
+            self._update_mosaic(rect)
         undo.push(AddMarkCommand(self._scene, self._item))
+        if self._path is not None:
+            # 连续涂抹时不选中刚画的一笔：选中框挡视线，二级面板也会切到这一笔、锁住画笔/框选切换。
+            self._item.setSelected(False)
         self._item = None
 
     def _update_mosaic(self, rect):
