@@ -33,8 +33,8 @@ def _swatch_icon(color, current=False):
     pm.fill(Qt.transparent)
     with QPainter(pm) as p:
         p.setRenderHint(QPainter.Antialiasing)
-        # 深色主题的 border 与面板几乎同色，黑色色块会消失，描边改用更亮一级的灰。
-        p.setPen(QPen(QColor(_theme()["secondary_hover"]), 1))
+        # 深色主题的 border 与面板几乎同色，黑色色块会消失，描边用专门的 swatch_ring。
+        p.setPen(QPen(QColor(_theme()["swatch_ring"]), 1))
         p.setBrush(QColor(color))
         if current:
             p.drawRoundedRect(QRectF(0.5, 0.5, _SWATCH - 1, _SWATCH - 1), T.RADIUS_SM, T.RADIUS_SM)

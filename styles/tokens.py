@@ -19,6 +19,8 @@ LIGHT = {
     "secondary":         "#f4f4f5",  # --secondary: 240 4.8% 95.9%
     "secondary_foreground": "#18181b",
     "secondary_hover":   "#e4e4e7",
+    # 色块描边：浅色里勾出白色块；深色里要勾出近黑的预设色，比 secondary_hover 再亮一级。
+    "swatch_ring":       "#e4e4e7",
     "muted":             "#f4f4f5",  # --muted
     "muted_foreground":  "#71717a",  # --muted-foreground: 240 3.8% 46.1%
     "accent":            "#f4f4f5",  # --accent（hover 背景）
@@ -49,6 +51,7 @@ DARK = {
     "secondary":         "#27272a",  # --secondary: 240 3.7% 15.9%
     "secondary_foreground": "#fafafa",
     "secondary_hover":   "#3f3f46",
+    "swatch_ring":       "#52525b",
     "muted":             "#27272a",
     "muted_foreground":  "#a1a1aa",  # --muted-foreground: 240 5% 64.9%
     "accent":            "#27272a",
