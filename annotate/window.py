@@ -1,6 +1,8 @@
 """截图画布与浮动工具配置，输出与识别通过模块公开接口调用。"""
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QGraphicsTextItem, QDialog
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QApplication, QGraphicsTextItem, QDialog, QLineEdit, QAbstractSpinBox, QComboBox,
+)
 from PySide6.QtGui import QPixmap, QColor, QKeySequence
 from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QEvent
 
@@ -64,6 +66,7 @@ class AnnotationWindow(QWidget):
         self.move(pos)
 
         self._toolbar = FloatPanel(mode=theme_mode, parent=self)
+        self._toolbar.set_copy_text_selected(False)
         # 框选阶段拖动过工具条，进入标注后留在同一位置。
         self._toolbar.set_manual_position(toolbar_pos)
         self._options = ToolOptions(self._canvas)
@@ -159,6 +162,7 @@ class AnnotationWindow(QWidget):
 
     def _remove_text_layer(self):
         self._ocr_selected_text = ""
+        self._toolbar.set_copy_text_selected(False)
         if self._text_layer is not None:
             self._canvas.scene().removeItem(self._text_layer)
             self._text_layer.deleteLater()
@@ -184,6 +188,7 @@ class AnnotationWindow(QWidget):
 
     def _select_ocr_text(self, _item, text):
         self._ocr_selected_text = text
+        self._toolbar.set_copy_text_selected(bool(text))
 
     def _show_ocr_status(self, message, has_results):
         self._toolbar.set_ocr_status(message, has_results)
@@ -201,9 +206,11 @@ class AnnotationWindow(QWidget):
     def _on_action(self, action):
         if action == "undo":
             self._canvas.undo()
+            self._focus_canvas()
         elif action == "redo":
             self._canvas.redo()
-        elif action == "confirm" and self._ocr_selected_text:
+            self._focus_canvas()
+        elif action in ("confirm", "copy") and self._ocr_selected_text:
             # 完成原图选字时不能再发图片输出信号，否则会覆盖刚复制的文字。
             QApplication.clipboard().setText(self._ocr_selected_text)
             show_toast("已复制选中文字")
@@ -214,6 +221,7 @@ class AnnotationWindow(QWidget):
             if save_image(self._render(), self):
                 # 已保存的标注退出时不会丢，不必再确认；之后再改又会变回未保存。
                 self._canvas._undo.setClean()
+            self._focus_canvas()
         elif action == "ocr":
             self._toggle_pipette(False)
             self._ocr.start(self._render())
@@ -249,6 +257,9 @@ class AnnotationWindow(QWidget):
         self.finished.emit(self._render())
         self.close()
 
+    def _focus_canvas(self):
+        self._canvas.restore_focus()
+
     def _request_cancel(self):
         self._canvas.finish_editing()
         if self._canvas._undo.isClean() or _confirm_exit(self):
@@ -259,6 +270,8 @@ class AnnotationWindow(QWidget):
             return False
         if obj.window() not in (self, self._toolbar):
             return False
+        if QApplication.activePopupWidget() is not None:
+            return False
         if event.key() == Qt.Key_Escape:
             # 文字框、取色和面板控件都会先吃掉 Esc，统一在这里截下。
             self._on_action("escape")
@@ -268,14 +281,18 @@ class AnnotationWindow(QWidget):
         if (isinstance(text, QGraphicsTextItem) and text.textInteractionFlags() & Qt.TextEditable
                 and (obj is self._canvas or obj is self._canvas.viewport())):
             return False
+        if event.matches(QKeySequence.Copy) and not isinstance(obj, (QLineEdit, QAbstractSpinBox, QComboBox)):
+            self._on_action("copy")
+            event.accept()
+            return True
         # 面板控件会先消化字母和撤销，工具命令必须在 QWidget 的局部编辑之前分发。
         tool = shortcut_tool(event)
         if tool:
             self.select_tool(tool)
         elif event.matches(QKeySequence.Undo):
-            self._canvas.undo()
+            self._on_action("undo")
         elif event.matches(QKeySequence.Redo):
-            self._canvas.redo()
+            self._on_action("redo")
         else:
             return False
         event.accept()

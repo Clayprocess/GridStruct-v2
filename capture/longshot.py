@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox, QProgressBar,
 )
 from PySide6.QtGui import QPixmap, QTransform, QPainter, QColor, QPen, QCursor, QRegion
-from PySide6.QtCore import Qt, QRect, QPointF, Signal, QObject, QTimer
+from PySide6.QtCore import Qt, QEvent, QRect, QPoint, QPointF, Signal, QObject, QTimer
 from styles import tokens as T
 from ui import floating_window_type, show_message
 from .screen import ScreenManager, capture_virtual_desktop
@@ -105,6 +105,33 @@ class LongShotBar(QWidget):
         self._progress.hide()
         layout.addWidget(self._progress)
         self.setFixedWidth(410)
+        QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if (event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape
+                and isinstance(watched, QWidget) and watched.window() is self
+                and QApplication.activePopupWidget() is None):
+            self.cancelled.emit()
+            return True
+        return False
+
+    def place_near(self, region, available):
+        """优先放在采集区外；空间不足时选遮挡面积最小的位置。"""
+        gap = T.SPACE_3
+        w, h = self.width(), self.height()
+        candidates = (
+            QPoint(region.right() + gap, region.center().y() - h // 2),
+            QPoint(region.left() - w - gap, region.center().y() - h // 2),
+            QPoint(region.center().x() - w // 2, region.top() - h - gap),
+            QPoint(region.center().x() - w // 2, region.bottom() + gap),
+        )
+        positions = [QPoint(max(available.left(), min(point.x(), available.right() - w + 1)),
+                            max(available.top(), min(point.y(), available.bottom() - h + 1)))
+                     for point in candidates]
+        def overlap(point):
+            rect = QRect(point, self.size()).intersected(region)
+            return rect.width() * rect.height()
+        self.move(min(positions, key=overlap))
 
     def exclude_from_capture(self) -> bool:
         """让控制条保持可点击，同时从桌面截图中排除（Windows 10 2004+）。"""
@@ -142,6 +169,7 @@ class LongShotBar(QWidget):
         self._preview.setPixmap(preview)
 
     def closeEvent(self, event):
+        QApplication.instance().removeEventFilter(self)
         self.cancelled.emit()
         super().closeEvent(event)
 
@@ -252,6 +280,8 @@ class ImageStitcher:
 
 class LongShotFlow(QObject):
     """框选、人工/自动采集、暂停与结果交付由同一会话持有。"""
+    controlsShown = Signal()
+    closed = Signal()
 
     def __init__(self, app: QApplication, on_done):
         super().__init__(app)
@@ -369,10 +399,8 @@ class LongShotFlow(QObject):
             show_message(self._bar, "无法开始长截图", "无法将操作条从截图中排除，请检查 Windows 截图支持。")
             self._cleanup()
             return
-        screen = self._manager.screen_at(self._screen_region.center()) or self._app.primaryScreen()
-        geo = screen.availableGeometry()
-        self._bar.move(geo.right() - self._bar.width() - 12, geo.top() + 12)
         self._bar.set_preview(self._last_frame, self._last_frame)
+        self._position_bar()
         from .wheelhook import WheelHook
         self._hook = WheelHook()
         if not self._hook.start():
@@ -382,6 +410,7 @@ class LongShotFlow(QObject):
         self._hook.wheel.connect(self._on_wheel, Qt.QueuedConnection)
         self._hook.horizontalWheel.connect(self._on_horizontal_wheel, Qt.QueuedConnection)
         self._hook.injectedWheel.connect(self._on_injected_wheel, Qt.QueuedConnection)
+        self.controlsShown.emit()
 
     def _toggle_capture(self):
         if self._layout_changed or (self._started and self._stitcher.height >= MAX_STITCH_LENGTH):
@@ -403,7 +432,7 @@ class LongShotFlow(QObject):
             self._candidate = None
             self._attempted_frame = None
             self._sample_deadline = monotonic() + 1.0
-            self._bar.set_status("暂时未匹配，请向回滚动到已采集内容；结果已保留。")
+            self._bar.set_status("暂时未匹配，结果已保留；向回滚动可恢复定位，也可使用当前结果或取消。")
             self._sample_timer.start()
             return
         if self._bar.mode.currentData() == "auto":
@@ -453,7 +482,14 @@ class LongShotFlow(QObject):
         self._sample_timer.stop()
         self._auto_timer.stop()
         self._bar.set_running(False, self._started)
+        if not message.startswith("已暂停"):
+            message = f"已暂停：{message}"
         self._bar.set_status(message)
+        self._position_bar()
+
+    def _position_bar(self):
+        screen = self._manager.screen_at(self._screen_region.center()) or self._app.primaryScreen()
+        self._bar.place_near(self._screen_region, screen.availableGeometry())
 
     def _grab(self):
         return self._manager.capture_region(self._region)
@@ -466,7 +502,7 @@ class LongShotFlow(QObject):
         self._auto_timer.stop()
         # 滚动条拖动不会触发滚轮钩子；恢复期间仍采样，回到历史位置即可自动定位。
         self._sample_timer.start()
-        self._bar.set_status("暂时未匹配，请向回滚动到已采集内容；结果已保留。")
+        self._bar.set_status("暂时未匹配，结果已保留；向回滚动可恢复定位，也可使用当前结果或取消。")
 
     def _recover_frame(self, frame):
         if not self._stitcher.relocate(frame):
@@ -505,9 +541,7 @@ class LongShotFlow(QObject):
         for mask in self._masks:
             mask.close()
         self._masks = []
-        screen = self._manager.screen_at(self._bar.geometry().center()) or self._app.primaryScreen()
-        geometry = screen.availableGeometry()
-        self._bar.move(geometry.right() - self._bar.width() - 12, geometry.top() + 12)
+        self._position_bar()
 
     def _on_wheel(self, delta):
         if self._horizontal:
@@ -556,8 +590,11 @@ class LongShotFlow(QObject):
         if self._auto_pending:
             return
         point = self._manager.cursor_position()
-        if not self._screen_region.contains(point) or self._bar.geometry().contains(point):
-            self._pause("鼠标已离开采集区域，自动滚动已暂停。")
+        if self._bar.geometry().contains(point):
+            self._pause("已暂停：正在操作控制条；点击继续将返回原窗口采集，也可使用当前结果或取消。")
+            return
+        if not self._screen_region.contains(point):
+            self._pause("已暂停：鼠标已离开采集区域；点击继续将返回原窗口采集。")
             return
         try:
             _check_scroll_target(self._scroll_target, self._mask_hwnd())
@@ -594,7 +631,7 @@ class LongShotFlow(QObject):
         if not self._running:
             return
         if self._scroll_target and _IS_WIN and QApplication.platformName() == "windows":
-            controls = int(self._bar.winId()) if self._bar.mode.currentData() == "manual" else 0
+            controls = int(self._bar.winId())
             try:
                 _check_capture_target(self._scroll_target, controls)
             except OSError:
@@ -703,6 +740,7 @@ class LongShotFlow(QObject):
         self._cleanup()
 
     def _cleanup(self):
+        was_active = self.is_active
         self._ack_timer.stop()
         self._running = False
         self._auto_pending = False
@@ -726,6 +764,8 @@ class LongShotFlow(QObject):
         if self._win is not None:
             window, self._win = self._win, None
             window.close()
+        if was_active:
+            self.closed.emit()
 
 
 def _scroll_window(ignored_hwnd):

@@ -354,6 +354,85 @@ def check_xlsx_failure(app):
     print("PASS: XLSX write failure reports error and preserves clipboard/settings")
 
 
+def check_review_navigation(app):
+    from unittest.mock import patch
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QPlainTextEdit
+    from table.dialog import TableDialog
+    from table.grid import Candidate, Suggestion
+    from table.model import CellMerge, GridSpec, Rect, Token
+
+    image = QImage(180, 80, QImage.Format_RGB32)
+    image.fill(QColor(T.LIGHT["background"]))
+    grid = GridSpec((0, 40, 80), (0, 60, 120, 180), (CellMerge(0, 0, 1, 2),))
+    tokens = (Token("甲", .5, Rect(5, 5, 25, 25)), Token("乙", .99, Rect(125, 5, 145, 25)),
+              Token("丙", .5, Rect(5, 45, 25, 65)), Token("丁", .5, Rect(65, 45, 85, 65)))
+    dialog = TableDialog(image)
+    dialog.show()
+    dialog.apply_analysis(tokens, Suggestion(Candidate(grid, "structure", 1), (), 1, "校对导航"), "")
+    app.processEvents()
+    table = dialog._table
+    assert (table.currentRow(), table.currentColumn()) == (0, 0)
+    assert table.hasFocus() and dialog._canvas._selected == {(0, 0)}
+    assert dialog._position.text() == "当前 A1" and "3" in dialog._pending.text()
+    QTest.keyClick(table, Qt.Key_F8)
+    assert (table.currentRow(), table.currentColumn()) == (1, 0)
+    QTest.keyClick(table, Qt.Key_Return, Qt.ControlModifier)
+    assert (table.currentRow(), table.currentColumn()) == (1, 1)
+    assert dialog._review.document.pending_count == 2
+    table.editItem(table.currentItem())
+    app.processEvents()
+    editor = app.focusWidget()
+    assert isinstance(editor, QPlainTextEdit)
+    editor.setPlainText("丁改")
+    QTest.keyClick(editor, Qt.Key_Return, Qt.ControlModifier)
+    app.processEvents()
+    assert dialog._review.document.rows[1][1] == "丁改"
+    assert (table.currentRow(), table.currentColumn()) == (0, 0)
+    assert table.hasFocus() and dialog._review.document.pending_count == 1
+    # 合并格后的 Enter/Tab 导航直接到下一锚点，不落进被覆盖的格子。
+    table.editItem(table.currentItem())
+    app.processEvents()
+    editor = app.focusWidget()
+    editor.setPlainText("甲改")
+    QTest.keyClick(editor, Qt.Key_Return, Qt.AltModifier)
+    QTest.keyClicks(editor, "next")
+    QTest.keyClick(editor, Qt.Key_Return)
+    app.processEvents()
+    assert dialog._review.document.rows[0][0] == "\nnext甲改"
+    assert (table.currentRow(), table.currentColumn()) == (0, 2)
+    QTest.keyClick(app.focusWidget(), Qt.Key_Backtab, Qt.ShiftModifier)
+    app.processEvents()
+    assert (table.currentRow(), table.currentColumn()) == (0, 0)
+    dialog._commit_editor()
+    assert dialog._review.document.pending_count == 0 and not dialog._next_shortcut.isEnabled()
+    with patch("table.dialog.ask_confirmation") as confirm, patch("table.dialog.show_toast"):
+        dialog._copy()
+        assert not confirm.called
+        assert "丁改" in app.clipboard().text()
+    dialog._undo()
+    assert dialog._review.document.pending_count == 1
+    app.clipboard().setText("keep clipboard")
+    with patch("table.dialog.ask_confirmation", return_value=False) as confirm, \
+            patch("table.dialog.QFileDialog.getSaveFileName") as save:
+        dialog._copy()
+        assert app.clipboard().text() == "keep clipboard" and table.hasFocus()
+        assert (table.currentRow(), table.currentColumn()) == (0, 0)
+        assert "1" in confirm.call_args.args[2]
+        dialog._export_file()
+        assert not save.called
+    with patch("table.dialog.ask_confirmation", return_value=True), patch("table.dialog.show_toast"):
+        dialog._copy()
+        assert "丁改" in app.clipboard().text()
+    dialog._redo()
+    assert dialog._review.document.pending_count == 0
+    dialog.close()
+    app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.clipboard().clear()
+    print("PASS: pending navigation, merged-cell editing, output choice and undo/redo")
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     if sys.platform == "win32":
@@ -367,6 +446,7 @@ def main():
     check_selection_after_grid_change(app)
     check_ocr_reuse(app)
     check_xlsx_failure(app)
+    check_review_navigation(app)
     document = check_analysis()
     check_export(document)
     check_dialog(app)

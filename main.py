@@ -109,7 +109,8 @@ def main() -> int:
     enable_menu_effects(app)
     print(f"[GridStruct-V2] 启动，主题：{mode}")
 
-    flow = ScreenshotFlow(app, theme_mode=mode)
+    hotkey = GlobalHotkey(app)
+    flow = ScreenshotFlow(app, theme_mode=mode, hotkeys=hotkey)
 
     def _open_pin():
         show_pin_from_clipboard()
@@ -145,7 +146,6 @@ def main() -> int:
     tray_icon.show()
     print("[GridStruct-V2] 托盘已创建")
 
-    hotkey = GlobalHotkey(app)
     bound = {}  # 名称 -> (注册 id 或 None, 组合键文本)
     for name, default in HOTKEY_DEFAULTS.items():
         text = config.value(f"hotkey/{name}", default)
@@ -177,6 +177,7 @@ def main() -> int:
 
     QTimer.singleShot(0, restore_pins)
     app.aboutToQuit.connect(save_pins)
+    app.aboutToQuit.connect(flow.cancel)
 
     ret = app.exec()
     hotkey.unregister()
