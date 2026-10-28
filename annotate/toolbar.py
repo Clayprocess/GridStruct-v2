@@ -17,12 +17,12 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QRegion
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QRegion
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QMenu, QToolButton, QWidget, QLabel
 
 from styles import tokens as T
 from settings import get_settings
-from ui import floating_window_type, tinted_icon
+from ui import floating_window_type, round_corners, tinted_icon
 from ui.motion import SelectionPill, animation, tween
 
 # 主区按 PixPin 3.5.5.1 默认工具条排列：同类工具折成一个按钮，右侧小箭头切换，按钮图标跟随所选。
@@ -185,7 +185,7 @@ class FloatPanel(QWidget):
         self._more = self._make_button("more", "更多", "ellipsis")
         self._more.setObjectName("MoreTools")
         self._more.setPopupMode(QToolButton.InstantPopup)
-        self._more_menu = QMenu(self._more)
+        self._more_menu = round_corners(QMenu(self._more))
         for tool_id, label, icon_name in MORE_TOOLS:
             action = self._more_menu.addAction(label, lambda tid=tool_id: self._pick(tid))
             self._menu_icons.append((action, icon_name))
@@ -333,7 +333,7 @@ class FloatPanel(QWidget):
         caret.setAutoRaise(True)
         caret.setIconSize(QSize(_CARET_SIZE, _CARET_SIZE))
         caret.setPopupMode(QToolButton.InstantPopup)
-        menu = QMenu(caret)
+        menu = round_corners(QMenu(caret))
         for tool_id, label, icon_name in tools:
             action = menu.addAction(_menu_text(tool_id, label), lambda tid=tool_id: self._pick(tid))
             self._menu_icons.append((action, icon_name))
@@ -361,8 +361,14 @@ class FloatPanel(QWidget):
             raise ValueError(f"unknown theme mode: {mode}")
         self._mode = mode
         t = T.THEMES[mode]
+        # Qt 自动生成的禁用图标在深色主题里几乎和正常态一样亮，禁用色自己给：弱化色再往底色淡一半。
+        muted, base = QColor(t["muted_foreground"]), QColor(t["popover"])
+        disabled = QColor((muted.red() + base.red()) // 2, (muted.green() + base.green()) // 2,
+                          (muted.blue() + base.blue()) // 2).name()
         for btn_id, btn in self._buttons.items():
-            btn.setIcon(tinted_icon(self._icon_names[btn_id], t["foreground"], _ICON_SIZE))
+            icon = QIcon(tinted_icon(self._icon_names[btn_id], t["foreground"], _ICON_SIZE))
+            icon.addPixmap(tinted_icon(self._icon_names[btn_id], disabled, _ICON_SIZE).pixmap(_ICON_SIZE), QIcon.Disabled)
+            btn.setIcon(icon)
         for caret in self._carets:
             caret.setIcon(tinted_icon("chevron-down", t["muted_foreground"], _CARET_SIZE))
         for action, icon_name in self._menu_icons:

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from styles import tokens as T
-from ui import tinted_icon
+from ui import round_corners, tinted_icon
 from ui.motion import SelectionPill, fade_in
 from .items import ArrowMarkItem, LineMarkItem, MarkStyle, SerialMarkItem, arrow_heads
 
@@ -449,7 +449,7 @@ class ToolOptions(QWidget):
         button.setToolTip(tip)
         button.setIconSize(_PREVIEW)
         button.setPopupMode(QToolButton.InstantPopup)
-        menu = QMenu(button)
+        menu = round_corners(QMenu(button))
         panel = QWidget()
         panel.setObjectName("PickerPanel")
         column = QVBoxLayout(panel)
@@ -502,8 +502,14 @@ class ToolOptions(QWidget):
         button.setCheckable(True)
         button.toggled.connect(lambda value: self._canvas.update_style(key, value))
         self._layout.addWidget(button)
-        self._bind(key, button, button.setChecked)
-        self._color_button(color_key)
+        # 颜色块只在开关打开时出现：关着时一块白色色块看起来像个空复选框。
+        swatch = self._color_button(color_key)
+
+        def refresh(value):
+            button.setChecked(value)
+            swatch.setVisible(value)
+
+        self._bind(key, button, refresh)
 
     def _serial_adjust(self):
         for icon_name, delta in (("minus", -1), ("plus", 1)):
@@ -523,7 +529,7 @@ class ToolOptions(QWidget):
         button.setIcon(tinted_icon("settings", _theme()["muted_foreground"], 16))
         button.setPopupMode(QToolButton.InstantPopup)
         button.setObjectName("MoreOptions")
-        menu = QMenu(button)
+        menu = round_corners(QMenu(button))
         for key, title, *choices in entries:
             if choices:
                 self._menu_choice(menu.addMenu(title), key, choices[0])
