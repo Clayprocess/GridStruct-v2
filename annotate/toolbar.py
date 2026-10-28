@@ -16,13 +16,14 @@ import sys as _sys
 # 作为模块导入时此操作无害（路径已存在则重复）。
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QMenu, QToolButton, QWidget, QLabel
 
 from styles import tokens as T
 from settings import get_settings
 from ui import floating_window_type, tinted_icon
+from ui.motion import SelectionPill, animation
 
 # 主区按 PixPin 3.5.5.1 默认工具条排列：同类工具折成一个按钮，右侧小箭头切换，按钮图标跟随所选。
 # 马赛克的像素化/模糊是样式不是工具，留在二级面板里切换。
@@ -114,11 +115,8 @@ class FloatPanel(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         self._mode = "light"
-        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
-        self._slide = QPropertyAnimation(self, b"pos", self)
-        for animation in (self._fade, self._slide):
-            animation.setDuration(150)
-            animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._fade = animation(self, b"windowOpacity")
+        self._slide = animation(self, b"pos")
         self._buttons: dict[str, QToolButton] = {}
         # 按钮 id -> 当前图标名；组按钮的图标会随所选工具变化。
         self._icon_names: dict[str, str] = {}
@@ -146,7 +144,8 @@ class FloatPanel(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(2)
 
-        # 标注工具：单选互斥。每组一个按钮，记住组内上次用的工具。
+        # 标注工具：单选互斥。每组一个按钮，记住组内上次用的工具。选中底块在按钮间滑动。
+        self._pill = SelectionPill(buttons, "secondary", "border")
         self._tool_group = QButtonGroup(self)
         self._tool_group.setExclusive(True)
         settings = get_settings()
@@ -155,6 +154,7 @@ class FloatPanel(QWidget):
             saved = settings.value(f"annotation/{group}_tool", tools[0][0])
             self._variant[group] = saved if _GROUP_OF.get(saved) == group else tools[0][0]
             btn = self._make_button(group, "", "", checkable=True)
+            btn.setProperty("pill", True)
             self._tool_group.addButton(btn)
             layout.addWidget(btn)
             btn.clicked.connect(lambda _checked=False, g=group: self._pick(self._variant[g]))
@@ -337,6 +337,7 @@ class FloatPanel(QWidget):
             self._show_variant(group)
             self.refresh_icons(self._mode)
         self._buttons[group].setChecked(True)
+        self._pill.track(self._buttons[group])
 
     def selected_tool(self) -> str | None:
         """当前选中的工具 id，未选返回 None。"""
@@ -346,6 +347,7 @@ class FloatPanel(QWidget):
         return next(self._variant[group] for group in self._variant if self._buttons[group] is checked)
 
     def _uncheck_tools(self):
+        self._pill.track(None)
         self._tool_group.setExclusive(False)
         for button in self._tool_group.buttons():
             button.setChecked(False)

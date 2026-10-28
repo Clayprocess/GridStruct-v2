@@ -47,6 +47,12 @@ class MarkStyle:
         self.wheel_enabled = True
 
 
+def arrow_heads(arrow_type):
+    """箭头类型对应的（起点, 终点）样式：线形和尺寸箭头用开放头，双向和尺寸箭头两端都有。"""
+    head = "open" if arrow_type.startswith("line") or arrow_type == "dimension" else "filled"
+    return (head if arrow_type.endswith("_both") or arrow_type == "dimension" else "none"), head
+
+
 class _MarkItemBase(QGraphicsItem):
     style_keys = ("color", "width")
 

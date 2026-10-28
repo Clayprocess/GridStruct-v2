@@ -87,6 +87,10 @@ FONT_MD = 13
 FONT_LG = 15
 FONT_XL = 20
 
+# 动效时长（ms）：小控件的状态切换用 FAST，滑块、面板这类位移用 BASE。超过 200ms 就会显得拖沓。
+MOTION_FAST = 120
+MOTION_BASE = 180
+
 THEMES = {"light": LIGHT, "dark": DARK}
 
 ANNOTATION_COLORS = ["#ef4444", "#18181b", "#ffffff", "#3b82f6", "#22c55e", "#eab308"]

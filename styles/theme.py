@@ -132,6 +132,13 @@ QToolButton:disabled {{
     color: {t['muted_foreground']};
 }}
 
+/* 选中底块由 ui/motion.py 的 SelectionPill 画并滑动，按钮自己不再画选中底色 */
+QToolButton[pill="true"]:checked {{
+    background-color: transparent;
+    border: none;
+    padding: 6px;
+}}
+
 /* ===== FloatPanel 浮动工具条 ===== */
 /* 注：面板本体的圆角卡片背景由 FloatPanel.paintEvent 手绘
    （WA_TranslucentBackground 下 QSS 不绘制自身背景），颜色取自 tokens */
@@ -478,6 +485,40 @@ QWidget#ToolOptions QSpinBox {{
 QWidget#ToolOptions QComboBox {{
     padding: 3px 26px 3px 8px;
 }}
+/* 样式下拉：按钮里是当前效果预览，右侧小箭头提示可展开 */
+QToolButton#OptionPicker {{
+    background-color: {t['background']};
+    border: 1px solid {t['input']};
+    border-radius: {r}px;
+    padding: 4px 22px 4px 6px;
+}}
+QToolButton#OptionPicker:hover {{
+    background-color: {t['accent']};
+}}
+QToolButton#OptionPicker::menu-indicator {{
+    image: url({_icon_url("chevron-down", t["muted_foreground"])});
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    right: 5px;
+    width: 12px;
+    height: 12px;
+}}
+QWidget#PickerPanel {{
+    background: transparent;
+}}
+QToolButton#PickerItem {{
+    color: {t['popover_foreground']};
+    padding: 5px 12px 5px 8px;
+    text-align: left;
+}}
+QToolButton#PickerItem:hover {{
+    background-color: {t['accent']};
+}}
+QToolButton#PickerItem:checked {{
+    background-color: {t['secondary']};
+    border: none;
+    padding: 5px 12px 5px 8px;
+}}
 QWidget#ToolOptions QFontComboBox {{
     min-width: 100px;
 }}
@@ -526,6 +567,10 @@ QToolButton#Segment:checked {{
     background-color: {t['background']};
     border: 1px solid {t['border']};
     padding: 3px 8px;
+}}
+QToolButton#Segment[pill="true"]:checked {{
+    background-color: transparent;
+    border: 1px solid transparent;
 }}
 QToolButton#MoreOptions {{
     padding: 5px;

@@ -11,7 +11,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QRect, QRectF, QPointF, Signal, QEvent
 from copy import copy
 
-from .items import MarkStyle, SerialMarkItem, TextMarkItem, MosaicMarkItem, ArrowMarkItem, EraseMarkItem
+from .items import MarkStyle, arrow_heads, SerialMarkItem, TextMarkItem, MosaicMarkItem, ArrowMarkItem, EraseMarkItem
 from .tools import create_tool
 from .tools import TOOL_CLASSES, TextTool
 from .commands import (RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand,
@@ -183,9 +183,7 @@ class AnnotationCanvas(QGraphicsView):
                 style = copy(item.style)
                 setattr(style, key, value)
                 if key == "arrow_type":
-                    head = "open" if value.startswith("line") or value == "dimension" else "filled"
-                    style.arrow_start = head if value.endswith("_both") or value == "dimension" else "none"
-                    style.arrow_end = head
+                    style.arrow_start, style.arrow_end = arrow_heads(value)
                 changes[item] = style
             if changes:
                 self._finish_tool()
@@ -195,9 +193,7 @@ class AnnotationCanvas(QGraphicsView):
         old_preview = self._eraser_preview_rect() if key == "eraser_size" else None
         setattr(style, key, value)
         if key == "arrow_type":
-            head = "open" if value.startswith("line") or value == "dimension" else "filled"
-            style.arrow_start = head if value.endswith("_both") or value == "dimension" else "none"
-            style.arrow_end = head
+            style.arrow_start, style.arrow_end = arrow_heads(value)
         if old_preview is not None:
             self.viewport().update(old_preview.united(self._eraser_preview_rect()))
         if key in _REMEMBERED_STYLE and self.options_tool_id:

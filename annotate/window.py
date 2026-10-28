@@ -2,13 +2,14 @@
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QGraphicsTextItem, QDialog
 from PySide6.QtGui import QPixmap, QColor, QKeySequence
-from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QPropertyAnimation, QEasingCurve, QEvent
+from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QEvent
 
 from .canvas import AnnotationCanvas
 from .toolbar import FloatPanel, shortcut_tool
 from .options import ToolOptions
 from .color_dialog import ColorDialog
 from ui import floating_window_type, MessageDialog, show_toast
+from ui.motion import animation
 from settings import get_settings
 from styles import tokens as T
 from export import save_image
@@ -41,9 +42,7 @@ class AnnotationWindow(QWidget):
         self._capture_position = QPoint(pos)
         # 长图和跨屏原生拼图的像素尺寸不代表原桌面采集视口，必须保留确认时的逻辑矩形。
         self._capture_region = QRect(capture_region) if capture_region is not None else QRect(pos, pixmap.deviceIndependentSize().toSize())
-        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade.setDuration(120)
-        self._fade.setEasingCurve(QEasingCurve.OutCubic)
+        self._fade = animation(self, b"windowOpacity", T.MOTION_FAST)
         self._scrollable = scrollable
         self.setWindowTitle("GridStruct-V2 截图标注")
         self._ended = False
