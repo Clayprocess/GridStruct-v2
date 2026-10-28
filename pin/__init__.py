@@ -177,7 +177,12 @@ def _prune_images(directory, keep):
     for backup in directory.glob("session-backup-*.json"):
         try:
             data = json.loads(backup.read_text(encoding="utf-8"))
-            keep |= {state["id"] for state in data["pins"] if isinstance(state, dict) and "id" in state}
+            # 坏会话也会被原样备份；无法完整读出引用时，原图必须留下供恢复。
+            if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("pins"), list):
+                return
+            for state in data["pins"]:
+                _validate_state(state)
+                keep.add(state["id"])
         except (OSError, ValueError, TypeError, KeyError):
             return
     for image in directory.glob("*.png"):

@@ -185,6 +185,67 @@ def main():
             assert infer.call_count == 0
             checks.append("different pixels invalidate supplied OCR without inference or misaligned layer")
             clear_pins(app)
+
+    reference = {**saved_image, "id": "a" * 32}
+    missing_id = {key: value for key, value in reference.items() if key != "id"}
+    backups = (
+        ("no_backup", None, False),
+        ("valid_backup", {"version": 1, "pins": [reference]}, False),
+        ("invalid_json", "{", True),
+        ("invalid_top_level", [], True),
+        ("unknown_version", {"version": 2, "pins": [reference]}, True),
+        ("pins_mapping", {"version": 1, "pins": {reference["id"]: reference}}, True),
+        ("pins_string", {"version": 1, "pins": reference["id"]}, True),
+        ("pins_null", {"version": 1, "pins": None}, True),
+        ("invalid_entry", {"version": 1, "pins": [None]}, True),
+        ("missing_id", {"version": 1, "pins": [missing_id]}, True),
+        ("invalid_state", {"version": 1, "pins": [{**reference, "opacity": "bad"}]}, True),
+    )
+    for name, payload, preserve_all in backups:
+        with TemporaryDirectory(dir=evidence) as temporary:
+            directory = Path(temporary)
+            images = directory / "pins"
+            images.mkdir()
+            referenced = images / f"{reference['id']}.png"
+            orphan = images / f"{'b' * 32}.png"
+            unrelated = images / "user-picture.png"
+            for path in (referenced, orphan, unrelated):
+                assert pixmap.save(str(path), "PNG")
+            if name != "no_backup":
+                backup = images / "session-backup-probe.json"
+                backup.write_text(payload if name == "invalid_json" else json.dumps(payload), encoding="utf-8")
+            with patch("pin.data_directory", return_value=directory), patch("pin.show_message") as message:
+                current = pin.show_pin(pixmap)
+                assert pin.save_pins(), name
+                assert (images / f"{current.pin_id}.png").exists(), name
+                assert referenced.exists() == (preserve_all or name == "valid_backup"), name
+                assert orphan.exists() == preserve_all, name
+                assert unrelated.exists(), name
+                assert not message.called, name
+                clear_pins(app)
+            checks.append(f"image cleanup {name}: live pin and unrelated file kept, backup protection respected")
+
+    # 从公开恢复入口走完“保留备份并继续”，后续自动保存仍须保住无法恢复的原图。
+    with TemporaryDirectory(dir=evidence) as temporary:
+        directory = Path(temporary)
+        images = directory / "pins"
+        images.mkdir()
+        original_image = images / f"{reference['id']}.png"
+        assert pixmap.save(str(original_image), "PNG")
+        session_path = images / "session.json"
+        damaged = json.dumps({"version": 1, "pins": {reference["id"]: reference}})
+        session_path.write_text(damaged, encoding="utf-8")
+        with (patch("pin.data_directory", return_value=directory), patch("pin.show_message"),
+              patch("pin.ask_confirmation", return_value=True) as warning):
+            assert not pin.restore_pins()
+            assert warning.called and not pin._restore_failed
+            copies = list(images.glob("session-backup-*.json"))
+            assert len(copies) == 1 and copies[0].read_text(encoding="utf-8") == damaged
+            assert pin.save_pins()
+            assert original_image.exists() and copies[0].exists()
+            assert json.loads(session_path.read_text(encoding="utf-8"))["pins"] == []
+            clear_pins(app)
+        checks.append("unsupported session: continue with backup then save retains original image")
     from ocr.controller import _service
     if _service is not None:
         _service.shutdown()
