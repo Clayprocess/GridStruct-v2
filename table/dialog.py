@@ -115,6 +115,7 @@ class TableDialog(BaseDialog):
         for sequence, slot in ((QKeySequence.Undo, self._undo), (QKeySequence.Redo, self._redo),
                                (QKeySequence("Ctrl+Shift+C"), self._copy), (QKeySequence("Ctrl+Return"), self._confirm)):
             QShortcut(sequence, self, slot)
+        self._next_shortcut = QShortcut(QKeySequence("F8"), self, self._next_pending)
         for tool, _label, _icon, key in TOOLS:
             QShortcut(QKeySequence(key), self._canvas, lambda value=tool: self._tool_buttons[value].click(),
                       context=Qt.WidgetShortcut)
@@ -182,13 +183,16 @@ class TableDialog(BaseDialog):
         self._pending = QLabel()
         self._pending.setObjectName("TablePending")
         self._pending.setToolTip("文字模型置信度较低的格子；改字或确认后消失，导出 xlsx 时标黄并加批注")
+        self._position = QLabel()
+        row.addWidget(self._position)
         row.addWidget(self._pending)
         self._next = QPushButton("下一处")
         self._next.setProperty("class", "ghost")
+        self._next.setToolTip("跳到下一处待复核格子 (F8)")
         self._next.clicked.connect(self._next_pending)
-        self._confirm_button = QPushButton("确认无误")
+        self._confirm_button = QPushButton("确认并下一处")
         self._confirm_button.setProperty("class", "ghost")
-        self._confirm_button.setToolTip("当前格识别正确 (Ctrl+Enter)")
+        self._confirm_button.setToolTip("提交当前修改或确认识别正确，再跳到下一处 (Ctrl+Enter)")
         self._confirm_button.clicked.connect(self._confirm)
         row.addWidget(self._next)
         row.addWidget(self._confirm_button)
@@ -223,7 +227,8 @@ class TableDialog(BaseDialog):
         self._set_enabled(True)
         self._canvas.set_grid(self._review.document.grid)
         self._refresh()
-        self._canvas.setFocus()
+        target = self._review.pending_cells()[0] if self._review.pending_cells() else (0, 0)
+        self._focus_cell(*target)
 
     def show_error(self, message):
         self._status.setText(f"识别失败：{message}")
@@ -288,6 +293,9 @@ class TableDialog(BaseDialog):
         self._redo_button.setEnabled(review is not None and review.can_redo)
         count = review.document.pending_count if review is not None else 0
         self._pending.setText(f"待复核 {count} 处")
+        self._next_shortcut.setEnabled(count > 0)
+        row, column = self._table.currentRow(), self._table.currentColumn()
+        self._position.setText(f"当前 {_column_name(column)}{row + 1}" if row >= 0 else "")
         for widget in (self._pending, self._next, self._confirm_button):
             widget.setVisible(count > 0)
 
@@ -301,11 +309,13 @@ class TableDialog(BaseDialog):
         if not self._syncing and row >= 0:
             self._canvas.select_cell(row, column)
             self._reveal(row, column)
+            self._refresh_actions()
 
     def _select_in_table(self, row, column):
         self._syncing = True
         self._table.setCurrentCell(row, column)
         self._syncing = False
+        self._refresh_actions()
 
     def _reveal(self, row, column):
         rect = self._review.document.grid.cell_rect(row, column)
@@ -333,29 +343,56 @@ class TableDialog(BaseDialog):
             self._refresh()
 
     def _next_pending(self):
+        self._commit_editor()
         cells = self._review.pending_cells()
+        if not cells:
+            return
         current = (self._table.currentRow(), self._table.currentColumn())
         target = next((cell for cell in cells if cell > current), cells[0])
-        self._table.setCurrentCell(*target)
+        self._focus_cell(*target)
+
+    def _focus_cell(self, row, column):
+        self._table.setCurrentCell(row, column)
+        self._table.scrollToItem(self._table.currentItem())
         self._table.setFocus()
 
+    def _commit_editor(self):
+        # 快捷键会先于编辑器收键，输出和确认前先保存仍在输入框里的改字。
+        editor = QApplication.focusWidget()
+        if isinstance(editor, QPlainTextEdit) and self._table.isAncestorOf(editor):
+            delegate = self._table.itemDelegate()
+            delegate.commitData.emit(editor)
+            delegate.closeEditor.emit(editor, QStyledItemDelegate.NoHint)
+            self._table.setFocus()
+
     def _confirm(self):
+        self._commit_editor()
         row, column = self._table.currentRow(), self._table.currentColumn()
-        if self._review is not None and row >= 0 and self._review.confirm(row, column):
-            self._refresh()
+        if self._review is not None and row >= 0:
+            if self._review.confirm(row, column):
+                self._refresh()
             if self._review.pending_cells():
                 self._next_pending()
+            else:
+                self._table.setFocus()
+
+    def _pending_note(self):
+        # 不拦输出：xlsx 会标黄加批注，复制和其他格式只在提示里带上剩余数量。
+        count = self._review.document.pending_count
+        return f"；还有 {count} 处待复核" if count else ""
 
     def _copy(self):
         if self._review is None:
             return
+        self._commit_editor()
         data = QMimeData()
         data.setText(export.to_tsv(self._review.document))
         data.setHtml(export.to_html(self._review.document))
         QApplication.clipboard().setMimeData(data)
-        show_toast("已复制表格，可直接粘贴到 Excel / WPS")
+        show_toast("已复制表格，可直接粘贴到 Excel / WPS" + self._pending_note())
 
     def _export_file(self):
+        self._commit_editor()
         from settings import get_settings
         settings = get_settings()
         directory = settings.value("table/export_dir", "") or QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
@@ -372,7 +409,7 @@ class TableDialog(BaseDialog):
             return
         settings.setValue("table/export_dir", str(Path(path).parent))
         QApplication.clipboard().setText(path)
-        show_toast("已导出，文件路径已复制")
+        show_toast("已导出，文件路径已复制" + self._pending_note())
 
     # ---- 缩放 ----
 
@@ -404,7 +441,7 @@ def _column_name(index):
 
 def _cell_tip(cell):
     if cell.status == PENDING:
-        return f"待复核：模型置信度 {cell.weighted_confidence:.0%}，改字或点“确认无误”"
+        return f"待复核：模型置信度 {cell.weighted_confidence:.0%}，改字或点“确认并下一处”"
     if cell.status == CORRECTED:
         return f"已人工修改；原识别：{cell.original_text or '（空）'}"
     return ""

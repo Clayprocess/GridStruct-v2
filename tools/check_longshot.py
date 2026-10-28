@@ -291,7 +291,78 @@ def render():
     print(f"PASS: light/dark controls rendered to {out}")
 
 
+def check_controls():
+    for state in ("ready", "running", "paused", "recovering"):
+        flow, _ = setup_flow()
+        closed = []
+        flow.closed.connect(lambda: closed.append(True))
+        if state == "ready":
+            flow._started = flow._running = False
+            flow._bar.set_running(False, False)
+        elif state == "paused":
+            flow._pause("测试暂停")
+        elif state == "recovering":
+            flow._enter_recovery()
+        flow._bar.show()
+        flush()
+        control = flow._bar._toggle if state in ("running", "recovering") else flow._bar.mode
+        control.setFocus()
+        hook = flow._hook
+        QTest.keyClick(control, Qt.Key_Escape)
+        assert not flow.is_active and hook.stopped and closed == [True], state
+        assert not any(timer.isActive() for timer in (flow._sample_timer, flow._auto_timer, flow._ack_timer))
+        flow.cancel()
+        assert closed == [True], "结束信号只能通知一次"
+        flow.deleteLater()
+        flush()
+
+    flow, _ = setup_flow()
+    flow._pause("测试暂停")
+    flow._bar.show()
+    flush()
+    flow._bar.mode.showPopup()
+    flush()
+    QTest.keyClick(flow._bar.mode.view(), Qt.Key_Escape)
+    assert flow.is_active and not flow._bar.mode.view().isVisible(), "第一下 Esc 只收起下拉"
+    QTest.keyClick(flow._bar.mode, Qt.Key_Escape)
+    assert not flow.is_active, "第二下 Esc 退出长截图"
+    flow.deleteLater()
+    flush()
+
+    bar = LongShotBar()
+    bar.show()
+    flush()
+    available = QRect(0, 0, 1920, 1080)
+    for region in (QRect(400, 200, 800, 600), QRect(1400, 120, 500, 840),
+                   QRect(0, 450, 1900, 600), QRect(0, 0, 1900, 500)):
+        bar.place_near(region, available)
+        assert available.contains(bar.geometry()) and not bar.geometry().intersects(region), region
+    bar.place_near(available, available)
+    assert available.contains(bar.geometry()), "全屏区域也要保持控制条可操作"
+    bar.close()
+    flush()
+
+    flow, _ = setup_flow(automatic=True)
+    flow._scroll_target = 123
+    flow._bar.show()
+    flush()
+    flow._manager.cursor_position = lambda: flow._bar.geometry().center()
+    with patch("capture.longshot._send_scroll", side_effect=AssertionError("scroll over controls")):
+        flow._auto_tick()
+    assert not flow._running and "已暂停" in flow._bar._status.text()
+    assert flow._scroll_target == 123 and flow._bar._toggle.text() == "继续"
+    with patch("capture.longshot.QCursor.setPos"), \
+            patch("capture.longshot._focus_scroll_target", return_value=123) as focus:
+        flow._toggle_capture()
+    assert focus.call_args.args[1] == 123 and flow._running and flow._auto_timer.isActive()
+    flow.cancel()
+    flow.deleteLater()
+    flush()
+    print("PASS: Esc at all control states; popup first; placement; pause/resume original target")
+
+
 check_pixels()
 check_sticky_recovery()
 check_flow()
+check_controls()
 render()

@@ -667,8 +667,10 @@ def toolbar_stability():
             bar = w._toolbar._button_row
             spots.add(w._toolbar._buttons["geo"].mapToGlobal(QPoint()).toTuple())
             options = w._toolbar._options
-            if not options.isHidden() and bar.mapToGlobal(QPoint()).x() + options.width() - 1 <= geo.right():
-                # 放得下时二级面板贴主条左缘；宽面板之后不能残留上一次的左移。
+            right_margin = w._toolbar._root_layout.contentsMargins().right()
+            if (not options.isHidden()
+                    and bar.mapToGlobal(QPoint()).x() + options.width() + right_margin - 1 <= geo.right()):
+                # 连同窗口右侧留白都放得下时，二级面板贴主条左缘；宽面板之后不能残留上一次的左移。
                 assert options.mapToGlobal(QPoint()).x() == bar.mapToGlobal(QPoint()).x(), (tool, pos)
             if not options.isHidden() and bar.mapToGlobal(QPoint()).y() < w.y():
                 # 主条在选区上方时，二级面板应在主条上方，不能盖住截图。
@@ -823,6 +825,125 @@ def canvas_mouse_events():
     w.deleteLater()
 
 
+def drawing_interaction():
+    from annotate import AnnotationWindow
+    from PySide6.QtWidgets import QToolButton, QSpinBox
+
+    with TemporaryDirectory() as folder, patch("settings.storage.data_directory", return_value=Path(folder)):
+        window = AnnotationWindow(sample(640, 320), QPoint())
+        window.show()
+        canvas = window._canvas
+        flush()
+
+        def stroke(start, end, double_click=False):
+            p1, p2 = canvas.mapFromScene(QPointF(*start)), canvas.mapFromScene(QPointF(*end))
+            if double_click:
+                QTest.mouseDClick(canvas.viewport(), Qt.LeftButton, pos=p1)
+            else:
+                QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=p1)
+            move = QMouseEvent(QEvent.MouseMove, QPointF(p2), QPointF(canvas.viewport().mapToGlobal(p2)),
+                               Qt.NoButton, Qt.LeftButton, Qt.NoModifier)
+            QApplication.sendEvent(canvas.viewport(), move)
+            QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=p2)
+            flush()
+
+        for name in ("pencil", "highlight", "mosaic"):
+            window.select_tool(name)
+            if name == "mosaic":
+                canvas.update_style("mosaic_shape", "brush")
+            before = canvas._undo.count()
+            stroke((60, 60), (200, 60))
+            stroke((120, 60), (210, 100))
+            assert canvas._undo.count() == before + 2, f"{name} 第二笔移动了已有标注"
+            stroke((120, 60), (240, 120), double_click=True)
+            assert canvas._undo.count() == before + 3, f"{name} 快速第二笔被双击事件吞掉"
+            assert canvas.selection_count == 0
+            position = canvas.mapFromScene(QPointF(170, 60))
+            QTest.mouseClick(canvas.viewport(), Qt.LeftButton, Qt.ControlModifier, pos=position)
+            flush()
+            assert canvas.selection_count == 1
+            original = canvas.styles[name].width
+            selected = canvas._selected_marks()[0]
+            if name != "mosaic":
+                canvas.update_style("width", original + 3)
+                assert selected.style.width == original + 3 and canvas.styles[name].width == original
+            # 落下一笔即退出对象编辑，仍用工具原来的默认样式。
+            before = canvas._undo.count()
+            stroke((80, 200), (260, 220))
+            assert canvas.tool_id == name and canvas.selection_count == 0 and canvas._undo.count() == before + 1
+            assert canvas.styles[name].width == original
+            # 每种工具独立验收，避免命中此前工具留下的重叠笔迹。
+            while canvas._undo.canUndo():
+                canvas.undo()
+            canvas._undo.clear()
+
+        window.select_tool("arrow")
+        flush()
+        swatch = next(button for button in window._options.findChildren(QToolButton)
+                      if button.toolTip() == "蓝")
+        window._toolbar.activateWindow()
+        swatch.setFocus()
+        flush()
+        QTest.mouseClick(swatch, Qt.LeftButton)
+        flush()
+        assert canvas.hasFocus() and app.activeWindow() is window, "色块操作未归还画布焦点"
+        spin = window._options.findChild(QSpinBox)
+        window._toolbar.activateWindow()
+        spin.setFocus()
+        flush()
+        QTest.keyClick(spin, Qt.Key_Return)
+        flush()
+        assert canvas.hasFocus() and app.activeWindow() is window, "数值提交未归还画布焦点"
+        window._toolbar.activateWindow()
+        spin.setFocus()
+        flush()
+        size = next(widget for widget in window._options.findChildren(QSpinBox) if widget is not spin)
+        QTest.mouseClick(size, Qt.LeftButton)
+        flush()
+        assert size.hasFocus(), "数字框切换时抢走了新控件的焦点"
+        size.selectAll()
+        QTest.keyClicks(size, "28")
+        QTest.keyClick(size, Qt.Key_Return)
+        flush()
+        assert canvas.style.arrow_size == 28 and canvas.hasFocus()
+        picker = next(button for button in window._options.findChildren(QToolButton)
+                      if button.menu() is not None and button.objectName() != "MoreOptions")
+        menu = picker.menu()
+        window._toolbar.activateWindow()
+        menu.popup(picker.mapToGlobal(QPoint(0, picker.height())))
+        flush()
+        current = app.focusWidget()
+        assert current.objectName() == "PickerItem"
+        before = canvas.style.arrow_type
+        QTest.keyClick(current, Qt.Key_Down)
+        QTest.keyClick(app.focusWidget(), Qt.Key_Return)
+        flush()
+        assert canvas.style.arrow_type != before and canvas.hasFocus() and not menu.isVisible()
+        menu.popup(picker.mapToGlobal(QPoint(0, picker.height())))
+        flush()
+        before = canvas.style.arrow_type
+        QTest.keyClick(app.focusWidget(), Qt.Key_Escape)
+        flush()
+        assert window.isVisible() and canvas.style.arrow_type == before and canvas.hasFocus()
+        canvas.update_style("line_style", "dash")
+        remembered = canvas.style.arrow_type
+        window.trigger_action("undo")
+        assert canvas.hasFocus()
+        window._toolbar.set_manual_position(QPoint(100, 100))
+        window.close()
+        window.deleteLater()
+        flush()
+
+        reopened = AnnotationWindow(sample(640, 320), QPoint())
+        reopened.select_tool("arrow")
+        assert reopened._canvas.style.arrow_type == remembered and reopened._canvas.style.line_style == "dash"
+        assert reopened._canvas.selection_count == 0 and reopened._ocr_selected_text == ""
+        assert reopened._toolbar.manual_position() is None
+        reopened.close()
+        reopened.deleteLater()
+        flush()
+
+
 def ocr_copy_text():
     from ocr import OCRResult, OCRResultDialog
     dialog = OCRResultDialog([OCRResult(QRect(), "plain text", 0.99)])
@@ -874,6 +995,7 @@ def ocr_confirm_selection():
     with patch("capture.flow.capture_virtual_desktop", return_value=shot):
         for action, select, change_tool in (("confirm", True, False), ("confirm", False, False),
                                             ("copy", True, False), ("confirm", True, True),
+                                            ("ctrl-c", True, False), ("ctrl-c", False, False),
                                             ("return", True, False), ("enter", True, False),
                                             ("return", False, False), ("enter", False, False)):
             flow.start()
@@ -884,18 +1006,18 @@ def ocr_confirm_selection():
             flush()
             if select:
                 item = window._text_layer.childItems()[0]
-                cursor = item.textCursor()
-                cursor.setPosition(0)
-                cursor.setPosition(10, QTextCursor.KeepAnchor)
-                item.setTextCursor(cursor)
                 window._canvas.setFocus()
                 item.setFocus()
-                QTest.keyClick(window._canvas.viewport(), Qt.Key_C, Qt.ControlModifier)
-                assert app.clipboard().text() == "Recognized"
+                QTest.keyClick(window._canvas.viewport(), Qt.Key_Home, Qt.ControlModifier)
+                for _ in range(10):
+                    QTest.keyClick(window._canvas.viewport(), Qt.Key_Right, Qt.ShiftModifier)
+                assert "复制选中文字" in window._toolbar._buttons["confirm"].toolTip()
             if change_tool:
                 window.select_tool("arrow")
             # 键盘确认也要走真实视口及 ScreenshotFlow 回调，避免只验证按钮而漏掉图片覆盖文字。
-            if action in ("return", "enter"):
+            if action == "ctrl-c":
+                QTest.keyClick(window._canvas.viewport(), Qt.Key_C, Qt.ControlModifier)
+            elif action in ("return", "enter"):
                 key = Qt.Key_Return if action == "return" else Qt.Key_Enter
                 QTest.keyClick(window._canvas.viewport(), key)
             elif action == "copy":
@@ -904,7 +1026,13 @@ def ocr_confirm_selection():
                 window._toolbar._buttons[action].click()
             flush()
             mime = app.clipboard().mimeData()
-            if action != "copy" and select and not change_tool:
+            if action == "ctrl-c" and select:
+                # 选字时 Ctrl+C 只复制文字，截图会话继续。
+                assert app.clipboard().text() == "Recognized" and not mime.hasImage()
+                assert flow._ann is window and window.isVisible(), "Ctrl+C 复制选中文字后不应结束截图"
+                window._toolbar._buttons["cancel"].click()
+                flush()
+            elif select and not change_tool and action != "copy":
                 assert app.clipboard().text() == "Recognized" and not mime.hasImage(), f"{action} 覆盖了 OCR 选中文字"
             else:
                 assert mime.hasImage(), "普通确认或明确复制图片动作被改成了文字复制"
@@ -934,6 +1062,14 @@ def render_windows():
             window.show()
             flush()
             assert window.grab().save(str(folder / f"{name}-{mode}.png"))
+        annotation.select_tool("arrow")
+        flush()
+        assert annotation._options.grab().save(str(folder / f"options-drawing-{mode}.png"))
+        canvas = annotation._canvas
+        canvas._tool.on_press(canvas.scene(), QPointF(30, 30), canvas._undo)
+        canvas._tool.on_release(QPointF(170, 90), canvas._undo)
+        flush()
+        assert annotation._options.grab().save(str(folder / f"options-editing-{mode}.png"))
         for window in windows.values():
             if isinstance(window, PinWindow):
                 window._allow_close = True
@@ -947,7 +1083,7 @@ if __name__ == "__main__":
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,
-              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
+              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)

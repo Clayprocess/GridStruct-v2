@@ -3,7 +3,7 @@
 样式选项一律画成图形（形状、端点、对齐、效果预览），文字只留在提示和下拉列表里。
 """
 
-from PySide6.QtCore import QEvent, Qt, QPointF, QRectF, QSize
+from PySide6.QtCore import QEvent, Qt, QPointF, QRectF, QSize, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSpinBox, QToolButton,
@@ -400,6 +400,10 @@ class ToolOptions(QWidget):
         self._sync(tool_id)
         self.adjustSize()
         fade_in(self)
+        # 选项点击结束后把下一条工具命令还给画布；数值输入仍保留到提交为止。
+        for button in self.findChildren(QToolButton):
+            if button.menu() is None and button.objectName() != "PickerItem":
+                button.clicked.connect(self._canvas.restore_focus)
 
     # ---- 控件构造 ----
 
@@ -500,6 +504,8 @@ class ToolOptions(QWidget):
         spin.setButtonSymbols(QSpinBox.NoButtons)
         spin.setAlignment(Qt.AlignCenter)
         spin.valueChanged.connect(lambda value: self._canvas.update_style(key, value))
+        # 失焦也会发 editingFinished；仅回车提交时仍持焦，切换控件时不抢走新焦点。
+        spin.editingFinished.connect(lambda: self._canvas.restore_focus() if spin.hasFocus() else None)
         self._layout.addWidget(spin)
         self._bind(key, spin, spin.setValue)
         return spin
@@ -579,6 +585,7 @@ class ToolOptions(QWidget):
         action.setDefaultWidget(panel)
         menu.addAction(action)
         menu.aboutToShow.connect(lambda: group.checkedButton().setFocus(Qt.PopupFocusReason))
+        menu.aboutToHide.connect(lambda: QTimer.singleShot(0, self._canvas, self._canvas.restore_focus))
         button.setMenu(menu)
         self._layout.addWidget(button)
         color = QColor(_theme()["foreground"])
@@ -594,6 +601,7 @@ class ToolOptions(QWidget):
         font.setMaximumWidth(120)
         font.setToolTip("字体")
         font.currentFontChanged.connect(lambda value: self._canvas.update_style("font_family", value.family()))
+        font.activated.connect(self._canvas.restore_focus)
         self._layout.addWidget(font)
         self._bind("font_family", font,
                    lambda value: font.setCurrentFont(QFont(value, self._canvas.style.font_size)))
@@ -635,6 +643,7 @@ class ToolOptions(QWidget):
         button.setPopupMode(QToolButton.InstantPopup)
         button.setObjectName("MoreOptions")
         menu = round_corners(QMenu(button))
+        menu.aboutToHide.connect(lambda: QTimer.singleShot(0, self._canvas, self._canvas.restore_focus))
         for key, title, *choices in entries:
             if choices:
                 self._menu_choice(menu.addMenu(title), key, choices[0])

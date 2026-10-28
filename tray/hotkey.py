@@ -29,6 +29,7 @@ MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
+MOD_NOREPEAT = 0x4000
 
 WM_HOTKEY = 0x0312
 
@@ -75,7 +76,7 @@ class _HotkeyNativeFilter(QAbstractNativeEventFilter):
         self._manager = manager
 
     def nativeEventFilter(self, eventType, message):
-        if eventType == b"windows_generic_MSG" and _user32 is not None:
+        if eventType in (b"windows_generic_MSG", b"windows_dispatcher_MSG") and _user32 is not None:
             # PySide6 传入 VoidPtr，ctypes 需要先取得整数地址。
             msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
             if msg.message == WM_HOTKEY:
@@ -96,25 +97,35 @@ class GlobalHotkey(QObject):
 
     def register(self, text: str, callback, *, warn: bool = True) -> int | None:
         """注册组合键，成功返回 id；被占用时按 warn 决定是否弹窗说明。"""
-        if _user32 is None:
-            print("[热键] 非 Windows 平台，跳过注册")
-            return None
-        if not self._filter_installed:
-            QApplication.instance().installNativeEventFilter(self._filter)
-            self._filter_installed = True
         modifiers, vk = parse_hotkey(text)
-        hid = self._next_id
-        self._next_id += 1
-        if not _user32.RegisterHotKey(None, hid, modifiers, vk):
+        hid = self._register(modifiers, vk, callback)
+        if hid is None:
             print(f"[热键] 注册失败：{text}")
-            if warn:
+            if warn and _user32 is not None:
                 show_message(None, "快捷键冲突",
                              f"快捷键 [{text}] 无法注册。\n\n"
                              "可能已被其他程序使用，或系统拒绝注册；Windows 不提供占用程序名称。\n\n"
                              "可以在设置的“热键”页换一个组合；当前仍可通过托盘使用对应功能。")
+        else:
+            print(f"[热键] 已注册：{text}（id={hid}）")
+        return hid
+
+    def register_escape(self, callback) -> int | None:
+        """仅供长截图会话临时注册；常驻用户快捷键仍不接受 Escape。"""
+        # 按住 Esc 只触发一次，收起菜单后不会因键盘自动重复而马上退出会话。
+        return self._register(MOD_NOREPEAT, 0x1B, callback)
+
+    def _register(self, modifiers, vk, callback):
+        if _user32 is None:
+            return None
+        if not self._filter_installed:
+            QApplication.instance().installNativeEventFilter(self._filter)
+            self._filter_installed = True
+        hid = self._next_id
+        self._next_id += 1
+        if not _user32.RegisterHotKey(None, hid, modifiers, vk):
             return None
         self._callbacks[hid] = callback
-        print(f"[热键] 已注册：{text}（id={hid}）")
         return hid
 
     def release(self, hid: int) -> None:

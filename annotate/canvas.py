@@ -11,7 +11,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QRect, QRectF, QPointF, Signal, QEvent
 from copy import copy
 
-from .items import MarkStyle, arrow_heads, SerialMarkItem, TextMarkItem, MosaicMarkItem, ArrowMarkItem, EraseMarkItem
+from .items import MarkStyle, arrow_heads, SerialMarkItem, TextMarkItem, ArrowMarkItem, EraseMarkItem
 from .tools import create_tool
 from .tools import TOOL_CLASSES, TextTool
 from .commands import (RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand,
@@ -21,7 +21,11 @@ from styles import tokens as T
 from settings import get_settings
 
 _REMEMBERED_STYLE = ("color", "width", "font_size", "font_family",
-                     "serial_start", "serial_global", "serial_auto_renumber")
+                     "serial_start", "serial_global", "serial_auto_renumber", "serial_type", "serial_size",
+                     "fill_mode", "round_radius", "arrow_type", "arrow_size", "arrow_start", "arrow_end",
+                     "polyline_cap", "polyline_join", "line_style", "text_alignment", "text_background",
+                     "text_outline", "background_color", "outline_color", "mosaic_shape", "mosaic_mode",
+                     "mosaic_strength", "mosaic_size", "opacity", "eraser_size", "zoom", "wheel_enabled")
 
 
 class AnnotationCanvas(QGraphicsView):
@@ -122,6 +126,19 @@ class AnnotationCanvas(QGraphicsView):
     def scene_background(self) -> QPixmap:
         return self._bg_pixmap
 
+    @property
+    def selection_count(self):
+        return len(self._selected_marks())
+
+    def restore_focus(self):
+        # 浮动工具条是独立窗口，仅 setFocus 不会把键盘从工具条还给画布。
+        self.window().activateWindow()
+        self.setFocus()
+
+    def _continuous_drawing(self):
+        return (self._tool_id in ("pencil", "highlight", "eraser")
+                or self._tool_id == "mosaic" and self._style.mosaic_shape == "brush")
+
     # ---------- 取色器 ----------
 
     def set_pipette_mode(self, on: bool):
@@ -197,8 +214,11 @@ class AnnotationCanvas(QGraphicsView):
         if old_preview is not None:
             self.viewport().update(old_preview.united(self._brush_preview_rect()))
         if key in _REMEMBERED_STYLE and self.options_tool_id:
-            stored = value.name(QColor.HexArgb) if isinstance(value, QColor) else value
-            self._settings.setValue(f"annotation/{self.options_tool_id}/{key}", stored)
+            for name in ((key, "arrow_start", "arrow_end") if key == "arrow_type" else (key,)):
+                stored = getattr(style, name)
+                if isinstance(stored, QColor):
+                    stored = stored.name(QColor.HexArgb)
+                self._settings.setValue(f"annotation/{self.options_tool_id}/{name}", stored)
         # 同 PixPin：默认所有工具共用一个颜色，高亮单独记色，因为它要的是浅色。
         if (key == "color" and self.options_tool_id != "highlight"
                 and self._settings.value("same_tool_color", True, type=bool)):
@@ -334,15 +354,16 @@ class AnnotationCanvas(QGraphicsView):
             self.pipettePicked.emit(color.name().upper())
             return
         hit = self._selection_hit(e.pos())
+        select_existing = not self._continuous_drawing() or bool(e.modifiers() & Qt.ControlModifier)
         if self._comment_edit is not None and hit is not self._comment_edit[0].comment_item:
             self._finish_comment()
         if (e.button() == Qt.LeftButton and isinstance(hit, QGraphicsTextItem)
-                and isinstance(hit.parentItem(), ArrowMarkItem) and self._tool_id != "eraser"):
+                and isinstance(hit.parentItem(), ArrowMarkItem) and select_existing):
             if self._comment_edit is None:
                 self._edit_comment(hit.parentItem())
             super().mousePressEvent(e)
             return
-        if e.button() == Qt.LeftButton and self._tool_id != "eraser" and not e.modifiers() & Qt.AltModifier:
+        if e.button() == Qt.LeftButton and select_existing and not e.modifiers() & Qt.AltModifier:
             for arrow in self._scene.selectedItems():
                 if isinstance(arrow, ArrowMarkItem) and arrow.control_point is not None:
                     distance = arrow.mapFromScene(self.mapToScene(e.pos())) - arrow.control_point
@@ -360,14 +381,9 @@ class AnnotationCanvas(QGraphicsView):
             return
         if e.button() == Qt.LeftButton and (self._tool_id == "text"):
             self._finish_tool()
-        # 矩形马赛克点在已有马赛克上是删除；画笔要能反复涂同一处，不删。
-        if (e.button() == Qt.LeftButton and self._tool_id == "mosaic" and isinstance(hit, MosaicMarkItem)
-                and self._style.mosaic_shape == "rect"):
-            self._undo.push(RemoveMarkCommand(self._scene, [hit]))
-            return
-        # 已有图形优先进入移动；Alt 按下时允许在图形上叠加新标注。橡皮擦和马赛克画笔要能涂过已有图形，不进入移动。
+        # 连续涂画只落新笔；Ctrl 点选才编辑已有对象，Alt 仍可强制叠加几何标注。
         if (e.button() == Qt.LeftButton and hit is not None
-                and hit.flags() & QGraphicsItem.ItemIsSelectable and self._brush_radius() is None
+                and hit.flags() & QGraphicsItem.ItemIsSelectable and select_existing
                 and not e.modifiers() & Qt.AltModifier
                 and not (self._tool is not None and self._tool.preview_on_hover and self._tool._item is not None)):
             self._finish_tool()
@@ -385,6 +401,7 @@ class AnnotationCanvas(QGraphicsView):
             if not self._scene.sceneRect().contains(self.mapToScene(e.pos())):
                 return
             self._drawing = True
+            self._scene.clearSelection()
             self._tool.on_press(self._scene, self.mapToScene(e.pos()),
                                 self._undo)
         elif e.button() == Qt.RightButton and self._tool is not None and self._tool.preview_on_hover:
@@ -406,6 +423,10 @@ class AnnotationCanvas(QGraphicsView):
             e.accept()
             return
         item = self._selection_hit(e.pos())
+        if self._continuous_drawing() and not e.modifiers() & Qt.ControlModifier:
+            # Qt 用双击事件替代第二次按下；快落第二笔时仍应开始绘制。
+            self.mousePressEvent(e)
+            return
         if (e.button() == Qt.LeftButton and isinstance(item, QGraphicsTextItem)
                 and isinstance(item.parentItem(), ArrowMarkItem)):
             self._moving = None
@@ -483,6 +504,8 @@ class AnnotationCanvas(QGraphicsView):
         if self._tool is not None and e.button() == Qt.LeftButton and self._drawing:
             self._tool.on_release(self.mapToScene(e.pos()), self._undo)
             self._drawing = False
+            if self._continuous_drawing():
+                self._scene.clearSelection()
         else:
             super().mouseReleaseEvent(e)
 
