@@ -49,7 +49,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setProperty("desktop_check", desktop_check)
     app.setApplicationName(APP_NAME)
-    app.setWindowIcon(app_icon(T.APP_ICON_COLOR))
+    app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)  # 常驻托盘：无窗口时不退出
     ScreenManager.instance()
 
@@ -64,6 +64,8 @@ def main() -> int:
         show_message(None, "无法读取便携配置", f"{exc}\n请将应用放在有写入权限的目录。")
         return 1
     mode = apply_theme(app, config.value("theme", "system"))
+    # 窗口、任务栏按钮和托盘的图标跟主题反色：深色主题白点黑边。
+    app.setWindowIcon(app_icon(mode))
     enable_menu_effects(app)
     print(f"[GridStruct-V2] 启动，主题：{mode}")
 
@@ -80,7 +82,9 @@ def main() -> int:
 
     def _open_settings():
         SettingsDialog(apply_hotkeys=_apply_hotkeys).exec()
-        tray_icon.setIcon(app_icon(T.THEMES[app.property("theme_mode")]["foreground"]))
+        mode = app.property("theme_mode")
+        app.setWindowIcon(app_icon(mode))
+        tray_icon.setIcon(app_icon(mode))
 
     def _exit():
         if shutdown_pins():
@@ -126,7 +130,7 @@ def main() -> int:
         hid, text = bound["screenshot"]
         start = f"按 {text} 截图" if hid is not None else "单击托盘图标截图"
         tray_icon.showMessage("GridStruct-V2 已在托盘运行", f"{start}，右键托盘图标打开识别、设置等功能。",
-                              app_icon(T.THEMES[mode]["foreground"]), 8000)
+                              app_icon(mode), 8000)
         config.setValue("hint/tray_intro_shown", True)
 
     def _apply_hotkeys(texts):

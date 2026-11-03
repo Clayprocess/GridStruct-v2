@@ -11,7 +11,7 @@ if __name__ == "__main__":
 from PySide6.QtWidgets import QApplication
 
 from settings import get_settings
-from styles import apply_theme, tokens as T
+from styles import apply_theme
 from ui import app_icon, show_message
 from ui.motion import enable_menu_effects
 
@@ -19,13 +19,13 @@ from ui.motion import enable_menu_effects
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("GridStruct-V2 识别文档")
-    app.setWindowIcon(app_icon(T.APP_ICON_COLOR))
+    app.setWindowIcon(app_icon())
     try:
         config = get_settings()
     except OSError as exc:
         show_message(None, "无法读取便携配置", f"{exc}\n请将应用放在有写入权限的目录。")
         return 1
-    apply_theme(app, config.value("theme", "system"))
+    app.setWindowIcon(app_icon(apply_theme(app, config.value("theme", "system"))))
     enable_menu_effects(app)
     from table import open_document
     if open_document(paths=sys.argv[1:]) is None:

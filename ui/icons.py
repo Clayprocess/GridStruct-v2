@@ -8,6 +8,8 @@ from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtGui import QPainter
 
+from styles import tokens as T
+
 ICON_DIR = os.path.join(os.path.dirname(__file__), "..", "assets", "icons")
 ICON_DIR = os.path.abspath(ICON_DIR)
 
@@ -78,25 +80,33 @@ APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets"
 APP_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
 
-def app_icon_pixmap(size: int, color: str) -> QPixmap:
-    # 完整 5×5 点阵在 32px 以下糊成一片，小尺寸换用点更少、按像素对齐的版本。
-    name = ("gridstruct-16" if size <= 20 else "gridstruct-24" if size <= 28
-            else "gridstruct-32" if size <= 32 else "gridstruct")
-    with open(os.path.join(APP_DIR, f"{name}.svg"), encoding="utf-8") as f:
-        svg = f.read().replace("currentColor", color)
+def _app_variant(size: int) -> str:
+    # 3×3 点阵在 32px 及以下每档单独按像素对齐，再大用 256 的矢量版缩放。
+    for limit in (16, 20, 24, 32):
+        if size <= limit:
+            return f"gridstruct-{limit}"
+    return "gridstruct"
+
+
+def app_icon_pixmap(size: int, mode: str = "light") -> QPixmap:
+    """点用主题前景色，点外一圈描边用主题背景色：深色托盘、浅色标题栏上都分得清每个点。"""
+    colors = T.THEMES[mode]
+    with open(os.path.join(APP_DIR, f"{_app_variant(size)}.svg"), encoding="utf-8") as f:
+        svg = f.read().replace("currentColor", colors["foreground"]).replace('fill="white"', f'fill="{colors["background"]}"')
     pm = QPixmap(QSize(size, size))
     pm.fill(Qt.transparent)
     with QPainter(pm) as p:
-        QSvgRenderer(bytearray(svg.encode("utf-8"))).render(p)
+        p.setRenderHint(QPainter.Antialiasing)
+        QSvgRenderer(bytearray(svg.encode("utf-8"))).render(p, QRectF(0, 0, size, size))
     return pm
 
 
-def app_icon(color: str) -> QIcon:
-    """应用标识（只有点阵、无底色）：按实际像素尺寸取对应版本，颜色由调用方从 tokens 取。"""
-    key = ("app", color)
+def app_icon(mode: str = "light") -> QIcon:
+    """应用标识：浅色主题黑点白边，深色主题反色；EXE 文件图标固定用浅色版（见 tools/build_app_icon.py）。"""
+    key = ("app", mode)
     if key not in _cache:
         result = QIcon()
         for size in APP_ICON_SIZES:
-            result.addPixmap(app_icon_pixmap(size, color))
+            result.addPixmap(app_icon_pixmap(size, mode))
         _cache[key] = result
     return _cache[key]

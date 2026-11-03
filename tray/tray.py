@@ -4,7 +4,6 @@
 
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 
-from styles import tokens as T
 from ui import app_icon
 
 TRAY_TOOLTIP = "GridStruct-V2"
@@ -31,7 +30,7 @@ def create_tray(app, callbacks: dict | None) -> QSystemTrayIcon:
     截图菜单项约定用 callbacks["screenshot"]。
     """
     callbacks = callbacks or {}
-    tray = QSystemTrayIcon(app_icon(T.THEMES[app.property("theme_mode")]["foreground"]), app)
+    tray = QSystemTrayIcon(app_icon(app.property("theme_mode")), app)
     tray.setToolTip(TRAY_TOOLTIP)
 
     menu = QMenu()

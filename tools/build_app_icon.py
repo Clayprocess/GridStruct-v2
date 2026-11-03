@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QGuiApplication
 
-from styles import tokens as T
 from ui import APP_ICON_SIZES, app_icon_pixmap
 
 ICO = Path(__file__).resolve().parents[1] / "assets" / "app" / "gridstruct.ico"
@@ -19,14 +18,15 @@ ICO = Path(__file__).resolve().parents[1] / "assets" / "app" / "gridstruct.ico"
 def png_bytes(size):
     buffer = QBuffer()
     buffer.open(QIODevice.WriteOnly)
-    app_icon_pixmap(size, T.APP_ICON_COLOR).save(buffer, "PNG")
+    app_icon_pixmap(size, "light").save(buffer, "PNG")
     return bytes(buffer.data())
 
 
 def main():
     app = QGuiApplication.instance() or QGuiApplication([])
     images = [(size, png_bytes(size)) for size in APP_ICON_SIZES]
-    # ICO 目录项直接内嵌 PNG（Vista 起支持），每个尺寸用各自的精简版图形，不靠缩放。
+    # ICO 目录项直接内嵌 PNG（Vista 起支持），每个尺寸用各自按像素对齐的图形，不靠缩放。
+    # 资源管理器背景随系统主题变，EXE 固定黑点白边：白边在深色背景上把每个点托出来。
     header = struct.pack("<HHH", 0, 1, len(images))
     offset = len(header) + 16 * len(images)
     entries, payload = b"", b""
