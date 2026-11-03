@@ -81,17 +81,17 @@ APP_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
 
 def _app_variant(size: int) -> str:
-    # 8 点阵（3×3 去掉右下角）在 32px 及以下每档单独按像素对齐，再大用 256 的矢量版缩放。
+    # 32px 及以下用 3×3 去掉右下角（8 点），每档单独按像素对齐；再大用 4×4 去掉右下角三点（13 点）的 256 矢量版。
     for limit in (16, 20, 24, 32):
         if size <= limit:
             return f"gridstruct-{limit}"
     return "gridstruct"
 
 
-def app_icon_pixmap(size: int, mode: str = "light") -> QPixmap:
-    """点阵只用一种颜色：浅色主题黑、深色主题白（取主题前景色），无底色无描边。"""
+def app_icon_pixmap(size: int, mode: str = "light", color: str | None = None) -> QPixmap:
+    """点阵只用一种颜色，无底色无描边：默认取主题前景色（浅色主题黑、深色主题白）。"""
     with open(os.path.join(APP_DIR, f"{_app_variant(size)}.svg"), encoding="utf-8") as f:
-        svg = f.read().replace("currentColor", T.THEMES[mode]["foreground"])
+        svg = f.read().replace("currentColor", color or T.THEMES[mode]["foreground"])
     pm = QPixmap(QSize(size, size))
     pm.fill(Qt.transparent)
     with QPainter(pm) as p:
@@ -101,7 +101,7 @@ def app_icon_pixmap(size: int, mode: str = "light") -> QPixmap:
 
 
 def app_icon(mode: str = "light") -> QIcon:
-    """应用标识：浅色主题黑点，深色主题白点；EXE 文件图标固定用黑点（见 tools/build_app_icon.py）。"""
+    """应用标识：浅色主题黑点，深色主题白点；EXE 文件图标固定用中灰点（见 tools/build_app_icon.py）。"""
     key = ("app", mode)
     if key not in _cache:
         result = QIcon()
