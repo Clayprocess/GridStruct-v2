@@ -312,7 +312,11 @@ class SettingsDialog(BaseDialog):
         page = _Page(title)
         self._ocr_copy = QCheckBox("识别完成后直接复制文字")
         self._ocr_copy.setChecked(self._s.value("ocr/direct_copy", False, type=bool))
-        page.group("识别结果").check(self._ocr_copy, "开启后不显示复核窗口。识别在本机完成，不上传图片。")
+        group = page.group("识别结果")
+        group.check(self._ocr_copy, "开启后不显示复核窗口。识别在本机完成，不上传图片。")
+        self._ocr_pin = QCheckBox("贴图后自动识别文字")
+        self._ocr_pin.setChecked(self._s.value("ocr/auto_pin", True, type=bool))
+        group.check(self._ocr_pin, "先显示贴图再在后台识别，识别失败不影响贴图；完成后可滑选、双击复制文字。")
         return page
 
     # ---------- 快捷键 ----------
@@ -426,6 +430,7 @@ class SettingsDialog(BaseDialog):
         self._s.setValue("capture_guides", self._guides.isChecked())
         self._s.setValue("same_tool_color", self._same_color.isChecked())
         self._s.setValue("ocr/direct_copy", self._ocr_copy.isChecked())
+        self._s.setValue("ocr/auto_pin", self._ocr_pin.isChecked())
         self._s.setValue("capture/confirm_exit", self._confirm_exit.isChecked())
         if sys.platform == "win32":
             self._s.setValue("autostart", self._autostart.isChecked())

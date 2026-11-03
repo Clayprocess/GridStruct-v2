@@ -75,6 +75,7 @@ class _Service(QObject):
 
 
 _service = None
+_detached = set()
 
 
 def _get_service():
@@ -142,6 +143,7 @@ class OCRController(QObject):
         self._ticker.timeout.connect(self._show_wait)
         self._stage_started = 0.0
         self._behind_cancelled = False
+        self._automatic = False
         self._service = _get_service()
         self._service.finished.connect(self._finished)
         self._service.stage.connect(self._stage)
@@ -163,7 +165,8 @@ class OCRController(QObject):
     def running(self):
         return self._request is not None
 
-    def start(self, pixmap):
+    def start(self, pixmap, *, automatic=False):
+        """automatic：贴图后自动识别，不替用户改剪贴板、不弹复核窗口。"""
         if pixmap.isNull():
             self.invalidate("没有可识别的图片")
             self._set_state("failed", "识别失败：没有可识别的图片")
@@ -173,6 +176,7 @@ class OCRController(QObject):
         self._pixmap = pixmap.copy()
         self._results = []
         self._document = None
+        self._automatic = automatic
         self.recognized.emit([])
         request = _Request(pixmap.toImage().copy(), Event())
         self._request = request
@@ -263,6 +267,8 @@ class OCRController(QObject):
             self._set_state("empty", "未检测到文字，可调整选区后重新识别")
             return
         self._set_state("completed", f"已识别 {len(self._document)} 处文字：可在原图滑选，Ctrl+C 复制", True)
+        if self._automatic:
+            return
         from settings import get_settings
         if get_settings().value("ocr/direct_copy", False, type=bool):
             QApplication.clipboard().setText(self._document.text())
@@ -270,8 +276,11 @@ class OCRController(QObject):
         if not self._layer_first:
             self.show_results()
 
-    def show_results(self):
-        """从原图文字层或菜单主动打开可编辑全文。"""
+    def show_results(self, detached=False):
+        """从原图文字层或菜单主动打开可编辑全文。
+
+        detached：截图会话打开复核窗口后随即结束（同表格识别），窗口不能挂在截图窗口下面。
+        """
         if self._document is None or not self._document:
             return
         if self._dialogs and self._dialogs[-1]._document is self._document:
@@ -281,12 +290,19 @@ class OCRController(QObject):
             return
         from PySide6.QtGui import QPixmap
         image = self._document.image
-        dialog = OCRResultDialog(self._document, self._owner,
+        dialog = OCRResultDialog(self._document, None if detached else self._owner,
                                  QPixmap.fromImage(image) if not image.isNull() else self._pixmap)
         dialog.setAttribute(Qt.WA_DeleteOnClose)
-        self._dialogs.append(dialog)
-        dialog.destroyed.connect(lambda: self._dialogs.remove(dialog))
+        if detached:
+            # 没有父对象的窗口要有人持有 Python 引用，否则会被回收。
+            _detached.add(dialog)
+            dialog.destroyed.connect(lambda: _detached.discard(dialog))
+        else:
+            self._dialogs.append(dialog)
+            dialog.destroyed.connect(lambda: self._dialogs.remove(dialog))
         dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def adopt_document(self, document, pixmap):
         """同图转移结果，无需重新识别。"""

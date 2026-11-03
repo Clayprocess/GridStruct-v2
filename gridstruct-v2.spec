@@ -33,35 +33,47 @@ hiddenimports = collect_submodules(
     "rapidocr", filter=lambda name: not name.startswith(optional_engines)
 )
 
-a = Analysis(
-    [str(root / "main.py")],
-    pathex=[str(root)],
-    binaries=collect_dynamic_libs("onnxruntime"),
-    datas=datas,
-    hiddenimports=hiddenimports,
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=["PyQt5", "PyQt6", "PySide2", "torch", "tensorflow", "paddle", "openvino", "tensorrt", "MNN"],
-    noarchive=False,
-)
-for destination, source, _ in a.binaries:
+def analysis(script):
+    return Analysis(
+        [str(root / script)],
+        pathex=[str(root)],
+        binaries=collect_dynamic_libs("onnxruntime"),
+        datas=datas,
+        hiddenimports=hiddenimports,
+        hookspath=[],
+        hooksconfig={},
+        runtime_hooks=[],
+        excludes=["PyQt5", "PyQt6", "PySide2", "torch", "tensorflow", "paddle", "openvino", "tensorrt", "MNN"],
+        noarchive=False,
+    )
+
+
+def executable(a, name):
+    return EXE(
+        PYZ(a.pure),
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name=name,
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+        manifest=str(root / "app.manifest"),
+        icon=str(root / "assets" / "app" / "gridstruct.ico"),
+        contents_directory="_internal",
+    )
+
+
+# 托盘主程序与识别文档独立入口同包：两个 EXE 共用一份 _internal（Qt、onnxruntime、模型），包体积基本不变。
+tray = analysis("main.py")
+document = analysis("document_main.py")
+for destination, source, _ in tray.binaries + document.binaries:
     if Path(destination).name.lower() == "icuuc.dll":
         raise RuntimeError(f"Qt 必须使用 Windows 系统 ICU，不得打包同名第三方 DLL：{source}")
-pyz = PYZ(a.pure)
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="GridStruct-V2",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,
-    manifest=str(root / "app.manifest"),
-    icon=str(root / "assets" / "app" / "gridstruct.ico"),
-    contents_directory="_internal",
+coll = COLLECT(
+    executable(tray, "GridStruct-V2"), executable(document, "GridStruct-V2 识别文档"),
+    tray.binaries, tray.datas, document.binaries, document.datas,
+    strip=False, upx=False, name="GridStruct-V2",
 )
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="GridStruct-V2")

@@ -46,6 +46,13 @@ def _closed(window):
         save_pins()
 
 
+def _auto_recognize(window):
+    from settings import get_settings
+    if get_settings().value("ocr/auto_pin", True, type=bool):
+        # 等贴图先画出来再排队识别，冷加载模型时贴图不卡在半透明状态。
+        QTimer.singleShot(0, window, window.recognize_in_background)
+
+
 def _register(window, pos=None):
     if pos is not None:
         window.move_content_to(pos)
@@ -81,6 +88,7 @@ def _replace_pin(window, pixmap):
     # 换新 id 存新图，位置、缩放、透明度、置顶和锁定沿用原贴图。
     replacement.restore_state({**window.state(), "id": replacement.pin_id})
     _register(replacement)
+    _auto_recognize(replacement)
     window._allow_close = True
     window.close()
     show_toast("标注已应用到贴图，并已复制")
@@ -91,7 +99,10 @@ def show_pin(pixmap, pos=None, document=None):
     if pixmap.isNull():
         show_message(None, "贴图", "无法创建空图片贴图")
         return None
-    return _register(PinWindow(pixmap, document=document), pos)
+    window = _register(PinWindow(pixmap, document=document), pos)
+    if document is None:
+        _auto_recognize(window)
+    return window
 
 
 def show_text_pin(text: str, pos=None):

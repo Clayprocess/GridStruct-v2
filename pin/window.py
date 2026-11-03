@@ -206,10 +206,6 @@ class _PinBase(QWidget):
         else:
             super().keyPressEvent(event)
 
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.close()
-
     def set_opacity(self, opacity: float):
         if self._closing:
             return
@@ -418,11 +414,9 @@ class _PinImageView(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        # 识别出的文字上双击仍是选词，其余位置双击关闭贴图。
+        # 双击识别出的文字复制这一行；双击不再关闭贴图，关闭走 Esc 或右键菜单（实测决定）。
         if self._on_text(event.position().toPoint()):
             super().mouseDoubleClickEvent(event)
-        else:
-            self.parentWidget().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event):
         if isinstance(self.scene().focusItem(), QGraphicsTextItem):
@@ -455,7 +449,7 @@ class _PinImageView(QGraphicsView):
 
 class PinWindow(_PinBase):
     kind = "image"
-    _HINT = "拖动移动；滚轮缩放，Ctrl+滚轮调透明度；中键复原；Space 标注；双击或 Esc 关闭。识别后可滑选文字并复制"
+    _HINT = "拖动移动；滚轮缩放，Ctrl+滚轮调透明度；中键复原；Space 标注；Esc 关闭。识别后可滑选文字，双击复制一行"
     annotateRequested = Signal(object)
 
     def __init__(self, pixmap: QPixmap, document=None):
@@ -513,6 +507,13 @@ class PinWindow(_PinBase):
             self._ocr_controller.show_results()
         else:
             self._ocr_controller.start(self._base)
+
+    def recognize_in_background(self):
+        """贴图后自动识字：先显示贴图，识别失败只在提示里说明，不影响贴图本身。"""
+        if self._document is not None:
+            return
+        self._ensure_ocr_controller()
+        self._ocr_controller.start(self._base, automatic=True)
 
     def _recognize_table(self):
         from table import open_table
@@ -579,13 +580,7 @@ class PinWindow(_PinBase):
 
 
 class _PinTextEdit(QTextEdit):
-    # 只读时双击、中键、快捷键都交给贴图窗口，行为与图片贴图一致；编辑中保留文本框原生操作。
-    def mouseDoubleClickEvent(self, event):
-        if self.isReadOnly():
-            self.parentWidget().mouseDoubleClickEvent(event)
-        else:
-            super().mouseDoubleClickEvent(event)
-
+    # 只读时中键、快捷键交给贴图窗口，行为与图片贴图一致；编辑中保留文本框原生操作。
     def mousePressEvent(self, event):
         if event.button() == Qt.MiddleButton:
             self.parentWidget().mousePressEvent(event)

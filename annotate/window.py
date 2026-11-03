@@ -183,8 +183,13 @@ class AnnotationWindow(QWidget):
             # 只有挂载可选文字时进入选择模式；结果失效不能打断连续标注。
             self._canvas.clear_tool()
             self._text_layer = add_text_layer(self._canvas.scene(), results, self._mode,
-                                              on_show_results=self._ocr.show_results)
+                                              on_show_results=self._open_ocr_results)
             self._text_layer.selectionChanged.connect(self._select_ocr_text)
+
+    def _open_ocr_results(self):
+        # 同表格识别：复核窗口接手这张图，截图会话随即结束，桌面不再被截图窗口锁住。
+        self._ocr.show_results(detached=True)
+        self.close()
 
     def _select_ocr_text(self, _item, text):
         self._ocr_selected_text = text
@@ -226,7 +231,7 @@ class AnnotationWindow(QWidget):
             self._toggle_pipette(False)
             self._ocr.start(self._render())
         elif action == "ocr_results":
-            self._ocr.show_results()
+            self._open_ocr_results()
         elif action == "ocr_cancel":
             self._ocr.cancel()
         elif action == "table":
