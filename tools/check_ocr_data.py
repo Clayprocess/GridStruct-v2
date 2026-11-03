@@ -147,12 +147,11 @@ def engine_geometry():
 
 def annotation_transfer():
     service = Service()
-    settings = SimpleNamespace(value=lambda key, default=False, **kwargs: key == "ocr/hide_empty_notice" or default)
+    settings = SimpleNamespace(value=lambda key, default=False, **kwargs: default, setValue=lambda key, value: None)
     with TemporaryDirectory(dir=evidence) as folder, \
          patch("pin.data_directory", return_value=Path(folder)), \
          patch("ocr.controller._get_service", return_value=service), \
          patch("settings.get_settings", return_value=settings), \
-         patch("ocr.controller.show_message"), \
          patch.object(OCREngine, "recognize_image", side_effect=AssertionError("transfer started inference")):
         pixmap = QPixmap.fromImage(image(1.5))
         window = AnnotationWindow(pixmap, QPoint())

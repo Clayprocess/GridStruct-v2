@@ -107,3 +107,44 @@ class SelectionPill(QWidget):
             p.setPen(QPen(QColor(t[self._border_key]), 1))
             p.setBrush(QColor(t[self._fill_key]))
             p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), T.RADIUS_SM, T.RADIUS_SM)
+
+
+class Spinner(QWidget):
+    """等待中的细圆弧：用主题弱化色转圈，和图标同一线宽；关掉系统动画时停在一段静止弧。"""
+
+    def __init__(self, parent=None, size=14):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self._angle = 0
+        self._spin = QVariantAnimation(self)
+        self._spin.setStartValue(0)
+        self._spin.setEndValue(360)
+        self._spin.setDuration(900)
+        self._spin.setLoopCount(-1)
+        self._spin.valueChanged.connect(self._turn)
+
+    def _turn(self, value):
+        self._angle = value
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if motion_enabled():
+            self._spin.start()
+
+    def hideEvent(self, event):
+        self._spin.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, _event):
+        t = T.THEMES[QApplication.instance().property("theme_mode") or "light"]
+        with QPainter(self) as p:
+            p.setRenderHint(QPainter.Antialiasing)
+            rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+            p.setPen(QPen(QColor(t["border"]), 1.5))
+            p.drawEllipse(rect)
+            pen = QPen(QColor(t["foreground"]), 1.5)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            # Qt 角度以 1/16 度计、逆时针为正；取负值让弧顺时针转。
+            p.drawArc(rect, -self._angle * 16, 100 * 16)

@@ -1,4 +1,4 @@
-"""离屏验证真实串行 OCR 服务的排队、阶段、取消和迟到结果。"""
+"""离屏验证真实串行 OCR 服务的排队、阶段、取消、超时诊断和迟到结果。"""
 
 import os
 import atexit
@@ -52,7 +52,7 @@ def main():
     app = QApplication(sys.argv)
     # Windows 的离屏插件不自动枚举系统字体。
     for filename in ("arial.ttf", "msyh.ttc"):
-        QFontDatabase.addApplicationFont(str(Path(os.environ["WINDIR"]) / "Fonts" / filename))
+        QFontDatabase.addApplicationFont(str(Path(os.environ.get("WINDIR", "")) / "Fonts" / filename))
     engine = _Engine()
     service = module._Service(app)
     def release_service():
@@ -61,10 +61,11 @@ def main():
             plan.infer.set()
         service.shutdown()
     atexit.register(release_service)
-    notices = []
+    failures = []
     settings = type("Settings", (), {"direct": False, "value": lambda self, key, default, **kw:
                                     key == "ocr/hide_empty_notice" or
-                                    (key == "ocr/direct_copy" and self.direct) or default})()
+                                    (key == "ocr/direct_copy" and self.direct) or default,
+                                    "setValue": lambda self, key, value: None})()
     output = Path(__file__).resolve().parents[1] / ".scratch" / "ocr-stages-bcd" / "tasks"
     output.mkdir(parents=True, exist_ok=True)
 
@@ -79,8 +80,8 @@ def main():
 
     with (patch.object(module, "_get_service", return_value=service),
           patch.object(module, "OCREngine", return_value=engine),
-          patch.object(module, "show_message", side_effect=lambda *args: notices.append(args)),
-          patch("settings.get_settings", return_value=settings)):
+          patch("settings.get_settings", return_value=settings),
+          patch("settings.data_directory", return_value=output)):
         owners = [QWidget(), QWidget()]
         first, second = [module.OCRController(owner, layer_first=True) for owner in owners]
         first_states, second_states, recognized, messages = [], [], [], []
@@ -88,6 +89,7 @@ def main():
         second.stateChanged.connect(second_states.append)
         first.recognized.connect(recognized.append)
         first.statusChanged.connect(lambda message, ready: messages.append(message))
+        first.failed.connect(failures.append)
         pixmap = QPixmap(240, 120)
         pixmap.fill(T.THEMES["light"]["background"])
         cold = _Plan("迟到结果", cold=True)
@@ -98,7 +100,8 @@ def main():
         assert first._timer.isActive() and 59000 <= first._timer.interval() <= 60000
         second.start(pixmap)
         queued = second._request
-        assert second.state == "queued" and not second._timer.isActive()
+        # 排队也有独立预算：后台服务卡死时不会无限转圈。
+        assert second.state == "queued" and second._timer.isActive()
         second.cancel()
         assert queued.cancelled.is_set() and second.state == "cancelled"
         cold.load.set()
@@ -111,10 +114,6 @@ def main():
         assert first.document is None
         assert all(not document for document in recognized)
         assert engine.calls == 2, "排队取消任务意外启动了模型"
-        for mode in ("light", "dark"):
-            apply_theme(app, mode)
-            app.processEvents()
-            first._progress.grab().save(str(output / f"progress-{mode}.png"))
         second.start(pixmap)
         superseded = second._request
         second.start(pixmap)
@@ -166,7 +165,7 @@ def main():
         engine.plans.append(delayed)
         first.start(pixmap)
         wait_for(lambda: first.state == "recognizing", "预算验收任务未开始")
-        first._request.started_at -= 61
+        first._stage_started -= 61
         delayed.infer.set()
         wait_for(lambda: first.state == "timeout" and service.active is None,
                  "完成信号越过执行预算后仍被接受")
@@ -182,11 +181,27 @@ def main():
         closing.infer.set()
         wait_for(lambda: service.active is None, "已关闭窗口任务后台未结束")
         assert {"queued", "loading", "recognizing", "completed", "empty", "failed", "timeout", "cancelled"} <= set(first_states)
-        assert len(notices) == 3
+        assert len(failures) == 3
+        blocker, queued_stuck = _Plan("占住服务"), _Plan("排队超时后的结果")
+        engine.plans.extend([blocker, queued_stuck])
+        first.start(pixmap)
+        wait_for(lambda: first.state == "recognizing", "排队超时验收的前置任务未开始")
+        third = module.OCRController(QWidget(), layer_first=True)
+        third.start(pixmap)
+        assert third.state == "queued"
+        third._timer.timeout.emit()
+        assert third.state == "timeout" and not third.running
+        logs = sorted((output / "logs").glob("ocr-*.txt"))
+        assert logs and "阶段：queued" in logs[-1].read_text(encoding="utf-8"), "排队超时未写入线程栈诊断"
+        assert "Thread" in logs[-1].read_text(encoding="utf-8")
+        blocker.infer.set()
+        queued_stuck.infer.set()
+        wait_for(lambda: first.state == "completed" and service.active is None, "前置任务未完成")
+        assert engine.calls == len(engine.plans) - 1, "已超时的排队任务意外启动了模型"
         owners[0].deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     service.shutdown()
-    print(f"PASS OCR tasks: {engine.calls} 实际调用；排队不计时、取消跳过、串行、状态、共享文档、超时和销毁通过")
+    print(f"PASS OCR tasks: {engine.calls} 实际调用；排队计时、取消跳过、串行、状态、共享文档、超时诊断和销毁通过")
     print(f"视觉产物: {output}")
     return 0
 

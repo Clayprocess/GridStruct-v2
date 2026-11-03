@@ -32,6 +32,9 @@ class MarkStyle:
         self.font_family = "Microsoft YaHei UI"
         self.text_background = False
         self.text_outline = False
+        self.text_bold = False
+        self.text_italic = False
+        self.text_underline = False
         self.background_color = QColor(T.LIGHT["background"])
         self.outline_color = QColor(T.LIGHT["background"])
         self.serial_size = 32
@@ -688,17 +691,25 @@ class ArrowMarkItem(_MarkItemBase):
             painter.drawEllipse(self._control, 5, 5)
 
 
+def _text_font(style):
+    # 加粗、斜体、下划线作用于整段文字，和字号、字体一样是这条标注的样式，可整体撤销。
+    font = QFont(style.font_family)
+    font.setPointSize(style.font_size)
+    font.setBold(style.text_bold)
+    font.setItalic(style.text_italic)
+    font.setUnderline(style.text_underline)
+    return font
+
+
 class TextMarkItem(QGraphicsTextItem):
     tool_id = "text"
-    style_keys = ("color", "font_size", "font_family", "text_alignment", "text_background",
-                  "background_color", "text_outline", "outline_color")
+    style_keys = ("color", "font_size", "font_family", "text_bold", "text_italic", "text_underline",
+                  "text_alignment", "text_background", "background_color", "text_outline", "outline_color")
 
     def __init__(self, style: MarkStyle):
         super().__init__()
         self.style = copy(style)
-        font = QFont(style.font_family)
-        font.setPointSize(style.font_size)
-        self.setFont(font)
+        self.setFont(_text_font(style))
         self.setDefaultTextColor(QColor(style.color))
         option = self.document().defaultTextOption()
         option.setAlignment({"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
@@ -725,7 +736,7 @@ class TextMarkItem(QGraphicsTextItem):
     def set_style(self, style):
         self.prepareGeometryChange()
         self.style = copy(style)
-        font = QFont(style.font_family, style.font_size)
+        font = _text_font(style)
         self.setFont(font)
         self.setDefaultTextColor(style.color)
         cursor = self.textCursor()
@@ -755,66 +766,3 @@ class TextMarkItem(QGraphicsTextItem):
         if self._background is not None:
             painter.fillRect(self.boundingRect(), self._background)
         super().paint(painter, option, widget)
-
-
-class EraseMarkItem(QGraphicsItem):
-    tool_id = "eraser"
-    style_keys = ("eraser_size", "background_color")
-
-    def __init__(self, style: MarkStyle):
-        super().__init__()
-        self.style = copy(style)
-        self._trail = QPainterPath()
-        self._area = QPainterPath()
-        self._area.setFillRule(Qt.WindingFill)
-        self._last_point = QPointF()
-        self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
-
-    def move_to(self, pos):
-        self.prepareGeometryChange()
-        self._last_point = QPointF(pos)
-        self._trail = QPainterPath(pos)
-        self._area = QPainterPath()
-        self._area.setFillRule(Qt.WindingFill)
-        radius = self.style.eraser_size / 2
-        self._area.addEllipse(pos, radius, radius)
-        self.update()
-
-    def line_to(self, pos):
-        if pos == self._last_point:
-            return
-        self.prepareGeometryChange()
-        segment = QPainterPath(self._last_point)
-        segment.lineTo(pos)
-        stroker = QPainterPathStroker()
-        stroker.setWidth(self.style.eraser_size)
-        stroker.setCapStyle(Qt.RoundCap)
-        # 补齐两次鼠标事件之间的扫掠区域，快速拖动也不会留空洞。
-        self._area.addPath(stroker.createStroke(segment))
-        self._trail.lineTo(pos)
-        self._last_point = QPointF(pos)
-        self.update()
-
-    def set_style(self, style: MarkStyle):
-        self.prepareGeometryChange()
-        self.style = copy(style)
-        stroker = QPainterPathStroker()
-        stroker.setWidth(style.eraser_size)
-        stroker.setCapStyle(Qt.RoundCap)
-        stroker.setJoinStyle(Qt.RoundJoin)
-        self._area = stroker.createStroke(self._trail)
-        self._area.setFillRule(Qt.WindingFill)
-        radius = style.eraser_size / 2
-        self._area.addEllipse(self._trail.pointAtPercent(0), radius, radius)
-        self.update()
-
-    def boundingRect(self):
-        return self._area.boundingRect().adjusted(-1, -1, 1, 1)
-
-    def shape(self):
-        return self._area
-
-    def paint(self, painter, _option, _widget):
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(self.style.background_color)
-        painter.drawPath(self._area)

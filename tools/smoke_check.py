@@ -328,6 +328,38 @@ def all_tools():
         flush()
 
 
+def eraser_removes_marks():
+    """橡皮擦碰到哪条删哪条，原图像素不变，松开一次可撤销。"""
+    c = AnnotationCanvas(sample(640, 300))
+    before = c.render_to_pixmap().toImage()
+    c.set_tool_by_id("pencil")
+    for y in (60, 200):
+        c._tool.on_press(c.scene(), QPointF(40, y), c._undo)
+        c._tool.on_move(QPointF(300, y))
+        c._tool.on_release(QPointF(300, y), c._undo)
+    marks = [item for item in c.scene().items() if hasattr(item, "style_keys")]
+    assert len(marks) == 2
+    c.set_tool_by_id("eraser")
+    c._tool.on_press(c.scene(), QPointF(150, 20), c._undo)
+    c._tool.on_move(QPointF(150, 100))
+    assert sum(item.isVisible() for item in marks) == 1, "拖动时被擦到的标注没有先隐藏"
+    c._tool.on_release(QPointF(150, 100), c._undo)
+    left = [item for item in c.scene().items() if hasattr(item, "style_keys")]
+    assert len(left) == 1
+    assert c._undo.count() == 3
+    c.set_tool_by_id("eraser")
+    c._tool.on_press(c.scene(), QPointF(500, 280), c._undo)
+    c._tool.on_release(QPointF(500, 280), c._undo)
+    assert c._undo.count() == 3, "没擦到东西也进了撤销栈"
+    c.undo()
+    assert len([item for item in c.scene().items() if hasattr(item, "style_keys")]) == 2
+    c.undo()
+    c.undo()
+    assert c.render_to_pixmap().toImage() == before, "撤销全部后原图被改动"
+    c.deleteLater()
+    flush()
+
+
 def empty_shapes():
     for name in ("rect", "ellipse"):
         c = AnnotationCanvas(sample())
@@ -734,30 +766,26 @@ def hotkey_settings():
             dialog._apply_hotkeys = lambda texts: applied.append(dict(texts))
             autostart.side_effect = OSError("denied")
             dialog._save()
-            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": HOTKEY_DEFAULTS["longshot"], "document": ""},
-                               HOTKEY_DEFAULTS]
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "document": ""}, HOTKEY_DEFAULTS]
+            assert "longshot" not in dialog._hotkeys, "长截图只在截图工具条里，不该有全局热键"
             assert s.value("hotkey/screenshot") is None
             autostart.side_effect = None
-            # 两个功能撞键：确定前就拦下。
-            dialog._hotkeys["longshot"].setKeySequence("Ctrl+Shift+A")
-            assert not dialog._check_hotkeys() and dialog._hotkey_error.text()
             applied = []
             dialog._apply_hotkeys = lambda texts: applied.append(texts)
-            dialog._hotkeys["longshot"].setKeySequence("F1")
-            # 识别文档的热键可选：空着合法，设了也不能和别的功能撞。
+            # 识别文档的热键可选：空着合法，设了也不能和截图撞。
             assert dialog._check_hotkeys()
-            dialog._hotkeys["document"].setKeySequence("F1")
-            assert not dialog._check_hotkeys()
+            dialog._hotkeys["document"].setKeySequence("Ctrl+Shift+A")
+            assert not dialog._check_hotkeys() and dialog._hotkey_error.text()
             dialog._hotkeys["document"].setKeySequence("Ctrl+Alt+D")
             dialog._save()
-            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": "F1", "document": "Ctrl+Alt+D"}]
-            assert s.value("hotkey/screenshot") == "Ctrl+Shift+A" and s.value("hotkey/longshot") == "F1"
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "document": "Ctrl+Alt+D"}]
+            assert s.value("hotkey/screenshot") == "Ctrl+Shift+A"
             assert s.value("hotkey/document") == "Ctrl+Alt+D"
             dialog._hotkeys["document"].clear()
             assert dialog._check_hotkeys()
             applied.clear()
             dialog._save()
-            assert applied == [{"screenshot": "Ctrl+Shift+A", "longshot": "F1", "document": ""}]
+            assert applied == [{"screenshot": "Ctrl+Shift+A", "document": ""}]
             dialog.deleteLater()
             if sys.platform == "win32":
                 applied.clear()
@@ -765,8 +793,8 @@ def hotkey_settings():
                 dialog = SettingsDialog(apply_hotkeys=lambda texts: applied.append(texts))
                 dialog._hotkeys["screenshot"].setKeySequence("Ctrl+Shift+B")
                 dialog._save()
-                assert applied == [{"screenshot": "Ctrl+Shift+B", "longshot": "F1", "document": ""},
-                                   {"screenshot": "Ctrl+Shift+A", "longshot": "F1", "document": ""}]
+                assert applied == [{"screenshot": "Ctrl+Shift+B", "document": ""},
+                                   {"screenshot": "Ctrl+Shift+A", "document": ""}]
                 assert dialog.result() == 0 and s.value("hotkey/screenshot") == "Ctrl+Shift+A"
                 dialog.deleteLater()
 
@@ -1092,7 +1120,7 @@ def render_windows():
 
 
 if __name__ == "__main__":
-    checks = [high_dpi_canvas, ocr_pixels, offline_models, empty_polyline,
+    checks = [eraser_removes_marks, high_dpi_canvas, ocr_pixels, offline_models, empty_polyline,
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,

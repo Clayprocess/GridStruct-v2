@@ -4,9 +4,7 @@ from dataclasses import dataclass
 from threading import Event
 from time import monotonic
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout
-from ui import BaseDialog, MessageDialog, show_message
-from styles import tokens as T
+from PySide6.QtWidgets import QApplication
 from .engine import OCREngine
 from .dialog import OCRResultDialog
 from .model import OCRDocument
@@ -17,6 +15,7 @@ class _Request:
     image: object
     cancelled: Event
     started_at: float = 0
+    stage: str = "queued"
 
 
 class _Worker(QObject):
@@ -85,40 +84,39 @@ def _get_service():
     return _service
 
 
-class _ProgressDialog(BaseDialog):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setWindowTitle("文字识别")
-        self.setFixedWidth(320)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(T.SPACE_4, T.SPACE_4, T.SPACE_4, T.SPACE_3)
-        layout.setSpacing(T.SPACE_2)
-        title = QLabel("正在识别文字")
-        title.setProperty("class", "title")
-        layout.addWidget(title)
-        self.label = QLabel()
-        self.label.setProperty("class", "muted")
-        self.label.setWordWrap(True)
-        layout.addWidget(self.label)
-        # 不知道总耗时，用细条循环动画表示“在进行”，不伪造百分比。
-        progress = QProgressBar()
-        progress.setProperty("class", "slim")
-        progress.setRange(0, 0)
-        progress.setTextVisible(False)
-        layout.addSpacing(T.SPACE_1)
-        layout.addWidget(progress)
-        layout.addSpacing(T.SPACE_1)
-        actions = QHBoxLayout()
-        actions.addStretch()
-        cancel = QPushButton("取消")
-        cancel.setProperty("class", "outline")
-        cancel.clicked.connect(self.reject)
-        actions.addWidget(cancel)
-        layout.addLayout(actions)
+# 冷加载、推理、排队各给 60 秒：办公电脑首次加载模型常被杀毒扫描拖慢，分开计时不误判。
+_STAGE_BUDGET_MS = 60000
+_STAGE_TEXT = {"queued": "排队中：等待本地 OCR 服务", "loading": "首次加载本地模型",
+               "recognizing": "正在本地识别文字"}
+WAITING_STATES = frozenset(_STAGE_TEXT)
+
+
+def _write_diagnostic(reason, request):
+    """超时时把所有线程的调用栈写进 user-data/logs，实机卡住时能看出停在哪一步。"""
+    import faulthandler
+    from datetime import datetime
+    from settings import data_directory
+    folder = data_directory() / "logs"
+    try:
+        folder.mkdir(exist_ok=True)
+        path = folder / f"ocr-{datetime.now():%Y%m%d-%H%M%S}.txt"
+        with path.open("w", encoding="utf-8") as stream:
+            stream.write(f"{reason}\n阶段：{request.stage}\n")
+            if request.started_at:
+                stream.write(f"开始执行后 {monotonic() - request.started_at:.1f} 秒\n")
+            stream.write("\n")
+            stream.flush()
+            faulthandler.dump_traceback(stream, all_threads=True)
+    except OSError:
+        return None
+    return path
 
 
 class OCRController(QObject):
-    """start(pixmap)；recognized 在确认对话框出现前发出，供画布挂载文字层。"""
+    """start(pixmap)；recognized 在复核窗口出现前发出，供画布挂载文字层。
+
+    等待、失败、超时都只发 statusChanged，由所在窗口在界面内展示，不弹窗打断截图。
+    """
     recognized = Signal(object)
     failed = Signal(str)
     cancelled = Signal()
@@ -134,11 +132,16 @@ class OCRController(QObject):
         self._state = "idle"
         self._request = None
         self._pixmap = None
-        self._progress = None
         self._dialogs = []
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._timed_out)
+        # 不知道总耗时，只如实显示已等待秒数，不伪造进度。
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(1000)
+        self._ticker.timeout.connect(self._show_wait)
+        self._stage_started = 0.0
+        self._behind_cancelled = False
         self._service = _get_service()
         self._service.finished.connect(self._finished)
         self._service.stage.connect(self._stage)
@@ -153,8 +156,6 @@ class OCRController(QObject):
 
     def _set_state(self, state, message, has_results=False):
         self._state = state
-        if self._progress is not None:
-            self._progress.label.setText(message)
         self.stateChanged.emit(state)
         self.statusChanged.emit(message, has_results)
 
@@ -166,7 +167,6 @@ class OCRController(QObject):
         if pixmap.isNull():
             self.invalidate("没有可识别的图片")
             self._set_state("failed", "识别失败：没有可识别的图片")
-            show_message(self._owner, "文字识别失败", "没有可识别的图片。")
             return
         if self.running:
             self.cancel()
@@ -178,29 +178,35 @@ class OCRController(QObject):
         self._request = request
         # 窗口销毁后，排队任务与迟到结果均作废。
         self.destroyed.connect(lambda _=None, flag=request.cancelled: flag.set())
-        self._progress = _ProgressDialog(self._owner)
-        self._progress.rejected.connect(self.cancel)
         active = self._service.active
-        message = ("排队中：前一次已取消的推理仍在结束，请稍候…"
-                   if active is not None and active.cancelled.is_set()
-                   else "排队中：等待本地 OCR 服务…")
-        self._set_state("queued", message)
-        self._progress.show()
+        self._behind_cancelled = active is not None and active.cancelled.is_set()
+        self._enter_stage("queued")
         self._service.requested.emit(request)
+
+    def _enter_stage(self, stage):
+        self._request.stage = stage
+        self._stage_started = monotonic()
+        self._timer.start(_STAGE_BUDGET_MS)
+        self._ticker.start()
+        self._state = stage
+        self.stateChanged.emit(stage)
+        self._show_wait()
+
+    def _show_wait(self):
+        if self._request is None:
+            return
+        stage = self._request.stage
+        text = _STAGE_TEXT[stage]
+        if stage == "queued" and self._behind_cancelled:
+            text = "排队中：前一次已取消的推理仍在结束"
+        seconds = int(monotonic() - self._stage_started)
+        self.statusChanged.emit(f"{text}…" + (f" 已等待 {seconds} 秒" if seconds >= 3 else ""), False)
 
     @Slot(object, str)
     def _stage(self, request, stage):
         if request is not self._request or request.cancelled.is_set():
             return
-        # 冷加载与推理共用 60 秒预算；排队时间不占用它。
-        if not self._timer.isActive():
-            elapsed = (monotonic() - request.started_at) * 1000
-            if elapsed >= 60000:
-                self._timed_out()
-                return
-            self._timer.start(60000 - int(elapsed))
-        message = "首次加载本地模型…" if stage == "loading" else "正在本地识别文字…"
-        self._set_state(stage, message)
+        self._enter_stage(stage)
 
     def cancel(self):
         if self._request is None:
@@ -216,36 +222,36 @@ class OCRController(QObject):
     def _end_wait(self):
         self._request = None
         self._timer.stop()
-        progress, self._progress = self._progress, None
-        if progress is not None:
-            progress.accept()
-            progress.deleteLater()
-            # Tool 进度窗关闭时 Windows 可能把焦点还给底层截图遮罩。
-            if self._owner is not None and self._owner.isVisible():
-                self._owner.raise_()
-                self._owner.activateWindow()
+        self._ticker.stop()
 
     def _timed_out(self):
-        self._request.cancelled.set()
+        request = self._request
+        request.cancelled.set()
         self._end_wait()
-        message = "识别超过 60 秒，本次结果已取消。后台推理结束后可重新识别，原图仍然保留。"
-        self._set_state("timeout", "识别超时，可重新识别；后台推理仍需结束")
+        if request.stage == "queued":
+            reason = "等待本地 OCR 服务超过 60 秒"
+        elif request.stage == "loading":
+            reason = "加载本地模型超过 60 秒"
+        else:
+            reason = "识别超过 60 秒"
+        path = _write_diagnostic(reason, request)
+        note = f"，诊断信息已存到 user-data/logs/{path.name}" if path is not None else ""
+        message = f"{reason}，本次已停止等待。可点“重试”{note}；多次超时请重启程序。"
+        self._set_state("timeout", message)
         self.failed.emit(message)
-        show_message(self._owner, "识别超时", message)
 
     @Slot(object, object, str)
     def _finished(self, request, results, error):
         if request is not self._request or request.cancelled.is_set():
             return
         # GUI 繁忙时完成信号可能先于计时器送达，仍按实际执行预算判定。
-        if request.started_at and monotonic() - request.started_at >= 60:
+        if monotonic() - self._stage_started >= _STAGE_BUDGET_MS / 1000:
             self._timed_out()
             return
         self._end_wait()
         if error:
-            self._set_state("failed", "识别失败，请查看错误提示后重试")
+            self._set_state("failed", f"识别失败：{error}")
             self.failed.emit(error)
-            show_message(self._owner, "文字识别失败", error)
             return
         self._document = OCRDocument(results, request.image)
         self._results = self._document.results
@@ -253,20 +259,12 @@ class OCRController(QObject):
         # 接收窗口可能在挂层前检查图像版本并拒绝这次结果。
         if self._document is None:
             return
-        if self._document:
-            self._set_state("completed", f"已识别 {len(self._document)} 处文字：可在原图滑选，Ctrl+C 复制", True)
-        else:
-            self._set_state("empty", "未检测到文字，可调整选区后重新识别")
-        from settings import get_settings
-        settings = get_settings()
         if not self._document:
-            if not settings.value("ocr/hide_empty_notice", False, type=bool):
-                notice = MessageDialog(self._owner, "未检测到文字", "此图片中没有检测到文字区域。",
-                                       checkbox_text="以后不再提示")
-                notice.exec()
-                settings.setValue("ocr/hide_empty_notice", notice.checkbox.isChecked())
+            self._set_state("empty", "未检测到文字，可调整选区后重新识别")
             return
-        if settings.value("ocr/direct_copy", False, type=bool):
+        self._set_state("completed", f"已识别 {len(self._document)} 处文字：可在原图滑选，Ctrl+C 复制", True)
+        from settings import get_settings
+        if get_settings().value("ocr/direct_copy", False, type=bool):
             QApplication.clipboard().setText(self._document.text())
             return
         if not self._layer_first:

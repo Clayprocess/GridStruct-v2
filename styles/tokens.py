@@ -96,6 +96,10 @@ FONT_MD = 13
 FONT_LG = 15
 FONT_XL = 20
 
+# 截图主工具条：实测 16 px 图标在办公屏上偏小，放大一档；按钮内边距随之加 1。
+TOOLBAR_ICON_SIZE = 18
+TOOLBAR_BUTTON_PADDING = 7
+
 # 动效时长（ms）：小控件的状态切换用 FAST，滑块、面板这类位移用 BASE。超过 200ms 就会显得拖沓。
 MOTION_FAST = 120
 MOTION_BASE = 180
@@ -107,6 +111,12 @@ CAPTURE_MASK = (0, 0, 0, 110)
 CAPTURE_GUIDE = (255, 255, 255, 140)
 CAPTURE_TIP = (9, 9, 11, 230)
 CAPTURE_BACKGROUND = (0, 0, 0)
+# 选区框沿用 GridStruct V1 的实际效果：亮蓝描边，圆形手柄带白圈；边短于 120 时不放边中点手柄，免得挤在一起。
+CAPTURE_ACCENT = "#3388ff"
+CAPTURE_HANDLE_RING = "#ffffff"
+CAPTURE_LINE_WIDTH = 2.4
+CAPTURE_HANDLE_SIZE = 13
+CAPTURE_EDGE_HANDLE_MIN = 120
 PIXEL_GRID = (0, 0, 0, 60)
 FLOAT_PANEL_SHADOW = (0, 0, 0, 42)
 # 贴图阴影：由外向内逐层叠加的 alpha，层数即阴影宽度（px）。

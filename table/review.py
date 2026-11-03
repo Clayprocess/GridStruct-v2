@@ -26,6 +26,28 @@ def visual_rows(tokens):
     return tuple(tuple(sorted(row, key=lambda item: item.box.left)) for row in rows)
 
 
+def _latin(ch):
+    # 拉丁字母（含带重音的西文字母）；数字、汉字、全角符号都不算。
+    return ch.isalpha() and ord(ch) < 0x250
+
+
+def join_lines(lines):
+    """格内多行合成一行：两边都是英文字母才补空格，数字、中文不补（Clay 2026-11-03 实测决定）。
+
+    英文句读后接字母也补空格，免得 "Hello,world"；行尾连字符原样保留、不补空格，
+    不猜它是断词还是本来的连字符。
+    """
+    text = ""
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if text and (_latin(text[-1]) or text[-1] in ",.;:!?)]") and _latin(line[0]):
+            text += " "
+        text += line
+    return text
+
+
 def build_document(tokens, grid):
     """文字按中心点落格，落进合并区域的归锚点格。"""
     buckets = [[[] for _ in range(grid.column_count)] for _ in range(grid.row_count)]
@@ -37,7 +59,7 @@ def build_document(tokens, grid):
         row = []
         for cell_tokens in row_tokens:
             lines = visual_rows(tuple(cell_tokens))
-            text = "\n".join(" ".join(token.text.strip() for token in line) for line in lines)
+            text = join_lines(" ".join(token.text.strip() for token in line) for line in lines)
             cell = TableCell(text, text, tuple(token for line in lines for token in line))
             row.append(replace(cell, status=PENDING) if cell.low_confidence else cell)
         cells.append(tuple(row))
@@ -74,7 +96,7 @@ def carry_over(base, recognized):
             # 校正区域可能被新线切开，所有格子都排除已被校正替代的原文，避免拆分后重复出现。
             remaining = unreplaced_tokens(fresh.tokens, all_corrections)
             lines = visual_rows((*remaining, *(part for part in corrections if part.text)))
-            text = "\n".join(" ".join(part.text for part in line) for line in lines)
+            text = join_lines(" ".join(part.text for part in line) for line in lines)
             status = (CORRECTED if any(part.status == CORRECTED for part in corrections) else CONFIRMED) if corrections else ""
             if TableCell(tokens=remaining).low_confidence:
                 status = PENDING

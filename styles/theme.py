@@ -145,6 +145,12 @@ QToolButton[pill="true"]:checked {{
 QWidget#FloatPanelRow {{
     background: transparent;
 }}
+QWidget#FloatPanelRow QToolButton[class="ghost"] {{
+    padding: {T.TOOLBAR_BUTTON_PADDING}px;
+}}
+QWidget#FloatPanelRow QToolButton#ToolCaret {{
+    padding: {T.TOOLBAR_BUTTON_PADDING}px 1px;
+}}
 QFrame#FloatPanelSeparator {{
     background-color: {t['border']};
     border: none;

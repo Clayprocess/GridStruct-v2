@@ -324,7 +324,11 @@ class _PinBase(QWidget):
             menu.addAction(_fg_icon("pencil"), "编辑文字", self._edit_text)
         if self.kind == "image":
             menu.addAction(_fg_icon("pencil"), "标注", "Space", lambda: self.annotateRequested.emit(self))
-            menu.addAction(_fg_icon("scan-text"), "复核识别结果" if self._document is not None else "文本识别", self._recognize)
+            if self._ocr_controller is not None and self._ocr_controller.running:
+                menu.addAction(_fg_icon("x"), "取消识别", self._ocr_controller.cancel)
+            else:
+                menu.addAction(_fg_icon("scan-text"), "复核识别结果" if self._document is not None else "文本识别",
+                               self._recognize)
             if self._document is not None:
                 menu.addAction("重新识别（替换校正结果）", self._rerun_ocr)
             menu.addAction(_fg_icon("table"), "表格识别", self._recognize_table)

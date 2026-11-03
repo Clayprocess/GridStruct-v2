@@ -191,7 +191,7 @@ class AnnotationWindow(QWidget):
         self._toolbar.set_copy_text_selected(bool(text))
 
     def _show_ocr_status(self, message, has_results):
-        self._toolbar.set_ocr_status(message, has_results)
+        self._toolbar.set_ocr_status(message, has_results, self._ocr.state)
         self._position_toolbar()
 
     def _render(self):
@@ -227,6 +227,8 @@ class AnnotationWindow(QWidget):
             self._ocr.start(self._render())
         elif action == "ocr_results":
             self._ocr.show_results()
+        elif action == "ocr_cancel":
+            self._ocr.cancel()
         elif action == "table":
             # 表格窗口接手这张图继续校对，同贴图一样结束截图会话；同图已有 OCR 时直接复用。
             from table import open_table

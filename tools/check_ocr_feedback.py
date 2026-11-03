@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import sys
+import tempfile
 from time import monotonic
 from unittest.mock import patch
 
@@ -87,7 +88,7 @@ def main():
                                     key == "ocr/hide_empty_notice" or default})()
     with (patch("ocr.controller._get_service", return_value=service),
           patch("settings.get_settings", return_value=settings),
-          patch("ocr.controller.show_message") as warning):
+          patch("settings.data_directory", return_value=Path(tempfile.mkdtemp()))):
         if "--focus-check" in sys.argv:
             anchor = QWidget()
             anchor.setWindowTitle("GridStruct 正式 Tool 焦点验收")
@@ -132,12 +133,12 @@ def main():
                 controller.start(pixmap)
                 service.finished.emit(controller._request, [], "验收用模型错误")
                 app.processEvents()
-                if "识别失败" not in _visible_text(window) or not warning.called:
+                if "识别失败" not in _visible_text(window):
                     errors.append(f"{mode}/{type(window).__name__}: 无失败状态")
                 controller.start(pixmap)
                 controller._timer.timeout.emit()
                 app.processEvents()
-                if "识别超时" not in _visible_text(window):
+                if "超过 60 秒" not in _visible_text(window):
                     errors.append(f"{mode}/{type(window).__name__}: 无超时状态")
                 controller.start(pixmap)
                 service.finished.emit(controller._request, [], "")

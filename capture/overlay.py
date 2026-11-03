@@ -1,7 +1,7 @@
 # 每屏保留原生截图，控制器共享全局逻辑选区，避免混合 DPI 跨窗重采样。
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor, QRegion
-from PySide6.QtCore import (Qt, QRect, QPoint, QSize, Signal, QObject, QTimer, QEvent,
+from PySide6.QtCore import (Qt, QRect, QRectF, QPoint, QSize, Signal, QObject, QTimer, QEvent,
                            Property, QPropertyAnimation, QEasingCurve)
 from styles import tokens as T
 from ui import floating_window_type, show_toast
@@ -11,7 +11,10 @@ from .screen import ScreenManager, capture_virtual_desktop
 from .snap import RegionDetector
 from .size_editor import SizeEditor
 
-_HANDLE = 8
+_HANDLE = T.CAPTURE_HANDLE_SIZE
+# 手柄比画出来的圆点多 3 px 可点范围，和 V1 一致。
+_HANDLE_SLOP = 3
+_RESIZE_CURSORS = (Qt.SizeFDiagCursor, Qt.SizeVerCursor, Qt.SizeBDiagCursor, Qt.SizeHorCursor)
 _MIN_SIZE = 4
 _DIM = QColor(*T.CAPTURE_MASK)
 
@@ -191,7 +194,8 @@ class ScreenShotWindow(QObject):
     def _border_region(rect):
         if rect.isNull():
             return QRegion()
-        return QRegion(rect.adjusted(-5, -5, 5, 5)) - QRegion(rect.adjusted(5, 5, -5, -5))
+        margin = _HANDLE // 2 + _HANDLE_SLOP + 2
+        return QRegion(rect.adjusted(-margin, -margin, margin, margin)) - QRegion(rect.adjusted(margin, margin, -margin, -margin))
 
     def _selection_region(self, previous):
         # 内外遮罩随选区变化，异或区域也必须刷新，否则拖拽后会残留旧遮罩。
@@ -236,6 +240,7 @@ class ScreenShotWindow(QObject):
             self._drag_mode = handle
         elif not self._sel.isNull() and self._sel.contains(pos):
             self._drag_mode = "move"
+            self._set_cursor(Qt.ClosedHandCursor)
         elif self._sel.isNull() and self._snap_rect.contains(pos):
             # 松开才区分单击采用和手工框选，避免按下时选区先跳到整个吸附框。
             self._pending_snap = QRect(self._snap_rect)
@@ -271,19 +276,10 @@ class ScreenShotWindow(QObject):
             self._snap_rect = QRect()
             self._drag_mode = "create"
         if self._drag_mode is None:
-            handle = self._hit_handle(pos)
-            if not self._sel.isNull() and self.size_tip()[0].contains(pos):
-                cursor = Qt.PointingHandCursor
-            elif handle is not None:
-                cursor = [Qt.SizeFDiagCursor, Qt.SizeVerCursor, Qt.SizeBDiagCursor, Qt.SizeHorCursor][handle % 4]
-            elif self._sel.contains(pos):
-                cursor = Qt.SizeAllCursor
-            else:
-                cursor = Qt.CrossCursor
-                if self._sel.isNull():
-                    self._snap.detect(pos)
-            for window in self._windows:
-                window.setCursor(QCursor(cursor))
+            cursor = self._hover_cursor(pos)
+            if cursor == Qt.CrossCursor and self._sel.isNull():
+                self._snap.detect(pos)
+            self._set_cursor(cursor)
             self.update(dirty | self._hover_region())
             return
         dx, dy = pos.x() - self._drag_start.x(), pos.y() - self._drag_start.y()
@@ -333,6 +329,8 @@ class ScreenShotWindow(QObject):
         self._drag_mode = None
         if self._sel.width() < _MIN_SIZE or self._sel.height() < _MIN_SIZE:
             self._sel = QRect()
+        self._set_cursor(self._hover_cursor(event.globalPosition().toPoint() if len(self._windows) == 1
+                                            else self._manager.cursor_position()))
         self.update(dirty | self._selection_region(previous) | self._hover_region())
         self.selectionChanged.emit(QRect(self._sel))
 
@@ -473,14 +471,34 @@ class ScreenShotWindow(QObject):
             (x + w, y + h // 2), (x + w, y + h),
             (x + w // 2, y + h), (x, y + h), (x, y + h // 2),
         ]
+        skip = set()
+        if w < T.CAPTURE_EDGE_HANDLE_MIN:
+            skip |= {1, 5}
+        if h < T.CAPTURE_EDGE_HANDLE_MIN:
+            skip |= {3, 7}
         return [(i, QRect(px - hw, py - hw, _HANDLE, _HANDLE))
-                for i, (px, py) in enumerate(pts)]
+                for i, (px, py) in enumerate(pts) if i not in skip]
 
     def _hit_handle(self, p: QPoint):
         for i, r in self._handles():
-            if r.contains(p):
+            if r.adjusted(-_HANDLE_SLOP, -_HANDLE_SLOP, _HANDLE_SLOP, _HANDLE_SLOP).contains(p):
                 return i
         return None
+
+    def _set_cursor(self, cursor):
+        for window in self._windows:
+            window.setCursor(QCursor(cursor))
+
+    def _hover_cursor(self, pos):
+        handle = self._hit_handle(pos)
+        if not self._sel.isNull() and self.size_tip()[0].contains(pos):
+            return Qt.PointingHandCursor
+        if handle is not None:
+            return _RESIZE_CURSORS[handle % 4]
+        if self._sel.contains(pos):
+            # 同 V1：选区内是张开的手，按住拖动时握拳。
+            return Qt.OpenHandCursor
+        return Qt.CrossCursor
 
 
     def _square_by_handle(self, h: int):
@@ -556,15 +574,19 @@ class _ScreenOverlay(QWidget):
                     mask = QColor(_DIM)
                     mask.setAlphaF(mask.alphaF() * (1 - c._selection_progress))
                     painter.fillRect(selected, mask)
-                painter.setPen(QPen(QColor(T.ANNOTATION_COLORS[3]), 2))
-                painter.drawRect(selected.adjusted(1, 1, -1, -1))
-                painter.setPen(QPen(QColor(*T.CAPTURE_GUIDE), 1))
-                painter.drawRect(selected.adjusted(2, 2, -2, -2))
-                painter.setBrush(QColor(T.ANNOTATION_COLORS[3]))
-                painter.setPen(Qt.NoPen)
+                painter.setRenderHint(QPainter.Antialiasing)
+                border = QPen(QColor(T.CAPTURE_ACCENT), T.CAPTURE_LINE_WIDTH)
+                border.setJoinStyle(Qt.MiterJoin)
+                painter.setPen(border)
+                inset = T.CAPTURE_LINE_WIDTH / 2
+                painter.drawRect(QRectF(selected).adjusted(inset, inset, -inset, -inset))
                 if not c._frozen:
+                    painter.setPen(QPen(QColor(T.CAPTURE_HANDLE_RING), 2))
+                    painter.setBrush(QColor(T.CAPTURE_ACCENT))
                     for _, handle in c._handles():
-                        painter.drawRect(handle.translated(-offset))
+                        painter.drawEllipse(QRectF(handle.translated(-offset)).adjusted(1, 1, -1, -1))
+                    painter.setPen(Qt.NoPen)
+                    painter.setRenderHint(QPainter.Antialiasing, False)
                     tip, text = c.size_tip()
                     tip.translate(-offset)
                     if tip.intersects(self.rect()):
@@ -575,7 +597,7 @@ class _ScreenOverlay(QWidget):
             else:
                 painter.fillRect(self.rect(), _DIM)
                 if not c._snap_rect.isNull():
-                    painter.setPen(QPen(QColor(T.ANNOTATION_COLORS[3]), 2))
+                    painter.setPen(QPen(QColor(T.CAPTURE_ACCENT), 2))
                     painter.drawRect(c._snap_rect.translated(-offset).adjusted(1, 1, -1, -1))
             if c._guides and not c._frozen:
                 center = (c._sel.center() if not c._sel.isNull() else c._pointer_pos) - offset

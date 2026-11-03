@@ -70,7 +70,7 @@ def _autostart_command() -> str:
     return list2cmdline([str(pythonw), "-X", "utf8", str(Path(__file__).resolve().parents[1] / "main.py")])
 
 
-_HOTKEY_LABELS = {"screenshot": "截图", "longshot": "长截图", "document": "识别文档"}
+_HOTKEY_LABELS = {"screenshot": "截图", "document": "识别文档"}
 # 导航顺序：页面名、Lucide 图标、构建方法名。
 _PAGES = (("通用", "settings", "_general_page"), ("截图", "scan", "_shot_page"),
           ("保存", "save", "_save_page"), ("文字识别", "scan-text", "_ocr_page"),

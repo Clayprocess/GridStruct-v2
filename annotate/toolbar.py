@@ -23,7 +23,7 @@ from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QM
 from styles import tokens as T
 from settings import get_settings
 from ui import floating_window_type, round_corners, tinted_icon
-from ui.motion import SelectionPill, animation, tween
+from ui.motion import SelectionPill, Spinner, animation, tween
 
 # 主区按 PixPin 3.5.5.1 默认工具条排列：同类工具折成一个按钮，右侧小箭头切换，按钮图标跟随所选。
 # 马赛克的像素化/模糊是样式不是工具，留在二级面板里切换。
@@ -92,7 +92,7 @@ def _menu_text(item_id, label):
     # 制表符后的文字是 QMenu 右侧的快捷键列，只作提示，按键仍由截图窗口统一分发。
     return f"{label}\t{_SHORTCUTS[item_id]}" if item_id in _SHORTCUTS else label
 
-_ICON_SIZE = 16
+_ICON_SIZE = T.TOOLBAR_ICON_SIZE
 _CARET_SIZE = 12
 _GAP = 8  # 工具条与选区之间的间距
 # 主工具条与二级面板是两张独立卡片，中间留缝（同 PixPin：二级面板在主条下方、左缘对齐、宽度随工具变化）。
@@ -277,15 +277,24 @@ class FloatPanel(QWidget):
         self._ocr_feedback = QWidget(self)
         feedback_layout = QHBoxLayout(self._ocr_feedback)
         feedback_layout.setContentsMargins(8, 4, 8, 4)
+        feedback_layout.setSpacing(T.SPACE_2)
+        self._ocr_spinner = Spinner(self._ocr_feedback)
+        feedback_layout.addWidget(self._ocr_spinner)
         self._ocr_status = QLabel()
         self._ocr_status.setWordWrap(True)
         feedback_layout.addWidget(self._ocr_status, 1)
-        self._ocr_results = QToolButton()
-        self._ocr_results.setText("查看全文")
-        self._ocr_results.setProperty("class", "ghost")
-        self._ocr_results.setToolTip("打开可编辑的识别全文")
-        self._ocr_results.clicked.connect(lambda: self.actionTriggered.emit("ocr_results"))
-        feedback_layout.addWidget(self._ocr_results)
+        # 等待时可取消、失败后可重试，都留在这张卡片里，不弹窗打断截图。
+        self._ocr_buttons = {}
+        for action_id, text, tip in (("ocr_cancel", "取消", "停止等待这次识别"),
+                                     ("ocr", "重试", "重新识别当前截图"),
+                                     ("ocr_results", "查看全文", "打开可编辑的识别全文")):
+            button = QToolButton()
+            button.setText(text)
+            button.setProperty("class", "ghost")
+            button.setToolTip(tip)
+            button.clicked.connect(lambda _=False, aid=action_id: self.actionTriggered.emit(aid))
+            feedback_layout.addWidget(button)
+            self._ocr_buttons[action_id] = button
         self._root_layout.addWidget(self._ocr_feedback)
         self._ocr_feedback.hide()
 
@@ -424,10 +433,15 @@ class FloatPanel(QWidget):
 
     # ---- 对外接口 ----
 
-    def set_ocr_status(self, message: str, has_results: bool):
+    def set_ocr_status(self, message: str, has_results: bool, state: str):
         """识别文字层本身透明，持续反馈让用户知道结果已可操作。"""
+        from ocr.controller import WAITING_STATES
+        waiting = state in WAITING_STATES
         self._ocr_status.setText(message)
-        self._ocr_results.setVisible(has_results)
+        self._ocr_spinner.setVisible(waiting)
+        self._ocr_buttons["ocr_cancel"].setVisible(waiting)
+        self._ocr_buttons["ocr"].setVisible(state in ("failed", "timeout", "cancelled"))
+        self._ocr_buttons["ocr_results"].setVisible(has_results)
         self._ocr_feedback.show()
 
     def refresh_icons(self, mode: str) -> None:

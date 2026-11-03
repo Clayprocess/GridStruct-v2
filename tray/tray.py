@@ -13,7 +13,6 @@ TRAY_TOOLTIP = "GridStruct-V2"
 MENU_ITEMS: list[tuple[str, str]] = [
     ("screenshot", "截图"),
     ("pin", "贴图"),
-    ("longshot", "长截图"),
     ("document", "识别文档…"),
     ("settings", "设置"),
     ("update", "检查更新"),

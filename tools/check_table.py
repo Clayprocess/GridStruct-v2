@@ -114,6 +114,24 @@ def check_review():
     assert review.document.cell(0, 1).status == ""
 
 
+def check_cell_line_join():
+    from table.model import GridSpec, Rect, Token
+    from table.review import TableReview, join_lines
+    # 格内换行：两边英文字母补空格，数字、中文不补；连字符保留。
+    cases = {("Total", "amount"): "Total amount", ("应收", "账款"): "应收账款", ("1,234", "567"): "1,234567",
+             ("Hello,", "world"): "Hello, world", ("co-", "operate"): "co-operate", ("净额", "Net"): "净额Net",
+             ("Ref", "2026"): "Ref2026"}
+    for lines, expected in cases.items():
+        assert join_lines(lines) == expected, (lines, join_lines(lines))
+    tokens = (Token("Net", 0.99, Rect(5, 5, 30, 15)), Token("amount", 0.99, Rect(5, 22, 40, 32)),
+              Token("应收", 0.99, Rect(60, 5, 80, 15)), Token("账款", 0.99, Rect(60, 22, 80, 32)))
+    review = TableReview(tokens, GridSpec((0, 40), (0, 50, 100)))
+    assert review.document.rows == (("Net amount", "应收账款"),), review.document.rows
+    # 人工改字里主动敲的换行保留。
+    review.edit(0, 0, "Net\namount")
+    assert review.document.rows[0][0] == "Net\namount"
+
+
 def check_correction_merges():
     from table.model import CellMerge, GridSpec, Rect, Token
     from table.review import TableReview
@@ -561,6 +579,7 @@ def main():
     check_model()
     check_grid_edits()
     check_review()
+    check_cell_line_join()
     check_correction_merges()
     check_selection_after_grid_change(app)
     check_ocr_reuse(app)
