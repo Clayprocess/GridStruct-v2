@@ -64,7 +64,7 @@ def main() -> int:
         show_message(None, "无法读取便携配置", f"{exc}\n请将应用放在有写入权限的目录。")
         return 1
     mode = apply_theme(app, config.value("theme", "system"))
-    # 窗口、任务栏按钮和托盘的图标跟主题反色：深色主题白点黑边。
+    # 窗口、任务栏按钮和托盘的图标跟主题换色：浅色主题黑点，深色主题白点。
     app.setWindowIcon(app_icon(mode))
     enable_menu_effects(app)
     print(f"[GridStruct-V2] 启动，主题：{mode}")

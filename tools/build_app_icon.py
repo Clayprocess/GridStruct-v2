@@ -26,7 +26,7 @@ def main():
     app = QGuiApplication.instance() or QGuiApplication([])
     images = [(size, png_bytes(size)) for size in APP_ICON_SIZES]
     # ICO 目录项直接内嵌 PNG（Vista 起支持），每个尺寸用各自按像素对齐的图形，不靠缩放。
-    # 资源管理器背景随系统主题变，EXE 固定黑点白边：白边在深色背景上把每个点托出来。
+    # ICO 不能随系统主题换色，EXE 固定用浅色主题的黑点。
     header = struct.pack("<HHH", 0, 1, len(images))
     offset = len(header) + 16 * len(images)
     entries, payload = b"", b""

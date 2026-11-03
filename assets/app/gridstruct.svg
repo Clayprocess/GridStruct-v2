@@ -1,24 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <g fill="white">
-    <rect x="4" y="4" width="88" height="88" rx="30.4"/>
-    <rect x="88.25" y="8.25" width="79.5" height="79.5" rx="27.85"/>
-    <rect x="172.5" y="12.5" width="71" height="71" rx="25.3"/>
-    <rect x="8.25" y="88.25" width="79.5" height="79.5" rx="27.85"/>
-    <rect x="92.5" y="92.5" width="71" height="71" rx="25.3"/>
-    <rect x="176.75" y="96.75" width="62.5" height="62.5" rx="22.75"/>
-    <rect x="12.5" y="172.5" width="71" height="71" rx="25.3"/>
-    <rect x="96.75" y="176.75" width="62.5" height="62.5" rx="22.75"/>
-    <rect x="181" y="181" width="54" height="54" rx="20.2"/>
-  </g>
   <g fill="currentColor">
-    <rect x="14" y="14" width="68" height="68" rx="20.4"/>
-    <rect x="98.25" y="18.25" width="59.5" height="59.5" rx="17.85"/>
-    <rect x="182.5" y="22.5" width="51" height="51" rx="15.3"/>
-    <rect x="18.25" y="98.25" width="59.5" height="59.5" rx="17.85"/>
-    <rect x="102.5" y="102.5" width="51" height="51" rx="15.3"/>
-    <rect x="186.75" y="106.75" width="42.5" height="42.5" rx="12.75"/>
-    <rect x="22.5" y="182.5" width="51" height="51" rx="15.3"/>
-    <rect x="106.75" y="186.75" width="42.5" height="42.5" rx="12.75"/>
-    <rect x="191" y="191" width="34" height="34" rx="10.2"/>
+    <rect x="12" y="12" width="70" height="70" rx="21"/>
+    <rect x="98.375" y="16.375" width="61.25" height="61.25" rx="18.38"/>
+    <rect x="184.75" y="20.75" width="52.5" height="52.5" rx="15.75"/>
+    <rect x="16.375" y="98.375" width="61.25" height="61.25" rx="18.38"/>
+    <rect x="102.75" y="102.75" width="52.5" height="52.5" rx="15.75"/>
+    <rect x="189.125" y="107.125" width="43.75" height="43.75" rx="13.12"/>
+    <rect x="20.75" y="184.75" width="52.5" height="52.5" rx="15.75"/>
+    <rect x="107.125" y="189.125" width="43.75" height="43.75" rx="13.12"/>
   </g>
 </svg>
