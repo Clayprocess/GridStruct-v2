@@ -126,8 +126,8 @@ class _TextRow:
         return (self.top + self.bottom) / 2
 
 
-def detect_rules(image):
-    """在原分辨率上找长横线/竖线；Otsu 叠加自适应阈值，兼顾浅色细线和扫描底色。"""
+def rule_masks(image):
+    """原分辨率上的长横线、竖线掩膜；Otsu 叠加自适应阈值，兼顾浅色细线和扫描底色。"""
     import cv2
     height, width = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -143,6 +143,13 @@ def detect_rules(image):
         cv2.MORPH_RECT, (max(MIN_RULE_KERNEL, round(width * RULE_KERNEL_RATIO)), 1)))
     vertical_mask = cv2.morphologyEx(ink, cv2.MORPH_OPEN, cv2.getStructuringElement(
         cv2.MORPH_RECT, (1, max(MIN_RULE_KERNEL, round(height * RULE_KERNEL_RATIO)))))
+    return horizontal_mask, vertical_mask
+
+
+def detect_rules(image):
+    """在原分辨率上找长横线/竖线。"""
+    height, width = image.shape[:2]
+    horizontal_mask, vertical_mask = rule_masks(image)
     horizontal = _extract_lines(horizontal_mask, np.count_nonzero(horizontal_mask, axis=1) / width, True)
     vertical = _extract_lines(vertical_mask, np.count_nonzero(vertical_mask, axis=0) / height, False)
 

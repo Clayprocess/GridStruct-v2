@@ -20,7 +20,8 @@ class _Request:
     results: object
     dialog: object = field(repr=False)
     page: int = 0
-    crop: bool = False
+    tokens: object = None   # 改框后重新分析：整页文字框已有，不再 OCR
+    regions: object = None  # 用户框选的区域；None 时自动找表
     cancelled: bool = False
 
 
@@ -34,7 +35,7 @@ class _Worker(QObject):
             return
         try:
             result = analyze(request.image, request.results, on_stage=lambda stage: self.stage.emit(request, stage),
-                             crop=request.crop)
+                             tokens=request.tokens, regions=request.regions)
         except Exception as exc:
             self.finished.emit(request, None, str(exc))
         else:
@@ -95,9 +96,10 @@ def _submit_next(dialog):
         dialog.show_error(str(exc), index)
         _submit_next(dialog)
         return
-    if page.results is not None:
+    tokens, regions = dialog.page_request(index)
+    if page.results is not None or tokens is not None:
         dialog.set_stage("structure", index)
-    request = _Request(image, page.results, dialog, index, crop=isinstance(page, FilePage))
+    request = _Request(image, page.results, dialog, index, tokens=tokens, regions=regions)
     _active[dialog] = request
     _service.requested.emit(request)
 
@@ -116,6 +118,8 @@ def _open(pages, title=None):
             request.cancelled = True
 
     dialog.destroyed.connect(closed)
+    # 改了表格框：后台空闲就接着分析，正在跑别的页时排在它后面。
+    dialog.analysisRequested.connect(lambda: None if dialog in _active else _submit_next(dialog))
     dialog.show()
     dialog.raise_()
     dialog.activateWindow()
@@ -136,7 +140,7 @@ _choosing = False
 
 
 def open_document(parent=None, paths=None):
-    """识别文档：选图片或 PDF，按表格识别；多页逐页改网格，输出时合成一张表。
+    """识别文档：选图片或 PDF，每页自动框出表格，逐张改网格，导出时一张表一个工作表。
 
     paths 给了就直接打开（独立 EXE 收到拖放或“打开方式”传入的文件），否则弹出选文件对话框。
     """

@@ -1,4 +1,4 @@
-"""表格导出：剪贴板（TSV + HTML）、CSV、HTML、XLSX。
+"""表格导出：剪贴板（TSV + HTML）、CSV、HTML、XLSX（识别文档每张表一个工作表）。
 
 移植自 v1 application/exporting.py 与 xlsx_exporting.py。XLSX 一律按文本写入，
 避免 Excel 把识别出的“=…”、网址或长数字自动解释成公式、链接或科学计数。
@@ -22,8 +22,8 @@ MAXIMUM_ROW_HEIGHT = 110.0
 
 
 def stack(documents, remove_repeated_headers=False):
-    """多页表格上下接成一张。列数不足的页右侧补空格；续页首行与第一页首行一字不差时
-    仅在用户选择去重时视为重复表头（首行有跨行合并的不去，免得拆坏表头）。"""
+    """跨页的一张表上下接成一张。列数不足的部分右侧补空格；续表首行与第一段首行一字不差时
+    在 remove_repeated_headers 下视为重复表头去掉（首行有跨行合并的不去，免得拆坏表头）。"""
     columns = max(document.grid.column_count for document in documents)
     header = documents[0].rows[0]
     cells, merges = [], []
@@ -72,55 +72,73 @@ def to_html(document):
     return f"<table>{''.join(rows)}</table>"
 
 
-def save(document, path):
-    """按扩展名写文件；CSV 带 BOM，Excel 双击打开中文不乱码。"""
+def _sheets(content):
+    """单张表或 [(工作表名, 表), ...]；截图/贴图只有一张表，用默认表名。"""
+    return [(SHEET_NAME, content)] if isinstance(content, TableDocument) else list(content)
+
+
+def save(content, path):
+    """按扩展名写文件；content 为一张表或 [(工作表名, 表), ...]。
+
+    XLSX 每张表一个工作表；HTML 依次排列、各带表名标题；CSV 只能放一张表，多张时报 ValueError。
+    CSV 带 BOM，Excel 双击打开中文不乱码。
+    """
+    sheets = _sheets(content)
     suffix = path.rsplit(".", 1)[-1].lower()
     if suffix == "xlsx":
         from xlsxwriter.exceptions import FileCreateError
         try:
-            _save_xlsx(document, path)
+            _save_xlsx(sheets, path)
         except FileCreateError as error:
             # XlsxWriter 包装了文件写入异常，统一为与 CSV/HTML 相同的 IO 错误交给界面提示。
             raise OSError(str(error)) from error
         return
     if suffix == "csv":
-        content, encoding = to_csv(document), "utf-8-sig"
+        if len(sheets) > 1:
+            raise ValueError(f"CSV 只能保存一张表，这次有 {len(sheets)} 张；请导出为 xlsx 或网页")
+        content, encoding = to_csv(sheets[0][1]), "utf-8-sig"
     else:
+        body = to_html(sheets[0][1]) if len(sheets) == 1 else "".join(
+            f"<h2>{escape(name)}</h2>{to_html(document)}" for name, document in sheets)
         content = ('<!doctype html><html><head><meta charset="utf-8"><title>表格识别结果</title></head><body>'
-                   f"{to_html(document)}</body></html>")
+                   f"{body}</body></html>")
         encoding = "utf-8"
     with open(path, "w", encoding=encoding, newline="") as handle:
         handle.write(content)
 
 
-def _save_xlsx(document, path):
+def _save_xlsx(sheets, path):
     import xlsxwriter
-    grid = document.grid
     options = {"strings_to_formulas": False, "strings_to_urls": False, "strings_to_numbers": False}
     with xlsxwriter.Workbook(path, options) as workbook:
-        sheet = workbook.add_worksheet(SHEET_NAME)
         base = {"border": 1, "border_color": T.LIGHT["border"], "font_name": FONT_NAME, "font_size": 10,
                 "num_format": "@", "text_wrap": True, "valign": "vcenter"}
         normal = workbook.add_format(base)
         pending = workbook.add_format({**base, "bg_color": T.LIGHT["pending"]})
-        widths = _column_widths(document)
-        for column, width in enumerate(widths):
-            sheet.set_column(column, column, width)
-        for row, height in enumerate(_row_heights(document, widths)):
-            sheet.set_row(row, height)
-        for row, values in enumerate(document.cells):
-            for column, cell in enumerate(values):
-                if grid.is_covered(row, column):
-                    continue
-                style = pending if cell.status == PENDING else normal
-                merge = grid.merge_at(row, column)
-                if merge is not None:
-                    sheet.merge_range(merge.top, merge.left, merge.bottom - 1, merge.right - 1, cell.text, style)
-                else:
-                    sheet.write_string(row, column, cell.text, style)
-                if cell.status == PENDING:
-                    sheet.write_comment(row, column, f"GridStruct：{_confidence(cell)}，尚未人工确认",
-                                        {"author": "GridStruct", "visible": False})
+        for name, document in sheets:
+            _write_sheet(workbook.add_worksheet(name), document, normal, pending)
+
+
+def _write_sheet(sheet, document, normal, pending):
+    grid = document.grid
+    widths = _column_widths(document)
+    for column, width in enumerate(widths):
+        sheet.set_column(column, column, width)
+    for row, height in enumerate(_row_heights(document, widths)):
+        sheet.set_row(row, height)
+    for row, values in enumerate(document.cells):
+        for column, cell in enumerate(values):
+            if grid.is_covered(row, column):
+                continue
+            style = pending if cell.status == PENDING else normal
+            merge = grid.merge_at(row, column)
+            if merge is not None:
+                sheet.merge_range(merge.top, merge.left, merge.bottom - 1, merge.right - 1, cell.text, style)
+            else:
+                sheet.write_string(row, column, cell.text, style)
+            if cell.status == PENDING:
+                sheet.write_comment(row, column, f"GridStruct：{_confidence(cell)}，尚未人工确认",
+                                    {"author": "GridStruct", "visible": False})
 
 
 def _confidence(cell):
