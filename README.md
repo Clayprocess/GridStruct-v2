@@ -74,6 +74,8 @@ ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使
 
 发布走 GitHub Releases：先把 `settings/dialog.py` 的 `_VERSION` 改成新版本，并在 `docs/releases/v<版本>.md` 写好发布说明，一起合入 master。然后在 Actions 页手动运行 `release` 工作流，或推送同名标签（如 `git push origin v0.1.0`）。`.github/workflows/release.yml` 在 Windows runner 上执行上面的构建，把 `GridStruct-V2-v<版本>-portable.zip` 挂到 Release。标签与 `_VERSION` 不一致、或缺少发布说明时构建直接失败。
 
+发布构建从源码重新编译 PyInstaller 引导程序，并给两个 EXE 写入版本信息（公司、描述、版本号取 `_VERSION`）。原因是官方预编译引导程序被大量恶意软件复用，未签名、无版本信息的 PyInstaller EXE 容易被 Defender 机器学习误报（v0.2.0 曾被报 `Trojan:Win32/Bearfoos.A!ml`）。这只能降低误报概率；彻底解决靠代码签名。若新版本仍被报，到 [Microsoft 安全智能文件提交](https://www.microsoft.com/en-us/wdsi/filesubmission) 以“软件开发者”身份提交被报的 EXE，选“误报（Incorrect detection）”，填检测名，通常数日内更新定义。本地自己打包仍用官方引导程序，只供自测。
+
 ## 模块边界
 
 跨模块默认从各模块 `__init__.py` 导入公开接口；下表明确列出的公开子模块也可直接导入。
