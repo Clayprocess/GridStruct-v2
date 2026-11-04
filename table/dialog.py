@@ -364,11 +364,20 @@ class TableDialog(BaseDialog):
         state = self._states[index]
         if state.regions is not None:
             # 改框后的重新分析失败：撤掉还没结果的框，已有的表不受影响。
+            current = state.table
+            keep_view = _ready(current)
             state.tables = [table for table in state.tables if table.review is not None]
-            state.current = min(state.current, max(0, len(state.tables) - 1))
+            # 撤掉的占位可能排在当前表前面，按对象找回它的新位置。
+            state.current = next((number for number, table in enumerate(state.tables) if table is current), 0)
             state.regions = None
             if index == self._index and not self._regions_mode:
-                self._show_table()
+                if keep_view:
+                    # 用户可能正在当前表里改字：只更新标签，不重建界面销毁输入框。
+                    self._sync_tabs()
+                    self._set_enabled(True)
+                else:
+                    self._save_position()
+                    self._show_table()
                 self._status.setText(f"{self._page_prefix()}重新分析失败：{message}")
             return
         state.error = message

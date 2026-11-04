@@ -398,6 +398,26 @@ def check_reanalysis_races(app):
     dialog._commit_editor()
     assert dialog._review.document.rows[0][0] == "user change in progress", dialog._review.document.rows
     assert dialog._tabs.count() == 2 and dialog._tabs.tabText(1) == "表2"
+    # 新框重算失败：撤掉新框，旧表里正在输入的字同样保留。新框排在当前表前面时当前表不换。
+    dialog._tabs.setCurrentIndex(1)
+    dialog._regions_button.click()
+    dialog._canvas.regions.append(QRect(0, 50, 100, 40))
+    dialog._regions_button.click()
+    assert dialog._state.regions is not None and dialog._state.current == 2, dialog._state.current
+    table.setCurrentCell(0, 0)
+    table.editItem(table.currentItem())
+    app.processEvents()
+    editor = app.focusWidget()
+    assert isinstance(editor, QPlainTextEdit)
+    editor.setPlainText("typing while it fails")
+    with patch("table.dialog.show_message"):
+        dialog.show_error("结构模型出错")
+    app.processEvents()
+    assert app.focusWidget() is editor and editor.toPlainText() == "typing while it fails", "重算失败不得销毁输入框"
+    assert dialog._state.current == 1 and "重新分析失败" in dialog._status.text()
+    dialog._commit_editor()
+    assert dialog._review.document.rows[0][0] == "typing while it fails", dialog._review.document.rows
+    assert dialog._tabs.count() == 2
     dialog.close()
 
     pages = [ImagePage(image.copy(), label=f"第 {index + 1} 页") for index in range(3)]
