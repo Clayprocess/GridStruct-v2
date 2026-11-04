@@ -50,6 +50,10 @@ class GridCanvas(QWidget):
 
     # ---- 对外接口 ----
 
+    @property
+    def scale(self):
+        return self._scale
+
     def set_scale(self, scale):
         self._scale = min(MAX_SCALE, scale)
         self.setFixedSize(self.sizeHint())

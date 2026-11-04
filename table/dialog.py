@@ -2,18 +2,21 @@
 
 网格任何改动都立即按 OCR 文字框重新分格（不重新识别），人工改过或确认过的格子不会被覆盖。
 v1 分成“网格确认”和“结果校对”两个窗口，这里合成一个，改线和改字随时来回切换。
-识别文档（图片/PDF 多页）也用这个窗口：每页单独改网格，复制和导出时上下接成一张表。
+识别文档（图片/PDF 多页）也用这个窗口：每页自动框出有线表格，可在“框选表格”里调整、删除、补框；
+每张表单独改网格，导出时一张表一个工作表，跨页续表由用户勾“接上一页”接到上一页最后一张表后面。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QDateTime, QEvent, QMargins, QMimeData, QSignalBlocker, QStandardPaths, Qt, QTimer
+from PySide6.QtCore import (
+    QDateTime, QEvent, QMargins, QMimeData, QSignalBlocker, QStandardPaths, Qt, QTimer, Signal,
+)
 from PySide6.QtGui import QColor, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout,
-    QLabel, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSplitter, QStyledItemDelegate, QTableWidget,
-    QTableWidgetItem, QToolButton, QVBoxLayout,
+    QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSplitter, QStyledItemDelegate,
+    QTabBar, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 from styles import tokens as T
@@ -22,7 +25,9 @@ from . import export
 from .editor import ADD_HORIZONTAL, ADD_VERTICAL, DELETE, SELECT, GridCanvas
 from .grid import STRATEGY_LABELS
 from .model import CORRECTED, PENDING
-from .pages import ImagePage
+from .analysis import reading_order
+from .pages import FilePage, ImagePage
+from .regions import RegionCanvas, region_label
 from .review import TableReview
 
 TOOLS = (
@@ -37,35 +42,70 @@ STAGES = {
     "structure": "正在分析表格结构…",
 }
 EXPORT_FILTERS = "Excel 工作簿 (*.xlsx);;CSV (*.csv);;网页 (*.html)"
+MULTI_EXPORT_FILTERS = "Excel 工作簿 (*.xlsx);;网页 (*.html)"
+REGION_HINT = "拖动空白处画新框，拖框移动、拖边角改大小，Delete 删除选中的框；改完再点“框选表格”重新分析改过的框"
+
+
+def _key(rect):
+    return None if rect is None else (rect.x(), rect.y(), rect.width(), rect.height())
+
+
+@dataclass
+class _TableState:
+    """页里一张表的分析结果与校对进度。rect 为它在整页里的位置；review 为 None 表示还在分析。"""
+    rect: object = None
+    review: TableReview | None = None
+    suggestion: object = None
+    message: str = ""
+    scheme: int = 0
+    cell: tuple = ()
+    joined: bool = False  # 接上一页：导出时接在上一页最后一张表后面，同一个工作表
 
 
 @dataclass
 class _PageState:
-    """一页的分析结果与校对进度；翻页时画布重建，这些留着。"""
-    review: TableReview | None = None
-    suggestion: object = None
-    message: str = ""
+    """一页的分析结果；翻页时画布重建，这些留着。"""
+    tokens: tuple | None = None  # 整页文字框；改框后重新分析只跑结构，不重跑 OCR
+    tables: list = field(default_factory=list)
+    current: int = 0
     stage: str = STAGES["recognizing"]
     error: str = ""
     queued: bool = False
-    scheme: int = 0
-    cell: tuple = ()
-    crop: object = None  # 识别文档裁掉空白页边，翻页渲染后按它裁
+    regions: list | None = None  # 等着按新框重新分析的区域
+
+    @property
+    def table(self):
+        return self.tables[self.current] if self.tables else None
+
+    @property
+    def analyzed(self):
+        return self.tokens is not None
+
+
+def _ready(table):
+    return table is not None and table.review is not None
 
 
 class TableDialog(BaseDialog):
+    # 用户改了表格框，有页面要重新分析；后台服务空闲时取走（table/controller.py）。
+    analysisRequested = Signal()
+
     def __init__(self, source, parent=None):
         """source 为一张 QImage（截图/贴图），或识别文档的页面列表（table/pages.py）。"""
         super().__init__(parent)
         self.pages = [ImagePage(source)] if isinstance(source, QImage) else list(source)
         self._states = [_PageState() for _page in self.pages]
         self._index = 0
+        # 识别文档的工作表按“第N页-表M”命名；截图、贴图只有一张图，按“表M”。
+        self._document = any(isinstance(page, FilePage) for page in self.pages)
+        self._regions_mode = False
         self.setWindowTitle("表格识别 · 本地" if len(self.pages) == 1 else "识别文档 · 本地")
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.resize(1180, 700 if len(self.pages) == 1 else 760)
         self._mode = QApplication.instance().property("theme_mode") or "light"
         self._canvas = None
         self._syncing = False
+        self._syncing_tabs = False
         self._fit = True
 
         layout = QVBoxLayout(self)
@@ -87,10 +127,17 @@ class TableDialog(BaseDialog):
         self._table.itemChanged.connect(self._item_changed)
         self._table.currentCellChanged.connect(self._table_cell_changed)
 
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(T.SPACE_1)
+        right_layout.addLayout(self._build_table_bar())
+        right_layout.addWidget(self._table, 1)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
         splitter.addWidget(self._area)
-        splitter.addWidget(self._table)
+        splitter.addWidget(right)
         splitter.setSizes([640, 520])
         layout.addWidget(splitter, 1)
         layout.addLayout(self._build_footer())
@@ -103,6 +150,7 @@ class TableDialog(BaseDialog):
         for tool, _label, _icon, key in TOOLS:
             QShortcut(QKeySequence(key), self._area, lambda value=tool: self._tool_buttons[value].click(),
                       context=Qt.WidgetWithChildrenShortcut)
+        QShortcut(QKeySequence("R"), self._area, self._regions_button.click, context=Qt.WidgetWithChildrenShortcut)
         if len(self.pages) > 1:
             QShortcut(QKeySequence("Ctrl+PgUp"), self, lambda: self.show_page(self._index - 1))
             QShortcut(QKeySequence("Ctrl+PgDown"), self, lambda: self.show_page(self._index + 1))
@@ -113,8 +161,13 @@ class TableDialog(BaseDialog):
         return self._states[self._index]
 
     @property
+    def _current(self):
+        return self._state.table
+
+    @property
     def _review(self):
-        return self._state.review
+        table = self._current
+        return None if table is None or self._regions_mode else table.review
 
     # ---- 构造 ----
 
@@ -143,11 +196,29 @@ class TableDialog(BaseDialog):
         if len(self.pages) > 1:
             self._previous_page = self._tool_button("上一页 (Ctrl+PgUp)", "chevron-left", lambda: self.show_page(self._index - 1))
             self._next_page = self._tool_button("下一页 (Ctrl+PgDown)", "chevron-right", lambda: self.show_page(self._index + 1))
-            self._page_label = QLabel()
-            self._page_label.setAlignment(Qt.AlignCenter)
-            self._page_label.setMinimumWidth(56)
-            for widget in (self._previous_page, self._page_label, self._next_page, self._separator()):
+            # 输入页码回车跳转；几十页的扫描件不用一页页翻。
+            self._page_input = QLineEdit()
+            self._page_input.setObjectName("TablePageInput")
+            self._page_input.setAlignment(Qt.AlignCenter)
+            self._page_input.setFixedWidth(44)
+            self._page_input.setToolTip("输入页码后回车跳转")
+            self._page_input.setAccessibleName("页码")
+            self._page_input.returnPressed.connect(self._jump_to_page)
+            self._page_total = QLabel(f"/ {len(self.pages)}")
+            for widget in (self._previous_page, self._page_input, self._page_total, self._next_page):
                 row.addWidget(widget)
+            row.addWidget(self._separator())
+        self._regions_button = QToolButton()
+        self._regions_button.setText("框选表格")
+        self._regions_button.setIcon(tinted_icon("square-dashed", T.THEMES[self._mode]["foreground"]))
+        self._regions_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._regions_button.setToolTip("在原图上调整、删除或补画表格框；框外的文字不进表格 (R)")
+        self._regions_button.setAutoRaise(True)
+        self._regions_button.setCheckable(True)
+        self._regions_button.setProperty("class", "ghost")
+        self._regions_button.toggled.connect(self._toggle_regions)
+        row.addWidget(self._regions_button)
+        row.addWidget(self._separator())
         self._tools = QButtonGroup(self)
         self._tool_buttons = {}
         for tool, label, icon_name, key in TOOLS:
@@ -168,11 +239,6 @@ class TableDialog(BaseDialog):
         row.addWidget(self._undo_button)
         row.addWidget(self._redo_button)
         row.addStretch()
-        if len(self.pages) > 1:
-            self._remove_headers = QCheckBox("去除重复表头")
-            self._remove_headers.setToolTip("仅影响复制和导出：后续页首行与首个已完成页首行相同时去除；无表头数据请勿勾选")
-            row.addWidget(self._remove_headers)
-            row.addWidget(self._separator())
         row.addWidget(QLabel("网格方案"))
         self._schemes = QComboBox()
         self._schemes.setMinimumWidth(140)
@@ -181,6 +247,25 @@ class TableDialog(BaseDialog):
         row.addWidget(self._schemes)
         row.addWidget(self._separator())
         row.addWidget(topmost_button(self, "window/table_topmost"))
+        return row
+
+    def _build_table_bar(self):
+        """一张图里各张表的切换；多页文档另有“接上一页”。"""
+        row = QHBoxLayout()
+        row.setSpacing(T.SPACE_2)
+        self._tabs = QTabBar()
+        self._tabs.setObjectName("TableTabs")
+        self._tabs.setDrawBase(False)
+        self._tabs.setExpanding(False)
+        self._tabs.currentChanged.connect(self._select_table)
+        row.addWidget(self._tabs)
+        row.addStretch()
+        self._join = QCheckBox("接上一页")
+        self._join.setToolTip("跨页的续表：接在上一页最后一张表后面，导出到同一个工作表；"
+                              "与那张表首行相同的重复表头自动去掉")
+        self._join.toggled.connect(self._join_toggled)
+        self._join.setVisible(len(self.pages) > 1)
+        row.addWidget(self._join)
         return row
 
     def _build_footer(self):
@@ -230,29 +315,73 @@ class TableDialog(BaseDialog):
     def set_stage(self, stage, page=None):
         state = self._states[self._index if page is None else page]
         state.stage = STAGES[stage]
-        if state is self._state and state.review is None:
+        if state is self._state and not _ready(self._current) and not self._regions_mode:
             self._status.setText(self._page_prefix() + state.stage)
 
-    def apply_analysis(self, tokens, suggestion, note, rect=None, page=None):
-        state = self._states[self._index if page is None else page]
-        state.crop = rect
-        state.suggestion = suggestion
-        state.review = TableReview(tokens, suggestion.selected.grid)
-        state.message = suggestion.message if tokens else "未检测到文字，可手动划线后直接导出空表"
-        if note and suggestion.selected.strategy != "structure":
-            state.message += f"（结构模型：{note}）"
-        pending = state.review.pending_cells()
-        state.cell = pending[0] if pending else (0, 0)
-        if state is self._state:
-            if rect is not None:
-                self._build_canvas()
-            self._activate()
+    def page_request(self, index):
+        """后台分析这一页要用的 (已有文字框, 框选区域)；首次分析两者都是 None。"""
+        state = self._states[index]
+        return state.tokens, state.regions
+
+    def apply_analysis(self, tokens, tables, page=None):
+        """tables 为 analysis.TableResult 序列：首次分析是自动框出的全部表，改框后是改过的那几张。"""
+        index = self._index if page is None else page
+        state = self._states[index]
+        results = [self._table_state(result, bool(tokens)) for result in tables]
+        # 改框后只重算了几张表：用户可能正在没动过的表里改字，不能重建界面把输入框销毁。
+        keep_view = state.regions is not None and _ready(state.table)
+        if state.regions is None:
+            state.tables = results
+            state.current = 0
+        else:
+            # 只重算了改过的框，按顺序填回占位，没改的表连同改字一起保留。
+            filled = iter(results)
+            state.tables = [next(filled, table) if table.review is None else table for table in state.tables]
+            state.regions = None
+        state.tokens = tokens
+        if index == self._index and not self._regions_mode:
+            if keep_view:
+                self._sync_tabs()
+            else:
+                self._save_position()
+                self._show_table()
         self._update_progress()
 
+    @staticmethod
+    def _table_state(result, has_text):
+        suggestion = result.suggestion
+        message = suggestion.message if has_text else "未检测到文字，可手动划线后直接导出空表"
+        if result.tokens == () and has_text:
+            message = "框里没有识别到文字，可手动划线后直接导出空表"
+        if result.note and suggestion.selected.strategy != "structure":
+            message += f"（结构模型：{result.note}）"
+        review = TableReview(result.tokens, suggestion.selected.grid)
+        pending = review.pending_cells()
+        return _TableState(result.rect, review, suggestion, message, cell=pending[0] if pending else (0, 0))
+
     def show_error(self, message, page=None):
-        state = self._states[self._index if page is None else page]
+        index = self._index if page is None else page
+        state = self._states[index]
+        if state.regions is not None:
+            # 改框后的重新分析失败：撤掉还没结果的框，已有的表不受影响。
+            current = state.table
+            keep_view = _ready(current)
+            state.tables = [table for table in state.tables if table.review is not None]
+            # 撤掉的占位可能排在当前表前面，按对象找回它的新位置。
+            state.current = next((number for number, table in enumerate(state.tables) if table is current), 0)
+            state.regions = None
+            if index == self._index and not self._regions_mode:
+                if keep_view:
+                    # 用户可能正在当前表里改字：只更新标签，不重建界面销毁输入框。
+                    self._sync_tabs()
+                    self._set_enabled(True)
+                else:
+                    self._save_position()
+                    self._show_table()
+                self._status.setText(f"{self._page_prefix()}重新分析失败：{message}")
+            return
         state.error = message
-        if state is self._state:
+        if index == self._index:
             self._status.setText(f"{self._page_prefix()}识别失败：{message}")
         self._update_progress()
         if len(self.pages) == 1:
@@ -270,32 +399,108 @@ class TableDialog(BaseDialog):
         for widget in (*self._tool_buttons.values(), self._schemes, self._table):
             widget.setEnabled(enabled)
         # 多页时已出结果的页就能先复制、导出，不等其余页。
-        ready = any(state.review is not None for state in self._states)
-        self._export.setEnabled(ready)
-        self._copy_button.setEnabled(ready)
-        self._canvas.setEnabled(enabled)
+        ready = any(_ready(table) for state in self._states for table in state.tables)
+        self._export.setEnabled(ready and not self._regions_mode)
+        self._copy_button.setEnabled(enabled)
+        self._canvas.setEnabled(enabled or self._regions_mode)
+        state = self._state
+        self._regions_button.setEnabled(state.analyzed and state.regions is None)
+        # 框选时切表会重建画布、丢掉没应用的框，先锁住。
+        self._tabs.setEnabled(not self._regions_mode)
+        current = self._current
+        # 只有本页第一张表能接上一页：它上面紧挨着的就是上一页最后一张表。
+        with QSignalBlocker(self._join):
+            self._join.setChecked(current is not None and current.joined)
+        self._join.setEnabled(enabled and self._index > 0 and state.current == 0)
+        self._sync_join_label()
         self._refresh_actions()
 
-    # ---- 翻页 ----
+    def _can_join(self, page):
+        """第 page 页的第一张表能否接上一页：紧挨着的上一页已分析完、最后一张表可用。
+
+        上一页识别失败、框全删了或末表还在重算时不能接，免得跨过它接到更早的表上。
+        """
+        if page == 0:
+            return False
+        previous = self._states[page - 1]
+        return previous.analyzed and previous.regions is None and _ready(previous.tables[-1] if previous.tables else None)
+
+    def _sync_join_label(self):
+        current = self._current
+        blocked = current is not None and current.joined and self._state.current == 0 and not self._can_join(self._index)
+        self._join.setText("接上一页（上一页暂无可接的表，单独导出）" if blocked else "接上一页")
+
+    # ---- 翻页与切换表格 ----
 
     def _page_prefix(self):
-        return f"{self.pages[self._index].label} · " if len(self.pages) > 1 else ""
+        if len(self.pages) == 1 and len(self._state.tables) < 2:
+            return ""
+        prefix = self.pages[self._index].label if len(self.pages) > 1 else ""
+        if len(self._state.tables) > 1:
+            prefix += ("·" if prefix else "") + region_label(self._state.current)
+        return f"{prefix} · "
+
+    def _jump_to_page(self):
+        text = self._page_input.text().strip()
+        total = len(self.pages)
+        self._page_input.setText(str(self._index + 1))
+        if not text.isdigit():
+            self._status.setText(f"页码无效：请输入 1–{total} 之间的数字")
+            return
+        number = int(text)
+        if not 1 <= number <= total:
+            self._status.setText(f"没有第 {number} 页：共 {total} 页")
+            return
+        self.show_page(number - 1)
+        self._canvas.setFocus()
 
     def show_page(self, index):
         if not 0 <= index < len(self.pages) or (self._canvas is not None and index == self._index):
             return
-        if self._canvas is not None and self._review is not None:
-            self._commit_editor()
-            self._state.cell = (self._table.currentRow(), self._table.currentColumn())
+        if self._regions_mode:
+            self._regions_button.setChecked(False)
+        self._save_position()
         self._index = index
-        state = self._state
-        self._build_canvas()
         if len(self.pages) > 1:
-            self._page_label.setText(f"{index + 1} / {len(self.pages)}")
-            self._page_label.setToolTip(self.pages[index].label)
+            self._page_input.setText(str(index + 1))
+            self._page_input.setToolTip(f"{self.pages[index].label}；输入页码后回车跳转")
             self._previous_page.setEnabled(index > 0)
             self._next_page.setEnabled(index < len(self.pages) - 1)
-        if state.review is not None:
+        self._show_table()
+
+    def _save_position(self):
+        if self._canvas is not None and self._review is not None:
+            self._commit_editor()
+            self._current.cell = (self._table.currentRow(), self._table.currentColumn())
+
+    def _select_table(self, index):
+        if self._syncing_tabs or index < 0 or index == self._state.current:
+            return
+        self._save_position()
+        self._state.current = index
+        self._show_table()
+
+    def _sync_tabs(self):
+        """只改标签文字，表数没变时不增删标签，不打断正在输入的单元格。"""
+        state = self._state
+        self._syncing_tabs = True
+        while self._tabs.count() > len(state.tables):
+            self._tabs.removeTab(self._tabs.count() - 1)
+        while self._tabs.count() < len(state.tables):
+            self._tabs.addTab("")
+        for index, table in enumerate(state.tables):
+            self._tabs.setTabText(index, region_label(index) + ("" if table.review is not None else " …"))
+            self._tabs.setTabToolTip(index, "接在上一页最后一张表后面" if table.joined and index == 0 else "")
+        self._tabs.setCurrentIndex(state.current)
+        self._syncing_tabs = False
+        self._tabs.setVisible(len(state.tables) > 1)
+
+    def _show_table(self):
+        """按当前页、当前表重建画布和右侧表格。"""
+        state = self._state
+        self._sync_tabs()
+        self._build_canvas()
+        if _ready(self._current):
             self._activate()
             return
         self._schemes.clear()
@@ -304,7 +509,13 @@ class TableDialog(BaseDialog):
             self._table.setRowCount(0)
             self._table.setColumnCount(0)
         self._set_enabled(False)
-        self._status.setText(self._page_prefix() + (f"识别失败：{state.error}" if state.error else state.stage))
+        if state.error:
+            status = f"识别失败：{state.error}"
+        elif state.analyzed and not state.tables:
+            status = "本页没有框选表格；点“框选表格”在原图上画框"
+        else:
+            status = state.stage
+        self._status.setText(self._page_prefix() + status)
 
     def _build_canvas(self):
         state = self._state
@@ -314,45 +525,95 @@ class TableDialog(BaseDialog):
             state.error = state.error or str(exc)
             image = QImage(64, 64, QImage.Format_RGB32)
             image.fill(QColor(T.THEMES[self._mode]["background"]))
-        if state.crop is not None:
-            image = image.copy(state.crop)
-        tool = self._canvas.tool if self._canvas is not None else SELECT
-        self._canvas = GridCanvas(image)
-        self._canvas.set_tool(tool)
-        self._canvas.gridChanged.connect(self._grid_changed)
-        self._canvas.selectionChanged.connect(self._refresh_actions)
-        self._canvas.cellSelected.connect(self._select_in_table)
-        # setWidget 会销毁上一页的画布。
-        self._area.setWidget(self._canvas)
+        if self._regions_mode:
+            canvas = RegionCanvas(image, [table.rect for table in state.tables if table.rect is not None])
+        else:
+            current = self._current
+            if current is not None and current.rect is not None:
+                image = image.copy(current.rect)
+            canvas = GridCanvas(image)
+            canvas.set_tool(self._canvas.tool if isinstance(self._canvas, GridCanvas) else SELECT)
+            canvas.gridChanged.connect(self._grid_changed)
+            canvas.selectionChanged.connect(self._refresh_actions)
+            canvas.cellSelected.connect(self._select_in_table)
+        self._canvas = canvas
+        # setWidget 会销毁上一张画布。
+        self._area.setWidget(canvas)
         self._fit = True
         QTimer.singleShot(0, self._fit_canvas)
 
     def _activate(self):
-        state = self._state
+        table = self._current
         self._schemes.clear()
-        for candidate in (state.suggestion.selected, *state.suggestion.alternatives):
+        for candidate in (table.suggestion.selected, *table.suggestion.alternatives):
             self._schemes.addItem(STRATEGY_LABELS[candidate.strategy], candidate.grid)
-        if state.suggestion.selected.strategy != "manual":
+        if table.suggestion.selected.strategy != "manual":
             # 新画布的初始网格就是整张图一个格子，即“手动划线”的起点。
             self._schemes.addItem(STRATEGY_LABELS["manual"], self._canvas.grid)
-        self._schemes.setCurrentIndex(state.scheme)
+        self._schemes.setCurrentIndex(table.scheme)
         self._set_enabled(True)
-        self._canvas.set_grid(state.review.document.grid)
+        self._canvas.set_grid(table.review.document.grid)
         self._refresh()
-        row, column = state.cell
-        grid = state.review.document.grid
+        row, column = table.cell
+        grid = table.review.document.grid
         if row < 0 or row >= grid.row_count or column >= grid.column_count:
             row = column = 0
         self._focus_cell(row, column)
 
     def _update_progress(self):
-        if len(self.pages) == 1:
+        if len(self.pages) > 1:
+            finished = sum(state.analyzed or bool(state.error) for state in self._states)
+            self._progress.setValue(finished)
+            self._progress.setToolTip(f"已分析 {finished} / {len(self.pages)} 页")
+            self._progress.setVisible(finished < len(self.pages))
+        if not self._regions_mode:
+            self._set_enabled(self._review is not None)
+
+    # ---- 框选表格 ----
+
+    def _toggle_regions(self, checked):
+        if checked:
+            self._save_position()
+            self._regions_mode = True
+            self._build_canvas()
+            self._canvas.regionsChanged.connect(self._regions_edited)
+            self._canvas.setFocus()
+            self._set_enabled(False)
+            self._status.setText(self._page_prefix() + REGION_HINT)
             return
-        finished = sum(state.review is not None or bool(state.error) for state in self._states)
-        self._progress.setValue(finished)
-        self._progress.setToolTip(f"已分析 {finished} / {len(self.pages)} 页")
-        self._progress.setVisible(finished < len(self.pages))
-        self._set_enabled(self._review is not None)
+        regions = self._canvas.regions
+        self._regions_mode = False
+        self._apply_regions(regions)
+
+    def _regions_edited(self):
+        self._status.setText(f"{self._page_prefix()}已框 {len(self._canvas.regions)} 张表 · {REGION_HINT}")
+
+    def _apply_regions(self, regions):
+        """没动过的框保留表格和改字；新框、改过的框重新分析结构（不重跑 OCR）。"""
+        state = self._state
+        current = state.table
+        kept = {_key(table.rect): table for table in state.tables}
+        tables, pending = [], []
+        for rect in reading_order(regions):
+            table = kept.pop(_key(rect), None)
+            if table is None:
+                table = _TableState(rect)
+                pending.append(rect)
+            tables.append(table)
+        state.tables = tables
+        state.current = next((index for index, table in enumerate(tables) if table is current), 0)
+        if pending:
+            state.regions = pending
+            state.queued = False
+            state.stage = STAGES["structure"]
+            self.analysisRequested.emit()
+        self._show_table()
+
+    def _join_toggled(self, checked):
+        if self._current is not None:
+            self._current.joined = checked
+            self._sync_tabs()
+            self._sync_join_label()
 
     # ---- 状态同步 ----
 
@@ -395,7 +656,7 @@ class TableDialog(BaseDialog):
                 table.setColumnWidth(column, max(64, min(240, table.columnWidth(column) + T.SPACE_3)))
         table.resizeRowsToContents()
         self._syncing = False
-        self._status.setText(f"{self._page_prefix()}{self._state.message} · {grid.row_count} 行 × {grid.column_count} 列"
+        self._status.setText(f"{self._page_prefix()}{self._current.message} · {grid.row_count} 行 × {grid.column_count} 列"
                              + (f" · {len(grid.merges)} 处合并" if grid.merges else ""))
         self._refresh_actions()
 
@@ -420,7 +681,7 @@ class TableDialog(BaseDialog):
         self._refresh()
 
     def _table_cell_changed(self, row, column, _previous_row, _previous_column):
-        if not self._syncing and row >= 0:
+        if not self._syncing and row >= 0 and self._review is not None:
             self._canvas.select_cell(row, column)
             self._reveal(row, column)
             self._refresh_actions()
@@ -433,14 +694,14 @@ class TableDialog(BaseDialog):
 
     def _reveal(self, row, column):
         rect = self._review.document.grid.cell_rect(row, column)
-        scale = self._canvas.width() / self._canvas.grid.vertical_lines[-1]
+        scale = self._canvas.scale
         self._area.ensureVisible(round(rect.center_x * scale), round(rect.center_y * scale),
                                  round(rect.width * scale / 2) + 20, round(rect.height * scale / 2) + 20)
 
     # ---- 操作 ----
 
     def _scheme_chosen(self, index):
-        self._state.scheme = index
+        self._current.scheme = index
         self._canvas.set_grid(self._schemes.itemData(index))
         self._review.set_grid(self._canvas.grid)
         self._refresh()
@@ -491,55 +752,98 @@ class TableDialog(BaseDialog):
             else:
                 self._table.setFocus()
 
-    def _output(self):
-        """多页时把已分析的页上下接成一张表；还没出结果的页不等。"""
-        documents = [state.review.document for state in self._states if state.review is not None]
-        return documents[0] if len(self.pages) == 1 else export.stack(documents, self._remove_headers.isChecked())
+    def _sheets(self):
+        """已分析的表按页序排成工作表：[(名称, 文档, [(页, 表), ...])]。还没出结果的表不等。
 
-    def _pending_note(self):
+        勾了“接上一页”的表接在上一个工作表末尾，与它首行相同的重复表头去掉。
+        """
+        groups = []
+        for page, state in enumerate(self._states):
+            for index, table in enumerate(state.tables):
+                if table.review is None:
+                    continue
+                if table.joined and index == 0 and self._can_join(page):
+                    # 上一页末表一定在最后一组末尾：页按顺序排，且它本身可用。
+                    groups[-1][2].append((page, index))
+                    continue
+                if self._document:
+                    name = f"第{page + 1}页-{region_label(index)}"
+                else:
+                    name = region_label(index) if len(state.tables) > 1 else export.SHEET_NAME
+                groups.append((name, None, [(page, index)]))
+        sheets = []
+        for name, _document, members in groups:
+            documents = [self._states[page].tables[index].review.document for page, index in members]
+            document = documents[0] if len(documents) == 1 else export.stack(documents, True)
+            sheets.append((name, document, members))
+        return sheets
+
+    def _pending_note(self, sheets, whole=True):
         # 不拦输出：xlsx 会标黄加批注，复制和其他格式只在提示里带上剩余数量。
-        count = sum(state.review.document.pending_count for state in self._states if state.review is not None)
+        count = sum(document.pending_count for _name, document, _members in sheets)
         note = f"；还有 {count} 处待复核" if count else ""
-        waiting = sum(state.review is None and not state.error for state in self._states)
+        if not whole:
+            return note
+        waiting = sum(not state.analyzed and not state.error for state in self._states)
+        waiting_tables = sum(table.review is None for state in self._states for table in state.tables)
         failed = sum(bool(state.error) for state in self._states)
         if waiting:
             note += f"；{waiting} 页还在分析，未包含"
+        if waiting_tables:
+            note += f"；{waiting_tables} 张表还在分析，未包含"
         if failed:
             note += f"；{failed} 页识别失败，未包含"
+        unjoined = [page + 1 for page, state in enumerate(self._states)
+                    if state.tables and state.tables[0].joined and not self._can_join(page)]
+        if unjoined:
+            note += f"；第 {'、'.join(map(str, unjoined))} 页勾了接上一页但上一页没有可接的表，已单独导出"
         return note
 
     def _copy(self):
-        if not any(state.review is not None for state in self._states):
+        """复制当前这张表；跨页接起来的续表一起复制。"""
+        if self._review is None:
             return
         self._commit_editor()
-        document = self._output()
+        sheets = self._sheets()
+        position = (self._index, self._state.current)
+        sheet = next(sheet for sheet in sheets if position in sheet[2])
+        name, document, members = sheet
         data = QMimeData()
         data.setText(export.to_tsv(document))
         data.setHtml(export.to_html(document))
         QApplication.clipboard().setMimeData(data)
-        show_toast("已复制表格，可直接粘贴到 Excel / WPS" + self._pending_note())
+        what = f"「{name}」" if len(sheets) > 1 or len(members) > 1 else "表格"
+        show_toast(f"已复制{what}，可直接粘贴到 Excel / WPS" + self._pending_note([sheet], whole=False))
 
     def _export_file(self):
-        if not any(state.review is not None for state in self._states):
-            return
         self._commit_editor()
+        sheets = self._sheets()
+        if not sheets:
+            return
         from settings import get_settings
         settings = get_settings()
         directory = settings.value("table/export_dir", "") or QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
-        name = f"表格_{QDateTime.currentDateTime().toString('yyyy-MM-dd_HH-mm-ss')}.xlsx"
-        path, chosen = QFileDialog.getSaveFileName(self, "导出表格", str(Path(directory) / name), EXPORT_FILTERS)
+        filename = f"表格_{QDateTime.currentDateTime().toString('yyyy-MM-dd_HH-mm-ss')}.xlsx"
+        # 多张表时不给 CSV：一个 CSV 只装得下一张表。
+        filters = EXPORT_FILTERS if len(sheets) == 1 else MULTI_EXPORT_FILTERS
+        path, chosen = QFileDialog.getSaveFileName(self, "导出表格", str(Path(directory) / filename), filters)
         if not path:
             return
         if not Path(path).suffix:
             path += "." + chosen.split("*.")[1].rstrip(")")
         try:
-            export.save(self._output(), path)
+            export.save([(name, document) for name, document, _members in sheets], path)
+        except ValueError as exc:
+            show_message(self, "导出失败", str(exc))
+            return
         except OSError as exc:
             show_message(self, "导出失败", f"无法写入文件：{path}\n{exc}")
             return
         settings.setValue("table/export_dir", str(Path(path).parent))
+        count = f" {len(sheets)} 张表" if len(sheets) > 1 else ""
         # 同截图保存：不动剪贴板，提示里可点复制路径。
-        show_toast("已导出" + self._pending_note(), ("复制路径", lambda: QApplication.clipboard().setText(path)))
+        show_toast(f"已导出{count}" + self._pending_note(sheets),
+                   ("复制路径", lambda: QApplication.clipboard().setText(path)))
 
     # ---- 缩放 ----
 
@@ -548,7 +852,7 @@ class TableDialog(BaseDialog):
         if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
             factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
             self._fit = False
-            self._canvas.set_scale(self._canvas.width() / self._canvas.grid.vertical_lines[-1] * factor)
+            self._canvas.set_scale(self._canvas.scale * factor)
             return True
         if event.type() == QEvent.Resize and self._fit:
             QTimer.singleShot(0, self._fit_canvas)
