@@ -13,7 +13,6 @@ _MODEL_DIR = os.path.abspath(_MODEL_DIR)
 _MODELS = {
     "det": "PP-OCRv6_det_small.onnx",
     "rec": "PP-OCRv6_rec_small.onnx",
-    "cls": "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
 }
 
 
@@ -39,6 +38,9 @@ class OCREngine:
             if not os.path.isfile(p):
                 raise FileNotFoundError(f"缺少本地 OCR 模型：{p}")
             params[f"{k.title()}.model_path"] = p
+        # 不跑方向分类：屏幕截图和扫描件里的文字行都是正的，分类器却常把整行长英文判成倒置，
+        # 转 180° 后识别出“¿sd e s”这类乱码（实测）；关掉后同一张图逐行正确，表格样张也多认出两格。
+        params["Global.use_cls"] = False
         self._engine = RapidOCR(params=params)
 
     def recognize(self, pixmap: QPixmap) -> list[OCRResult]:

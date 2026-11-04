@@ -17,8 +17,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS = ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx", "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
-          "slanet-plus.onnx")
+MODELS = ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx", "slanet-plus.onnx")
 
 
 def check_requirements():
