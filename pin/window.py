@@ -326,7 +326,7 @@ class _PinBase(QWidget):
                 menu.addAction(_fg_icon("scan-text"), "复核识别结果" if self._document is not None else "文本识别",
                                self._recognize)
             if self._document is not None:
-                menu.addAction("重新识别（替换校正结果）", self._rerun_ocr)
+                menu.addAction("重新识别（替换已改的文字）", self._rerun_ocr)
             menu.addAction(_fg_icon("table"), "表格识别", self._recognize_table)
         menu.addAction(_fg_icon("save"), "保存为文件", self._save)
         menu.addSeparator()
@@ -521,7 +521,7 @@ class PinWindow(_PinBase):
         open_table(self._base, document.results if document is not None and document.matches(self._base) else None)
 
     def _rerun_ocr(self):
-        dialog = _ConfirmDialog("重新识别", "重新识别将替换已有校正结果和导出草稿，确认继续？", self)
+        dialog = _ConfirmDialog("重新识别", "重新识别将丢弃已改的文字和全文编辑，确认继续？", self)
         accepted = dialog.exec()
         dialog.deleteLater()
         if not accepted:

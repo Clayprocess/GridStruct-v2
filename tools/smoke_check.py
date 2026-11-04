@@ -86,9 +86,11 @@ def offline_models():
     try:
         with patch("requests.sessions.Session.request", side_effect=AssertionError("OCR attempted network download")):
             engine._ensure()
-            for key in ("Det", "Cls", "Rec"):
+            for key in ("Det", "Rec"):
                 path = engine._engine.cfg[key].model_path
                 assert path and Path(path).is_file(), f"{key}: repository model not configured"
+            # 方向分类会把长英文行转 180° 识别成乱码，不加载。
+            assert not engine._engine.use_cls
     finally:
         engine._engine = previous
 

@@ -619,6 +619,26 @@ QScrollArea#TableCanvasArea, QGraphicsView#OCRPreview {{
 QScrollArea#TableCanvasArea > QWidget#qt_scrollarea_viewport {{
     background-color: {t['muted']};
 }}
+/* 预览右下角的缩放条（ui/zoom.py），浮在原图上 */
+QFrame#ZoomBar {{
+    background-color: {t['popover']};
+    border: 1px solid {t['border']};
+    border-radius: {r}px;
+}}
+QFrame#ZoomBar QToolButton {{
+    padding: 4px;
+}}
+QFrame#ZoomBar QToolButton:checked {{
+    background-color: {t['secondary']};
+    border: none;
+    padding: 4px;
+}}
+QToolButton#ZoomLevel {{
+    color: {t['muted_foreground']};
+    font-size: {T.FONT_SM}px;
+    min-width: 36px;
+    padding: 4px 2px;
+}}
 QTableWidget {{
     background-color: {t['card']};
     alternate-background-color: {t['card']};

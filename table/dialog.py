@@ -9,9 +9,7 @@ v1 分成“网格确认”和“结果校对”两个窗口，这里合成一�
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import (
-    QDateTime, QEvent, QMargins, QMimeData, QSignalBlocker, QStandardPaths, Qt, QTimer, Signal,
-)
+from PySide6.QtCore import QDateTime, QMimeData, QPointF, QSignalBlocker, QStandardPaths, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout,
@@ -20,7 +18,9 @@ from PySide6.QtWidgets import (
 )
 
 from styles import tokens as T
-from ui import BaseDialog, MultilineDelegate, show_message, show_toast, tinted_icon, topmost_button
+from ui import (
+    BaseDialog, MultilineDelegate, PreviewZoom, show_message, show_toast, standard_window, tinted_icon, topmost_button,
+)
 from . import export
 from .editor import ADD_HORIZONTAL, ADD_VERTICAL, DELETE, SELECT, GridCanvas
 from .grid import STRATEGY_LABELS
@@ -100,13 +100,13 @@ class TableDialog(BaseDialog):
         self._document = any(isinstance(page, FilePage) for page in self.pages)
         self._regions_mode = False
         self.setWindowTitle("表格识别 · 本地" if len(self.pages) == 1 else "识别文档 · 本地")
+        standard_window(self)
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.resize(1180, 700 if len(self.pages) == 1 else 760)
         self._mode = QApplication.instance().property("theme_mode") or "light"
         self._canvas = None
         self._syncing = False
         self._syncing_tabs = False
-        self._fit = True
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(T.SPACE_3, T.SPACE_3, T.SPACE_3, T.SPACE_3)
@@ -116,7 +116,7 @@ class TableDialog(BaseDialog):
         self._area = QScrollArea()
         self._area.setObjectName("TableCanvasArea")
         self._area.setAlignment(Qt.AlignCenter)
-        self._area.viewport().installEventFilter(self)
+        self._zoom = PreviewZoom(self._area, self, self)
 
         self._table = QTableWidget()
         self._table.setItemDelegate(MultilineDelegate(self._table))
@@ -528,19 +528,31 @@ class TableDialog(BaseDialog):
         if self._regions_mode:
             canvas = RegionCanvas(image, [table.rect for table in state.tables if table.rect is not None])
         else:
+            # 始终显示整页（实测决定）：缩放后可以自由看表格以外的内容，当前表以外压暗。
             current = self._current
-            if current is not None and current.rect is not None:
-                image = image.copy(current.rect)
-            canvas = GridCanvas(image)
+            canvas = GridCanvas(image, current.rect if current is not None else None)
             canvas.set_tool(self._canvas.tool if isinstance(self._canvas, GridCanvas) else SELECT)
             canvas.gridChanged.connect(self._grid_changed)
             canvas.selectionChanged.connect(self._refresh_actions)
             canvas.cellSelected.connect(self._select_in_table)
+        scale = self._canvas.scale if self._canvas is not None else None
+        bars = self._area.horizontalScrollBar(), self._area.verticalScrollBar()
+        position = [bar.value() for bar in bars]
         self._canvas = canvas
         # setWidget 会销毁上一张画布。
         self._area.setWidget(canvas)
-        self._fit = True
-        QTimer.singleShot(0, self._fit_canvas)
+        self._zoom.watch(canvas)
+        if scale is None or self._zoom.fitted:
+            self._zoom.fit()
+            return
+        # 手动缩放过：换表、翻页、进出框选都保持比例和位置，只把当前表挪进视野。
+        canvas.set_scale(scale)
+        for bar, value in zip(bars, position):
+            bar.setValue(value)
+        if isinstance(canvas, GridCanvas):
+            bounds = canvas.bounds
+            self._area.ensureVisible(round(bounds.center().x() * scale), round(bounds.center().y() * scale),
+                                     round(bounds.width() * scale / 2), round(bounds.height() * scale / 2))
 
     def _activate(self):
         table = self._current
@@ -695,7 +707,8 @@ class TableDialog(BaseDialog):
     def _reveal(self, row, column):
         rect = self._review.document.grid.cell_rect(row, column)
         scale = self._canvas.scale
-        self._area.ensureVisible(round(rect.center_x * scale), round(rect.center_y * scale),
+        origin = self._canvas.bounds.topLeft()
+        self._area.ensureVisible(round((origin.x() + rect.center_x) * scale), round((origin.y() + rect.center_y) * scale),
                                  round(rect.width * scale / 2) + 20, round(rect.height * scale / 2) + 20)
 
     # ---- 操作 ----
@@ -845,23 +858,25 @@ class TableDialog(BaseDialog):
         show_toast(f"已导出{count}" + self._pending_note(sheets),
                    ("复制路径", lambda: QApplication.clipboard().setText(path)))
 
-    # ---- 缩放 ----
+    # ---- 缩放（ui.zoom 的预览接口）----
 
-    def eventFilter(self, watched, event):
-        # Ctrl+滚轮缩放原图，便于对齐细线；不按 Ctrl 时照常滚动。
-        if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
-            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-            self._fit = False
-            self._canvas.set_scale(self._canvas.scale * factor)
-            return True
-        if event.type() == QEvent.Resize and self._fit:
-            QTimer.singleShot(0, self._fit_canvas)
-        return super().eventFilter(watched, event)
+    def zoom_scale(self):
+        return self._canvas.scale
 
-    def _fit_canvas(self):
-        size = self._area.viewport().size().shrunkBy(QMargins(T.SPACE_2, T.SPACE_2, T.SPACE_2, T.SPACE_2))
-        self._canvas.set_scale(self._canvas.fit_scale(size))
+    def set_zoom_scale(self, scale):
+        self._canvas.set_scale(scale)
 
+    def fit_zoom_scale(self, size):
+        return self._canvas.fit_scale(size)
+
+    def to_content(self, point):
+        return QPointF(self._canvas.mapFrom(self._area.viewport(), point)) / self._canvas.scale
+
+    def from_content(self, point):
+        return QPointF(self._canvas.mapTo(self._area.viewport(), (point * self._canvas.scale).toPoint()))
+
+    def pans_at(self, point):
+        return self._canvas.pans_at(QPointF(self._canvas.mapFrom(self._area.viewport(), point)))
 
 
 def _column_name(index):

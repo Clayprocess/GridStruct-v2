@@ -188,7 +188,7 @@ class AnnotationWindow(QWidget):
 
     def _open_ocr_results(self):
         # 同表格识别：复核窗口接手这张图，截图会话随即结束，桌面不再被截图窗口锁住。
-        self._ocr.show_results(detached=True)
+        self._ocr.show_results()
         self.close()
 
     def _select_ocr_text(self, _item, text):

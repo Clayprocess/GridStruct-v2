@@ -132,6 +132,8 @@ PIN_CLICK_THROUGH_OPACITY = 0.5
 TABLE_GRID = PIN_STATE_COLORS["active"]
 TABLE_GRID_ALPHA = {"line": 190, "active": 255, "selection": 48, "merge": 26, "frame": 255}
 TABLE_HANDLE = "#ffffff"
+# 表格识别画布上当前表格框以外的整页内容压暗一层，看得出正在改哪张表。
+TABLE_OUTSIDE = (0, 0, 0, 28)
 # OCR 原图选字：只叠半透明底色，不遮住原图字形；明暗主题共用（叠在截图像素上，与界面主题无关）。
 OCR_SELECTION = (59, 130, 246, 96)
 OCR_HOVER = (59, 130, 246, 28)

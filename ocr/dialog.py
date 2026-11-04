@@ -1,27 +1,29 @@
-"""文字识别窗口：左边原图可滑选，右边按行/按段直接改字，或切到全文自由编辑。
+"""文字识别窗口：左边原图可缩放、滑选，右边默认全文自由编辑，也可按行/按段逐条改字。
 
 布局与表格识别窗口一致：上方工具行、中间原图对照、底部状态 + 主操作。
-按行/按段的改字立即同步原图文字层、贴图和复制结果；全文是独立草稿，不回写原图。
+按行/按段的改字进入识别结果（同图贴图共享）；全文是独立草稿。原图文字层透明，改字在原图上看不到，
+所以界面不再提“同步原图”（实测决定）。
 """
 
 from dataclasses import replace
 
-from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Slot
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtCore import QPointF, QSignalBlocker, Qt, QTimer, Slot
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPixmap, QShortcut, QTransform
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QFrame, QGraphicsScene, QGraphicsView,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QFrame, QGraphicsScene, QGraphicsTextItem, QGraphicsView,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton, QSplitter,
     QStackedWidget, QStyledItemDelegate, QToolButton, QVBoxLayout,
 )
 from styles import tokens as T
-from ui import BaseDialog, MultilineDelegate, show_toast, topmost_button
+from ui import BaseDialog, MultilineDelegate, PreviewZoom, show_toast, standard_window, topmost_button
 from ui.motion import SelectionPill
 from .layer import add_text_layer
 from .layout import format_text
 from .model import OCRDocument
 
-VIEWS = (("line", "按行", "每行一条，改字同步原图"), ("paragraph", "按段", "每段一条，改字同步原图"),
-         ("full", "全文", "自由增删合并；不回写原图"))
+# 每次打开都先看全文（实测决定），不记上次的视图。
+VIEWS = (("full", "全文", "自由增删、合并段落"), ("line", "按行", "每行一条，双击改字"),
+         ("paragraph", "按段", "每段一条，双击改字"))
 # 这里只提示模型分数，不代表人工复核进度。
 _PENDING_SCORE = .8
 
@@ -42,45 +44,47 @@ class _LineDelegate(MultilineDelegate):
 
 
 class _ImagePreview(QGraphicsView):
-    """默认适应窗口；Ctrl+滚轮缩放（同表格识别），缩放后不再自动适应。"""
+    """原图预览，缩放与拖动交给 ui.zoom（同表格识别）。"""
 
     def __init__(self):
         super().__init__()
         self.setObjectName("OCRPreview")
         self.setAlignment(Qt.AlignCenter)
-        self._fit = True
+        # 缩小显示时不开平滑，文字笔画会被隔行丢掉，看着发虚、锯齿。
+        self.setRenderHint(QPainter.SmoothPixmapTransform)
 
-    def wheelEvent(self, event):
-        if event.modifiers() & Qt.ControlModifier:
-            self._fit = False
-            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-            self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-            self.scale(factor, factor)
-            event.accept()
-            return
-        super().wheelEvent(event)
+    def zoom_scale(self):
+        return self.transform().m11()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self._fit:
-            self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
+    def set_zoom_scale(self, scale):
+        self.setTransform(QTransform.fromScale(scale, scale))
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        if self._fit:
-            self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
+    def fit_zoom_scale(self, size):
+        rect = self.sceneRect()
+        # 历史纯文字结果没有原图，预览隐藏，场景为空。
+        if rect.isEmpty():
+            return 1.0
+        return min(size.width() / rect.width(), size.height() / rect.height())
+
+    def to_content(self, point):
+        return self.mapToScene(point)
+
+    def from_content(self, point):
+        return QPointF(self.mapFromScene(point))
+
+    def pans_at(self, point):
+        return not isinstance(self.itemAt(point), QGraphicsTextItem)
 
 
 class OCRResultDialog(BaseDialog):
     def __init__(self, results, parent=None, pixmap=None):
         super().__init__(parent)
-        from settings import get_settings
-        self._settings = get_settings()
         image = pixmap.toImage() if pixmap is not None else None
         document = results if isinstance(results, OCRDocument) else OCRDocument(results, image)
         if pixmap is None and not document.image.isNull():
             pixmap = QPixmap.fromImage(document.image)
         self.setWindowTitle("文字识别 · 本地")
+        standard_window(self)
         self.resize(1100, 680)
         self._mode = QApplication.instance().property("theme_mode") or "light"
         self._layer = None
@@ -95,6 +99,7 @@ class OCRResultDialog(BaseDialog):
         self._preview = _ImagePreview()
         self._preview.setMinimumWidth(200)
         self._preview.setScene(QGraphicsScene(self._preview))
+        self._zoom = PreviewZoom(self._preview, self._preview, self)
 
         self._items = QListWidget()
         self._items.setObjectName("OCRLines")
@@ -128,18 +133,18 @@ class OCRResultDialog(BaseDialog):
         self._next_shortcut = QShortcut(QKeySequence("F8"), self, self._next_pending)
         QShortcut(QKeySequence("Ctrl+Shift+C"), self, self._copy_all)
         self._load(document, pixmap)
-        view = self._settings.value("ocr/view", "line")
-        self._view_buttons.get(view, self._view_buttons["line"]).setChecked(True)
+        self._view_buttons["full"].setChecked(True)
 
     def _load(self, document, pixmap):
         """pixmap 为空表示历史纯文字结果，没有原图可对照。"""
         self._document, self._pixmap = document, pixmap
         if pixmap is not None:
             scene = self._preview.scene()
-            scene.addPixmap(pixmap)
+            scene.addPixmap(pixmap).setTransformationMode(Qt.SmoothTransformation)
             self._layer = add_text_layer(scene, document, self._mode)
             size = pixmap.deviceIndependentSize()
             scene.setSceneRect(0, 0, size.width(), size.height())
+            self._zoom.fit()
         self._preview.setVisible(pixmap is not None)
         self._to_table.setEnabled(pixmap is not None)
         document.changed.connect(self._refresh)
@@ -212,10 +217,9 @@ class OCRResultDialog(BaseDialog):
 
     @property
     def view(self):
-        return next((view for view, button in self._view_buttons.items() if button.isChecked()), "line")
+        return next((view for view, button in self._view_buttons.items() if button.isChecked()), "full")
 
     def _set_view(self, view):
-        self._settings.setValue("ocr/view", view)
         self._stack.setCurrentWidget(self._text if view == "full" else self._items)
         self._refresh()
         if view != "full":
@@ -283,8 +287,8 @@ class OCRResultDialog(BaseDialog):
         if not document:
             message = "未检测到文字"
         elif self.view == "full":
-            message = ("原图上的改字在全文之后发生，全文未跟着变；已有编辑保留" if document.draft_stale
-                       else "全文可自由增删、合并段落，不会改动原图文字")
+            message = ("按行/按段里的改字在全文之后发生，全文未跟着变；已有编辑保留" if document.draft_stale
+                       else "全文可自由增删、合并段落；复制全文以这里为准")
         else:
             changed = sum(result.text != result.original_text for result in document.results)
             unit = "段" if self.view == "paragraph" else "行"
@@ -318,9 +322,14 @@ class OCRResultDialog(BaseDialog):
                     self._refreshing = False
                 break
         if self._layer is not None:
+            visible = self._preview.mapToScene(self._preview.viewport().rect()).boundingRect()
             for item in self._layer.childItems():
-                if wanted.intersection(item._ids):
-                    self._preview.ensureVisible(item.sceneBoundingRect(), 20, 20)
+                rect = item.sceneBoundingRect()
+                # 只在这一行完全不在视野里时才滚：在原图上点字也会走到这里，放大后一点就跳会很怪；
+                # 整行比视野还宽时对准行首，而不是被拉到行尾。
+                if wanted.intersection(item._ids) and not visible.intersects(rect):
+                    rect.setWidth(min(rect.width(), visible.width() / 2))
+                    self._preview.ensureVisible(rect, 20, 20)
 
     def _item_edited(self, item):
         if self._refreshing:

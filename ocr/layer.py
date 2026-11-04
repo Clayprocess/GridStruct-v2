@@ -1,4 +1,4 @@
-"""共享校正文字的原图覆盖层；四点几何映射至截图逻辑坐标。"""
+"""原图上的透明文字层：滑选、双击复制识别出的文字；四点几何映射至截图逻辑坐标。"""
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QPolygonF, QTextCursor, QTransform
@@ -128,8 +128,8 @@ class _SelectableTextItem(QGraphicsTextItem):
             selected = self.textCursor().selectedText().replace("\u2029", "\n")
             copy = menu.addAction("复制选中文字", lambda: QApplication.clipboard().setText(selected))
             copy.setEnabled(bool(selected))
-            menu.addAction("复制此条校正文字", lambda: QApplication.clipboard().setText(self.toPlainText()))
-            menu.addAction("查看与校正文字…", self._layer.on_show_results)
+            menu.addAction("复制这一行", lambda: QApplication.clipboard().setText(self.toPlainText()))
+            menu.addAction("打开文字识别窗口…", self._layer.on_show_results)
             menu.exec(event.screenPos())
             menu.deleteLater()
             event.accept()
