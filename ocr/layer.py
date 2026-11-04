@@ -1,9 +1,10 @@
 """共享校正文字的原图覆盖层；四点几何映射至截图逻辑坐标。"""
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPolygonF, QTransform
+from PySide6.QtGui import QColor, QFont, QPolygonF, QTextCursor, QTransform
 from PySide6.QtWidgets import QApplication, QGraphicsObject, QGraphicsTextItem, QMenu
 from styles import tokens as T
+from ui import show_toast
 from .model import OCRDocument
 
 
@@ -101,7 +102,17 @@ class _SelectableTextItem(QGraphicsTextItem):
         self._emit_selection()
 
     def mouseDoubleClickEvent(self, event):
-        super().mouseDoubleClickEvent(event)
+        # 双击复制这一处识别出的整行文字（实测决定），选区同时铺满整行作为反馈。
+        if event.button() != Qt.LeftButton:
+            super().mouseDoubleClickEvent(event)
+            return
+        cursor = self.textCursor()
+        cursor.select(QTextCursor.Document)
+        self.setTextCursor(cursor)
+        text = self.toPlainText()
+        QApplication.clipboard().setText(text)
+        show_toast(f"已复制：{text if len(text) <= 24 else text[:24] + '…'}")
+        event.accept()
         self._emit_selection()
 
     def keyPressEvent(self, event):

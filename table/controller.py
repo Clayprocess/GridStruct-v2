@@ -135,22 +135,26 @@ def open_table(image, results=None):
 _choosing = False
 
 
-def open_document(parent=None):
-    """识别文档：选图片或 PDF，按表格识别；多页逐页改网格，输出时合成一张表。"""
+def open_document(parent=None, paths=None):
+    """识别文档：选图片或 PDF，按表格识别；多页逐页改网格，输出时合成一张表。
+
+    paths 给了就直接打开（独立 EXE 收到拖放或“打开方式”传入的文件），否则弹出选文件对话框。
+    """
     global _choosing
-    # 托盘和快捷键都能触发；选文件对话框还开着时不再叠一个。
-    if _choosing:
-        return None
     from settings import get_settings
     settings = get_settings()
-    directory = settings.value("document/open_dir", "") or QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
-    _choosing = True
-    try:
-        paths, _ = QFileDialog.getOpenFileNames(parent, "识别文档", directory, OPEN_FILTER)
-    finally:
-        _choosing = False
     if not paths:
-        return None
+        # 托盘和快捷键都能触发；选文件对话框还开着时不再叠一个。
+        if _choosing:
+            return None
+        directory = settings.value("document/open_dir", "") or QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+        _choosing = True
+        try:
+            paths, _ = QFileDialog.getOpenFileNames(parent, "识别文档", directory, OPEN_FILTER)
+        finally:
+            _choosing = False
+        if not paths:
+            return None
     settings.setValue("document/open_dir", str(Path(paths[0]).parent))
     pages, problems = collect_pages(paths, QApplication.instance())
     if not pages:

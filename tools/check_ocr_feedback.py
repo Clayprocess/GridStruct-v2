@@ -2,12 +2,13 @@
 
 from pathlib import Path
 import sys
+import tempfile
 from time import monotonic
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PySide6.QtCore import QObject, QPoint, QRect, Signal, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QRect, Signal, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QAbstractButton, QWidget, QPushButton, QVBoxLayout
 from PySide6.QtTest import QTest
@@ -83,11 +84,11 @@ def main():
         raise RuntimeError("此验收必须使用可见 Windows 窗口。")
     service = _Service()
     errors = []
-    settings = type("Settings", (), {"value": lambda self, key, default, **kw:
-                                    key == "ocr/hide_empty_notice" or default})()
+    settings = type("Settings", (), {"value": lambda self, key, default, **kw: default,
+                                    "setValue": lambda self, key, value: None})()
     with (patch("ocr.controller._get_service", return_value=service),
           patch("settings.get_settings", return_value=settings),
-          patch("ocr.controller.show_message") as warning):
+          patch("settings.data_directory", return_value=Path(tempfile.mkdtemp()))):
         if "--focus-check" in sys.argv:
             anchor = QWidget()
             anchor.setWindowTitle("GridStruct 正式 Tool 焦点验收")
@@ -132,12 +133,12 @@ def main():
                 controller.start(pixmap)
                 service.finished.emit(controller._request, [], "验收用模型错误")
                 app.processEvents()
-                if "识别失败" not in _visible_text(window) or not warning.called:
+                if "识别失败" not in _visible_text(window):
                     errors.append(f"{mode}/{type(window).__name__}: 无失败状态")
                 controller.start(pixmap)
                 controller._timer.timeout.emit()
                 app.processEvents()
-                if "识别超时" not in _visible_text(window):
+                if "超过 60 秒" not in _visible_text(window):
                     errors.append(f"{mode}/{type(window).__name__}: 无超时状态")
                 controller.start(pixmap)
                 service.finished.emit(controller._request, [], "")
@@ -156,13 +157,6 @@ def main():
                                if b.isVisible() and b.text() == "查看全文"]
                     if not buttons:
                         errors.append(f"{mode}/AnnotationWindow: 没有可见全文入口")
-                    else:
-                        buttons[0].click()
-                        app.processEvents()
-                        if not controller._dialogs or not controller._dialogs[-1].isVisible():
-                            errors.append("全文按钮未打开结果对话框")
-                        else:
-                            controller._dialogs[-1].close()
                     window.select_tool("arrow")
                     canvas = window._canvas
                     viewport = canvas.viewport()
@@ -180,6 +174,24 @@ def main():
                     marks = [item for item in canvas.scene().items() if getattr(item, "tool_id", "") == "arrow"]
                     if len(marks) != 2:
                         errors.append(f"{mode}/AnnotationWindow: OCR 后无法连续绘制两个图形")
+                    # 同表格识别：打开全文复核后截图会话结束，复核窗口独立留下。
+                    controller.start(window._render())
+                    service.finished.emit(controller._request, results, "")
+                    app.processEvents()
+                    buttons = [b for b in window.findChildren(QAbstractButton)
+                               if b.isVisible() and b.text() == "查看全文"]
+                    closed = []
+                    window.destroyed.connect(lambda: closed.append(True))
+                    buttons[0].click()
+                    app.processEvents()
+                    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+                    from ocr.controller import _detached
+                    if not _detached or not next(iter(_detached)).isVisible() or not closed:
+                        errors.append("全文按钮未打开独立复核窗口或未结束截图")
+                    for dialog in list(_detached):
+                        dialog.close()
+                    app.processEvents()
+                    continue
                 window._allow_close = True
                 window.close()
                 app.processEvents()

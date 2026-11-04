@@ -67,3 +67,38 @@ def ask_confirmation(parent, title, text, *, confirm_text="确定", cancel_text=
     accepted = dialog.exec() == QDialog.Accepted
     dialog.deleteLater()
     return accepted
+
+
+def topmost_button(dialog, key):
+    """识别窗口右上角的图钉：是否置顶由用户选，默认不置顶，记住上次选择（实测决定）。
+
+    截图会话打开识别窗口后就结束，窗口不必再为压过截图遮罩而强制置顶。
+    """
+    from PySide6.QtGui import QIcon
+    from PySide6.QtWidgets import QApplication, QToolButton
+    from settings import get_settings
+    from .icons import tinted_icon
+    settings = get_settings()
+    t = T.THEMES[QApplication.instance().property("theme_mode") or "light"]
+    button = QToolButton()
+    button.setCheckable(True)
+    button.setToolTip("窗口置顶")
+    button.setAccessibleName("窗口置顶")
+    icon = tinted_icon("pin", t["muted_foreground"], 16, QIcon(), QIcon.Normal, QIcon.Off)
+    button.setIcon(tinted_icon("pin", t["foreground"], 16, icon, QIcon.Normal, QIcon.On))
+    on = settings.value(key, False, type=bool)
+    button.setChecked(on)
+    dialog.setWindowFlag(Qt.WindowStaysOnTopHint, on)
+
+    def toggle(value):
+        settings.setValue(key, value)
+        # 改窗口标志会重建原生窗口并隐藏它，要重新显示。
+        visible = dialog.isVisible()
+        dialog.setWindowFlag(Qt.WindowStaysOnTopHint, value)
+        if visible:
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+
+    button.toggled.connect(toggle)
+    return button

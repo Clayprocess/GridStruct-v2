@@ -358,6 +358,9 @@ class ToolOptions(QWidget):
             self._separator()
             self._font()
             self._spin("font_size", 6, 96, "字号", _font_size_glyph)
+            for key, tip, name in (("text_bold", "加粗", "bold"), ("text_italic", "斜体", "italic"),
+                                   ("text_underline", "下划线", "underline")):
+                self._flag(key, tip, _lucide(name))
             self._segment("text_alignment", [("左对齐", "left", _lucide("text-align-start")),
                                              ("居中", "center", _lucide("text-align-center")),
                                              ("右对齐", "right", _lucide("text-align-end"))])
@@ -388,9 +391,7 @@ class ToolOptions(QWidget):
             self._spin("opacity", 5, 100, "不透明度", _opacity_glyph).setSuffix("%")
         elif tool_id == "eraser":
             self._spin("eraser_size", 4, 120, "橡皮擦大小", _size_glyph)
-            self._layout.addWidget(_Glyph(lambda p, c, r: paint_svg(p, "paint-bucket", c.name(), r),
-                                          "擦除后填充的颜色"))
-            self._color_button("background_color")
+            self._label("碰到的标注整条删除，原图不变")
         elif tool_id == "magnifier":
             self._label("像素预览 15 × 7，移动鼠标查看")
         if tool_id != "magnifier":
@@ -606,6 +607,18 @@ class ToolOptions(QWidget):
         self._bind("font_family", font,
                    lambda value: font.setCurrentFont(QFont(value, self._canvas.style.font_size)))
 
+    def _flag(self, key, tip, icon):
+        button = QToolButton()
+        button.setObjectName("Segment")
+        button.setToolTip(tip)
+        button.setIcon(icon)
+        button.setIconSize(_ICON)
+        button.setCheckable(True)
+        button.toggled.connect(lambda value: self._canvas.update_style(key, value))
+        self._layout.addWidget(button)
+        self._bind(key, button, button.setChecked)
+        return button
+
     def _toggle(self, key, tip, icon, color_key):
         button = QToolButton()
         button.setObjectName("Segment")
@@ -676,9 +689,15 @@ class ToolOptions(QWidget):
         self._canvas.update_style(key, color)
 
     def _choose_color(self, key):
-        color = QColorDialog.getColor(getattr(self._canvas.style, key), self, "选择颜色",
-                                      QColorDialog.ShowAlphaChannel)
-        if color.isValid():
+        # 静态 getColor 不置顶：Windows 上它会落在置顶的截图窗口后面，模态又锁住截图，看起来像打不开。
+        dialog = QColorDialog(getattr(self._canvas.style, key), self._canvas.window())
+        dialog.setWindowTitle("选择颜色")
+        dialog.setOption(QColorDialog.ShowAlphaChannel)
+        dialog.setWindowFlag(Qt.WindowStaysOnTopHint)
+        accepted = dialog.exec() == QColorDialog.Accepted
+        color = dialog.currentColor()
+        dialog.deleteLater()
+        if accepted:
             self._canvas.update_style(key, color)
 
     def _sync(self, tool_id):

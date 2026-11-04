@@ -8,10 +8,10 @@
 
 from PySide6.QtCore import QRect, QRectF, QPointF, Qt
 from PySide6.QtWidgets import QGraphicsScene, QApplication
-from PySide6.QtGui import QGuiApplication, QPainterPath, QUndoStack
+from PySide6.QtGui import QGuiApplication, QPainterPath, QPainterPathStroker, QUndoStack
 
 from .items import (
-    ArrowMarkItem, EllipseMarkItem, EraseMarkItem, HighlightMarkItem, LineMarkItem,
+    ArrowMarkItem, EllipseMarkItem, HighlightMarkItem, LineMarkItem,
     MarkStyle, MosaicMarkItem, PencilMarkItem,
     PolylineMarkItem, RectMarkItem, SerialMarkItem, TextMarkItem,
 )
@@ -285,19 +285,43 @@ class MosaicTool(MarkTool):
 
 
 class EraserTool(MarkTool):
+    """擦除碰到的整条标注，不在原图上涂色；松开后一次删除，可撤销。"""
+
     def on_press(self, scene, pos, undo):
         self._scene = scene
-        self._item = EraseMarkItem(self._style)
-        self._item.move_to(pos)
-        scene.addItem(self._item)
+        self._erased = []
+        self._last = QPointF(pos)
+        self._sweep(QPointF(pos))
 
     def on_move(self, pos):
-        self._item.line_to(pos)
+        self._sweep(QPointF(pos))
+
+    def _sweep(self, pos):
+        # 两次鼠标事件之间按笔宽扫出整段，快速划过也不会漏掉细线。
+        segment = QPainterPath(self._last)
+        segment.lineTo(pos)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(self._style.eraser_size)
+        stroker.setCapStyle(Qt.RoundCap)
+        area = stroker.createStroke(segment)
+        radius = self._style.eraser_size / 2
+        area.addEllipse(pos, radius, radius)
+        self._last = pos
+        # 只认标注本身（带 style_keys）：背景截图和 OCR 文字层都不能被擦掉。
+        for item in self._scene.items(area.boundingRect()):
+            if (hasattr(item, "style_keys") and item.isVisible()
+                    and item.collidesWithPath(item.mapFromScene(area))):
+                # 拖动过程中先藏起来当预览，松开时再进撤销栈。
+                item.hide()
+                self._erased.append(item)
 
     def on_release(self, pos, undo):
-        self._item.line_to(pos)
-        undo.push(AddMarkCommand(self._scene, self._item))
-        self._item = None
+        self._sweep(QPointF(pos))
+        for item in self._erased:
+            item.show()
+        if self._erased:
+            undo.push(RemoveMarkCommand(self._scene, self._erased))
+        self._erased = []
 
 
 class MagnifierTool(MarkTool):

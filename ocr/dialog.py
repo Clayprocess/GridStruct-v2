@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QStyledItemDelegate, QToolButton, QVBoxLayout,
 )
 from styles import tokens as T
-from ui import BaseDialog, MultilineDelegate, show_toast
+from ui import BaseDialog, MultilineDelegate, show_toast, topmost_button
 from ui.motion import SelectionPill
 from .layer import add_text_layer
 from .layout import format_text
@@ -177,6 +177,7 @@ class OCRResultDialog(BaseDialog):
         self._no_spaces = QCheckBox("去空格")
         row.addWidget(self._no_breaks)
         row.addWidget(self._no_spaces)
+        row.addWidget(topmost_button(self, "window/ocr_topmost"))
         return row
 
     def _build_footer(self):

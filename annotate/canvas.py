@@ -11,7 +11,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QRect, QRectF, QPointF, Signal, QEvent
 from copy import copy
 
-from .items import MarkStyle, arrow_heads, SerialMarkItem, TextMarkItem, ArrowMarkItem, EraseMarkItem
+from .items import MarkStyle, arrow_heads, SerialMarkItem, TextMarkItem, ArrowMarkItem
 from .tools import create_tool
 from .tools import TOOL_CLASSES, TextTool
 from .commands import (RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand,
@@ -23,7 +23,8 @@ from settings import get_settings
 _REMEMBERED_STYLE = ("color", "width", "font_size", "font_family",
                      "serial_start", "serial_global", "serial_auto_renumber", "serial_type", "serial_size",
                      "fill_mode", "round_radius", "arrow_type", "arrow_size", "arrow_start", "arrow_end",
-                     "polyline_cap", "polyline_join", "line_style", "text_alignment", "text_background",
+                     "polyline_cap", "polyline_join", "line_style", "text_bold", "text_italic", "text_underline",
+                     "text_alignment", "text_background",
                      "text_outline", "background_color", "outline_color", "mosaic_shape", "mosaic_mode",
                      "mosaic_strength", "mosaic_size", "opacity", "eraser_size", "zoom", "wheel_enabled")
 
@@ -103,7 +104,7 @@ class AnnotationCanvas(QGraphicsView):
             self._loupe = None
         if tool_id == "magnifier":
             self._loupe = PipettePopup(self._bg_pixmap, grid=True)
-        self.viewport().setCursor(Qt.BlankCursor if tool_id == "eraser" else Qt.CrossCursor)
+        self.viewport().setCursor(self._tool_cursor())
         if self._brush_radius() is not None and self.viewport().underMouse():
             self._brush_pos = self.viewport().mapFromGlobal(QCursor.pos())
             self.viewport().update(self._brush_preview_rect())
@@ -395,6 +396,7 @@ class AnnotationCanvas(QGraphicsView):
             self._move_start = self.mapToScene(e.pos())
             self._moving = {item: QPointF(item.pos()) for item in self._scene.selectedItems()
                             if item.flags() & QGraphicsItem.ItemIsMovable}
+            self.viewport().setCursor(Qt.ClosedHandCursor)
             e.accept()
             return
         if e.button() == Qt.LeftButton and self._tool is not None:
@@ -483,6 +485,8 @@ class AnnotationCanvas(QGraphicsView):
         elif self._tool is not None and (self._drawing or self._tool.preview_on_hover):
             self._tool.on_move(self.mapToScene(e.pos()))
         else:
+            if self._loupe is None:
+                self._hover_cursor(e.pos(), e.modifiers())
             super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
@@ -500,6 +504,7 @@ class AnnotationCanvas(QGraphicsView):
                 self._undo.push(MoveMarksCommand(changed, {item: QPointF(item.pos()) for item in changed}))
             self._moving = None
             self._move_start = None
+            self._hover_cursor(e.pos(), e.modifiers())
             return
         if self._tool is not None and e.button() == Qt.LeftButton and self._drawing:
             self._tool.on_release(self.mapToScene(e.pos()), self._undo)
@@ -575,13 +580,25 @@ class AnnotationCanvas(QGraphicsView):
         self.update_style("color", color)
         event.accept()
 
+    def _tool_cursor(self):
+        if not self._tool_id:
+            return Qt.ArrowCursor
+        return Qt.BlankCursor if self._tool_id == "eraser" else Qt.CrossCursor
+
+    def _hover_cursor(self, pos, modifiers):
+        """悬停在能拖动的标注上显示张开的手，告诉用户按下就是移动它，而不是在上面再画一笔。"""
+        hit = self._selection_hit(pos)
+        movable = (hit is not None and hit.flags() & QGraphicsItem.ItemIsMovable
+                   and (not self._continuous_drawing() or modifiers & Qt.ControlModifier)
+                   and not (isinstance(hit, QGraphicsTextItem) and hit.hasFocus()))
+        self.viewport().setCursor(Qt.OpenHandCursor if movable else self._tool_cursor())
+
     def _selection_hit(self, pos):
         hits = self.items(pos)
         for item in hits:
-            if not isinstance(item, EraseMarkItem) and (item.flags() & QGraphicsItem.ItemIsSelectable
-                                                       or isinstance(item, QGraphicsTextItem)):
+            if item.flags() & QGraphicsItem.ItemIsSelectable or isinstance(item, QGraphicsTextItem):
                 return item
-        return next((item for item in hits if isinstance(item, EraseMarkItem)), hits[0] if hits else None)
+        return hits[0] if hits else None
 
     def drawForeground(self, painter, rect):
         super().drawForeground(painter, rect)

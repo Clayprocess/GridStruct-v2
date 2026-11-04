@@ -48,8 +48,9 @@ def sha256(path):
 
 
 def verify_bundle(bundle):
-    if not (bundle / "GridStruct-V2.exe").is_file():
-        raise RuntimeError("构建未输出 GridStruct-V2.exe。")
+    for name in ("GridStruct-V2.exe", "GridStruct-V2 识别文档.exe"):
+        if not (bundle / name).is_file():
+            raise RuntimeError(f"构建未输出 {name}。")
     runtime = bundle / "_internal"
     if any(runtime.rglob("icuuc.dll")):
         raise RuntimeError("包内第三方 icuuc.dll 会遮蔽 Qt 所需的 Windows 系统 ICU。")
@@ -120,6 +121,7 @@ def main():
     (bundle / "使用说明.txt").write_text(
         "解压整个 GridStruct-V2 文件夹到可写目录，双击 GridStruct-V2.exe。\n"
         "应用常驻系统托盘；默认 Ctrl+Alt+S 截图。\n"
+        "“GridStruct-V2 识别文档.exe”是独立的识别文档入口：直接选图片或 PDF 识别表格，也可以把文件拖到它上面。\n"
         "_internal 目录包含程序依赖、图标与本地 OCR 模型，请勿单独移动 EXE。\n"
         "配置和历史保存于同目录 user-data；移动整个文件夹可一并迁移。\n"
         "本包已检查资源完整性，尚需在目标 Windows 电脑验证截图、OCR 和贴图。\n",

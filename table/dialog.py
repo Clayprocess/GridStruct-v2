@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from styles import tokens as T
-from ui import BaseDialog, MultilineDelegate, show_message, show_toast, tinted_icon
+from ui import BaseDialog, MultilineDelegate, show_message, show_toast, tinted_icon, topmost_button
 from . import export
 from .editor import ADD_HORIZONTAL, ADD_VERTICAL, DELETE, SELECT, GridCanvas
 from .grid import STRATEGY_LABELS
@@ -179,6 +179,8 @@ class TableDialog(BaseDialog):
         self._schemes.setToolTip("自动分析给出的候选网格；切换后可撤销")
         self._schemes.activated.connect(self._scheme_chosen)
         row.addWidget(self._schemes)
+        row.addWidget(self._separator())
+        row.addWidget(topmost_button(self, "window/table_topmost"))
         return row
 
     def _build_footer(self):
