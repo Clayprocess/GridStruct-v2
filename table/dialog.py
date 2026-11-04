@@ -540,6 +540,7 @@ class TableDialog(BaseDialog):
         position = [bar.value() for bar in bars]
         self._canvas = canvas
         # setWidget 会销毁上一张画布。
+        self._zoom.stop_pan()
         self._area.setWidget(canvas)
         self._zoom.watch(canvas)
         if scale is None or self._zoom.fitted:

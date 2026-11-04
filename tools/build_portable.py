@@ -1,7 +1,7 @@
 """构建 Windows onedir 与便携 ZIP：python -X utf8 tools/build_portable.py。
 
 需在现有项目环境中安装 PyInstaller 6.x。--check 仅检查依赖和资源。
---check-bootloader <官方 wheel> 确认已装的 PyInstaller 用的是自编引导程序（发布构建用，降低 Defender 误报）。
+--check-bootloader <官方 wheel> 确认已装的 PyInstaller 用的是自编引导程序（发布构建用）。
 不包含 user-data、源码工作区或任何本机配置；失败产物保留以供排查。
 """
 

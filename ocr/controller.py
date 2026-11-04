@@ -285,9 +285,12 @@ class OCRController(QObject):
         if self._document is None or not self._document:
             return
         if self._dialogs and self._dialogs[-1]._document is self._document:
-            self._dialogs[-1].showNormal()
-            self._dialogs[-1].raise_()
-            self._dialogs[-1].activateWindow()
+            dialog = self._dialogs[-1]
+            if dialog.isMinimized():
+                dialog.setWindowState(dialog.windowState() & ~Qt.WindowMinimized)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
             return
         from PySide6.QtGui import QPixmap
         image = self._document.image

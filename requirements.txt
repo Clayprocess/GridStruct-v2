@@ -3,7 +3,8 @@ PySide6>=6.7
 # P0-C 需要（PP-OCRv6 small，onnxruntime 引擎）
 # 注意：rapidocr-onnxruntime 是旧包（停在 1.4.4），3.9+ 统一用 rapidocr
 onnxruntime>=1.17
-rapidocr>=3.9.0
+# 3.10 起按需加载模型；旧版即使关闭方向分类也会加载或下载分类模型。
+rapidocr>=3.10.0
 
 # 表格导出 xlsx（纯 Python，约 1 MB）；按文本写入，避免 Excel 自动转公式/链接/数字
 XlsxWriter>=3.0

@@ -39,6 +39,13 @@ class PreviewZoom(QObject):
         """视口里的画布自己收鼠标和键盘（如表格网格），要在画布上也接住。"""
         widget.installEventFilter(self)
 
+    def stop_pan(self):
+        """换画布前结束拖动，旧画布销毁后不能再恢复它的光标。"""
+        if self._press is not None:
+            _point, widget, cursor, _button = self._press
+            widget.setCursor(cursor)
+        self._press, self._panning = None, False
+
     @property
     def scale(self):
         return self._target.zoom_scale()
@@ -88,9 +95,8 @@ class PreviewZoom(QObject):
         if kind == QEvent.MouseMove and self._press is not None:
             return self._move_pan(event)
         if kind == QEvent.MouseButtonRelease and self._press is not None and event.button() == self._press[3]:
-            _point, widget, cursor, _button = self._press
-            widget.setCursor(cursor)
-            panned, self._press, self._panning = self._panning, None, False
+            panned = self._panning
+            self.stop_pan()
             return panned
         if kind == QEvent.Resize and watched is self._area.viewport():
             self._bar.place()
