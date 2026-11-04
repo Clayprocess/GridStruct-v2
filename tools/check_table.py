@@ -357,6 +357,78 @@ def check_screenshot_regions(app):
     print("PASS: screenshot tables auto-boxed without surrounding text; extra box becomes a second sheet")
 
 
+def check_reanalysis_races(app):
+    """改框后的后台重算不打断正在输入的改字；接上一页只接紧挨着的上一页末表。"""
+    from unittest.mock import patch
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QPlainTextEdit
+    from table.analysis import TableResult
+    from table.dialog import TableDialog
+    from table.grid import Candidate, Suggestion
+    from table.model import GridSpec, Rect, Token
+    from table.pages import ImagePage
+
+    def result(rect, text):
+        grid = GridSpec((0, 40), (0, 100))
+        token = Token(text, .99, Rect(5, 5, 60, 30))
+        return TableResult(rect, (token,), Suggestion(Candidate(grid, "structure", 1), (), 1, "probe"))
+
+    image = QImage(400, 200, QImage.Format_RGB32)
+    image.fill(QColor(T.LIGHT["background"]))
+    dialog = TableDialog(image)
+    dialog.show()
+    first = QRect(0, 0, 100, 40)
+    dialog.apply_analysis((), (result(first, "original"),))
+    app.processEvents()
+    # 补一个框并应用：新框排队重算，原表照常可改。
+    dialog._regions_button.click()
+    dialog._canvas.regions.append(QRect(200, 100, 100, 40))
+    dialog._regions_button.click()
+    assert dialog._state.regions is not None and dialog._review is not None
+    table = dialog._table
+    table.setCurrentCell(0, 0)
+    table.editItem(table.currentItem())
+    app.processEvents()
+    editor = app.focusWidget()
+    assert isinstance(editor, QPlainTextEdit)
+    editor.setPlainText("user change in progress")
+    dialog.apply_analysis((), (result(QRect(200, 100, 100, 40), "new"),))
+    app.processEvents()
+    assert app.focusWidget() is editor and editor.toPlainText() == "user change in progress", "重算完成不得销毁输入框"
+    dialog._commit_editor()
+    assert dialog._review.document.rows[0][0] == "user change in progress", dialog._review.document.rows
+    assert dialog._tabs.count() == 2 and dialog._tabs.tabText(1) == "表2"
+    dialog.close()
+
+    pages = [ImagePage(image.copy(), label=f"第 {index + 1} 页") for index in range(3)]
+    dialog = TableDialog(pages)
+    for index in range(3):
+        dialog.apply_analysis((), (result(first, f"p{index + 1}"),), page=index)
+    dialog.show_page(2)
+    dialog._join.setChecked(True)
+    assert [members for _name, _document, members in dialog._sheets()] == [[(0, 0)], [(1, 0), (2, 0)]]
+    # 第 2 页框全删：第 3 页不得跨过它接到第 1 页上，单独导出并提示。
+    dialog.show_page(1)
+    dialog._apply_regions([])
+    dialog.show_page(2)
+    assert [members for _name, _document, members in dialog._sheets()] == [[(0, 0)], [(2, 0)]]
+    assert "上一页暂无可接的表" in dialog._join.text()
+    assert "第 3 页勾了接上一页" in dialog._pending_note(dialog._sheets())
+    # 上一页还在重算或识别失败时同样不接。
+    dialog._states[1].tables = [dialog._states[0].tables[0].__class__(first)]
+    dialog._states[1].regions = [first]
+    assert [members for _name, _document, members in dialog._sheets()] == [[(0, 0)], [(2, 0)]]
+    dialog._states[1].regions = None
+    dialog._states[1].tables = []
+    dialog._states[1].error = "坏页"
+    dialog._states[1].tokens = None
+    assert [members for _name, _document, members in dialog._sheets()] == [[(0, 0)], [(2, 0)]]
+    dialog.close()
+    app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    print("PASS: re-analysis keeps in-progress cell edits; join only attaches to the adjacent previous page")
+
+
 def check_selection_after_grid_change(app):
     from table.model import GridSpec
     from table.dialog import TableDialog
@@ -780,6 +852,7 @@ def main():
     check_export(document)
     check_dialog(app)
     check_screenshot_regions(app)
+    check_reanalysis_races(app)
     for mode in ("light", "dark"):
         check_document(app, mode)
     print(f"表格识别自检通过；截图和导出样例在 {OUTPUT}")

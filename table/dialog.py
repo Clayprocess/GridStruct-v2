@@ -328,6 +328,8 @@ class TableDialog(BaseDialog):
         index = self._index if page is None else page
         state = self._states[index]
         results = [self._table_state(result, bool(tokens)) for result in tables]
+        # 改框后只重算了几张表：用户可能正在没动过的表里改字，不能重建界面把输入框销毁。
+        keep_view = state.regions is not None and _ready(state.table)
         if state.regions is None:
             state.tables = results
             state.current = 0
@@ -338,7 +340,11 @@ class TableDialog(BaseDialog):
             state.regions = None
         state.tokens = tokens
         if index == self._index and not self._regions_mode:
-            self._show_table()
+            if keep_view:
+                self._sync_tabs()
+            else:
+                self._save_position()
+                self._show_table()
         self._update_progress()
 
     @staticmethod
@@ -397,7 +403,23 @@ class TableDialog(BaseDialog):
         with QSignalBlocker(self._join):
             self._join.setChecked(current is not None and current.joined)
         self._join.setEnabled(enabled and self._index > 0 and state.current == 0)
+        self._sync_join_label()
         self._refresh_actions()
+
+    def _can_join(self, page):
+        """第 page 页的第一张表能否接上一页：紧挨着的上一页已分析完、最后一张表可用。
+
+        上一页识别失败、框全删了或末表还在重算时不能接，免得跨过它接到更早的表上。
+        """
+        if page == 0:
+            return False
+        previous = self._states[page - 1]
+        return previous.analyzed and previous.regions is None and _ready(previous.tables[-1] if previous.tables else None)
+
+    def _sync_join_label(self):
+        current = self._current
+        blocked = current is not None and current.joined and self._state.current == 0 and not self._can_join(self._index)
+        self._join.setText("接上一页（上一页暂无可接的表，单独导出）" if blocked else "接上一页")
 
     # ---- 翻页与切换表格 ----
 
@@ -450,14 +472,16 @@ class TableDialog(BaseDialog):
         self._show_table()
 
     def _sync_tabs(self):
+        """只改标签文字，表数没变时不增删标签，不打断正在输入的单元格。"""
         state = self._state
         self._syncing_tabs = True
-        while self._tabs.count():
-            self._tabs.removeTab(0)
+        while self._tabs.count() > len(state.tables):
+            self._tabs.removeTab(self._tabs.count() - 1)
+        while self._tabs.count() < len(state.tables):
+            self._tabs.addTab("")
         for index, table in enumerate(state.tables):
-            self._tabs.addTab(region_label(index) + ("" if table.review is not None else " …"))
-            if table.joined and index == 0:
-                self._tabs.setTabToolTip(index, "接在上一页最后一张表后面")
+            self._tabs.setTabText(index, region_label(index) + ("" if table.review is not None else " …"))
+            self._tabs.setTabToolTip(index, "接在上一页最后一张表后面" if table.joined and index == 0 else "")
         self._tabs.setCurrentIndex(state.current)
         self._syncing_tabs = False
         self._tabs.setVisible(len(state.tables) > 1)
@@ -580,6 +604,7 @@ class TableDialog(BaseDialog):
         if self._current is not None:
             self._current.joined = checked
             self._sync_tabs()
+            self._sync_join_label()
 
     # ---- 状态同步 ----
 
@@ -728,7 +753,8 @@ class TableDialog(BaseDialog):
             for index, table in enumerate(state.tables):
                 if table.review is None:
                     continue
-                if table.joined and index == 0 and groups:
+                if table.joined and index == 0 and self._can_join(page):
+                    # 上一页末表一定在最后一组末尾：页按顺序排，且它本身可用。
                     groups[-1][2].append((page, index))
                     continue
                 if self._document:
@@ -758,6 +784,10 @@ class TableDialog(BaseDialog):
             note += f"；{waiting_tables} 张表还在分析，未包含"
         if failed:
             note += f"；{failed} 页识别失败，未包含"
+        unjoined = [page + 1 for page, state in enumerate(self._states)
+                    if state.tables and state.tables[0].joined and not self._can_join(page)]
+        if unjoined:
+            note += f"；第 {'、'.join(map(str, unjoined))} 页勾了接上一页但上一页没有可接的表，已单独导出"
         return note
 
     def _copy(self):
