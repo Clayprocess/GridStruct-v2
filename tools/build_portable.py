@@ -1,6 +1,7 @@
 """构建 Windows onedir 与便携 ZIP：python -X utf8 tools/build_portable.py。
 
 需在现有项目环境中安装 PyInstaller 6.x。--check 仅检查依赖和资源。
+--check-bootloader <官方 wheel> 确认已装的 PyInstaller 用的是自编引导程序（发布构建用，降低 Defender 误报）。
 不包含 user-data、源码工作区或任何本机配置；失败产物保留以供排查。
 """
 
@@ -17,6 +18,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BOOTLOADER = Path("PyInstaller/bootloader/Windows-64bit-intel/runw.exe")
 MODELS = ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx", "slanet-plus.onnx")
 
 
@@ -44,6 +46,19 @@ def sha256(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def installed_bootloader():
+    return Path(util.find_spec("PyInstaller").origin).parents[1] / BOOTLOADER
+
+
+def check_bootloader(wheel):
+    with ZipFile(wheel) as zipped:
+        stock = hashlib.sha256(zipped.read(BOOTLOADER.as_posix())).hexdigest()
+    current = sha256(installed_bootloader())
+    print(f"官方引导程序 {stock}\n当前引导程序 {current}")
+    if current == stock:
+        raise RuntimeError("PyInstaller 仍在使用官方预编译引导程序；请设置 PYINSTALLER_COMPILE_BOOTLOADER=1 并用 --no-binary pyinstaller 重装。")
 
 
 def verify_bundle(bundle):
@@ -88,8 +103,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="仅检查构建依赖和本地资源")
     parser.add_argument("--output", type=Path, help="新建输出目录；已存在的目录不会覆盖")
+    parser.add_argument("--check-bootloader", type=Path, metavar="WHEEL", help="与官方 PyInstaller wheel 比对引导程序后退出")
     args = parser.parse_args()
     check_requirements()
+    if args.check_bootloader:
+        check_bootloader(args.check_bootloader)
+        return 0
     if args.check:
         print("构建依赖、OCR/表格模型与图标已就绪；尚未执行打包。")
         return 0
@@ -112,6 +131,7 @@ def main():
         "python": platform.python_version(),
         "architecture": platform.machine(),
         "dependencies": {name: metadata.version(name) for name in ("pyinstaller", "PySide6", "onnxruntime", "rapidocr", "XlsxWriter")},
+        "bootloader_sha256": sha256(installed_bootloader()),
         "resource_sha256": hashes,
         "native_dependency_load_verified": True,
         "runtime_verified": False,

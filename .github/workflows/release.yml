@@ -31,7 +31,19 @@ jobs:
           python-version: "3.12"
 
       - name: 安装依赖
-        run: python -m pip install -r requirements.txt "pyinstaller>=6,<7"
+        run: python -m pip install -r requirements.txt
+
+      # PyInstaller 自带的预编译引导程序也被大量恶意软件复用，Defender 机器学习常把它判成木马
+      # （v0.2.0 被报 Trojan:Win32/Bearfoos.A!ml）。从源码包安装并在 runner 上用 MSVC 重新编译引导程序，
+      # 再与官方 wheel 里的 runw.exe 比对，确认打包用的不是那份通用二进制。
+      - name: 安装 PyInstaller（自编引导程序）
+        env:
+          PYINSTALLER_COMPILE_BOOTLOADER: "1"
+        run: |
+          python -m pip install --no-binary pyinstaller "pyinstaller>=6,<7"
+          $version = python -c "from importlib.metadata import version; print(version('pyinstaller'))"
+          python -m pip download --no-deps --only-binary :all: "pyinstaller==$version" -d build/stock-pyinstaller
+          python tools/build_portable.py --check-bootloader (Get-Item build/stock-pyinstaller/*.whl).FullName
 
       - name: 确定版本标签
         run: |

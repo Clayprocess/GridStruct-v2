@@ -1,9 +1,13 @@
 # Windows 便携目录包；资源路径保持与源码中的 __file__/../assets 一致。
 from pathlib import Path
 import os
+import re
 import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
+from PyInstaller.utils.win32.versioninfo import (
+    FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo, VarStruct, VSVersionInfo,
+)
 
 root = Path(SPECPATH)
 # Qt 6.12 使用 Windows ICU；外部工具的 PATH 可使收集器误选同名 ICU 78。
@@ -48,7 +52,32 @@ def analysis(script):
     )
 
 
-def executable(a, name):
+VERSION = re.search(r'_VERSION = "(.+)"', (root / "settings" / "dialog.py").read_text(encoding="utf-8")).group(1)
+
+
+def version_info(name, description):
+    # 无版本资源、无签名的 PyInstaller EXE 是 Defender 机器学习误报（如 Bearfoos.A!ml）的常见特征。
+    numbers = (*map(int, VERSION.split(".")), 0)
+    strings = {
+        "CompanyName": "Clayprocess",
+        "FileDescription": description,
+        "FileVersion": VERSION,
+        "InternalName": name,
+        "LegalCopyright": "Copyright © 2026 Clayprocess",
+        "OriginalFilename": f"{name}.exe",
+        "ProductName": "GridStruct V2",
+        "ProductVersion": VERSION,
+    }
+    return VSVersionInfo(
+        ffi=FixedFileInfo(filevers=numbers, prodvers=numbers),
+        kids=[
+            StringFileInfo([StringTable("080404B0", [StringStruct(key, value) for key, value in strings.items()])]),
+            VarFileInfo([VarStruct("Translation", [0x0804, 1200])]),
+        ],
+    )
+
+
+def executable(a, name, description):
     return EXE(
         PYZ(a.pure),
         a.scripts,
@@ -62,6 +91,7 @@ def executable(a, name):
         console=False,
         manifest=str(root / "app.manifest"),
         icon=str(root / "assets" / "app" / "gridstruct.ico"),
+        version=version_info(name, description),
         contents_directory="_internal",
     )
 
@@ -73,7 +103,8 @@ for destination, source, _ in tray.binaries + document.binaries:
     if Path(destination).name.lower() == "icuuc.dll":
         raise RuntimeError(f"Qt 必须使用 Windows 系统 ICU，不得打包同名第三方 DLL：{source}")
 coll = COLLECT(
-    executable(tray, "GridStruct-V2"), executable(document, "GridStruct-V2 识别文档"),
+    executable(tray, "GridStruct-V2", "GridStruct V2 截图与文字识别"),
+    executable(document, "GridStruct-V2 识别文档", "GridStruct V2 识别文档"),
     tray.binaries, tray.datas, document.binaries, document.datas,
     strip=False, upx=False, name="GridStruct-V2",
 )
