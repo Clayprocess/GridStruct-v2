@@ -185,7 +185,7 @@ def main():
                     buttons[0].click()
                     app.processEvents()
                     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-                    from ocr.controller import _detached
+                    from ocr.controller import _windows as _detached
                     if not _detached or not next(iter(_detached)).isVisible() or not closed:
                         errors.append("全文按钮未打开独立复核窗口或未结束截图")
                     for dialog in list(_detached):

@@ -75,7 +75,7 @@ class _Service(QObject):
 
 
 _service = None
-_detached = set()
+_windows = set()
 
 
 def _get_service():
@@ -276,30 +276,31 @@ class OCRController(QObject):
         if not self._layer_first:
             self.show_results()
 
-    def show_results(self, detached=False):
-        """从原图文字层或菜单主动打开可编辑全文。
+    def show_results(self):
+        """从原图文字层或菜单主动打开识别窗口。
 
-        detached：截图会话打开复核窗口后随即结束（同表格识别），窗口不能挂在截图窗口下面。
+        窗口是独立的标准窗口（任务栏有图标），不挂在截图或贴图下：截图会话打开它后随即结束，
+        关掉贴图也不跟着关。
         """
         if self._document is None or not self._document:
             return
         if self._dialogs and self._dialogs[-1]._document is self._document:
-            self._dialogs[-1].show()
-            self._dialogs[-1].raise_()
-            self._dialogs[-1].activateWindow()
+            dialog = self._dialogs[-1]
+            if dialog.isMinimized():
+                dialog.setWindowState(dialog.windowState() & ~Qt.WindowMinimized)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
             return
         from PySide6.QtGui import QPixmap
         image = self._document.image
-        dialog = OCRResultDialog(self._document, None if detached else self._owner,
+        dialog = OCRResultDialog(self._document, None,
                                  QPixmap.fromImage(image) if not image.isNull() else self._pixmap)
         dialog.setAttribute(Qt.WA_DeleteOnClose)
-        if detached:
-            # 没有父对象的窗口要有人持有 Python 引用，否则会被回收。
-            _detached.add(dialog)
-            dialog.destroyed.connect(lambda: _detached.discard(dialog))
-        else:
-            self._dialogs.append(dialog)
-            dialog.destroyed.connect(lambda: self._dialogs.remove(dialog))
+        # 没有父对象的窗口要有人持有 Python 引用，否则会被回收。
+        _windows.add(dialog)
+        self._dialogs.append(dialog)
+        dialog.destroyed.connect(lambda: (_windows.discard(dialog), self._dialogs.remove(dialog)))
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -308,7 +309,7 @@ class OCRController(QObject):
         """同图转移结果，无需重新识别。"""
         if not document.matches(pixmap):
             self.cancel()
-            self._set_state("idle", "图像不匹配，未复用旧 OCR；原校正仍保留，请重新识别")
+            self._set_state("idle", "图像不匹配，未复用旧 OCR；已改的文字仍保留，请重新识别")
             return False
         self.cancel()
         self._pixmap = pixmap.copy()
@@ -318,7 +319,7 @@ class OCRController(QObject):
         if self._document is None:
             return False
         if document:
-            self._set_state("completed", "已恢复文字与人工校正：可在原图复核、复制", True)
+            self._set_state("completed", "已恢复识别文字：可在原图滑选、Ctrl+C 复制", True)
         else:
             self._set_state("empty", "未检测到文字，可调整选区后重新识别")
         return True

@@ -1,6 +1,8 @@
 # 对话框基类（AGENTS.md 约定）。统一样式由 styles/theme.py 的全局 QSS 提供，
 # 这里不写任何样式。
 
+import sys
+
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox
 from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve
 from styles import tokens as T
@@ -18,6 +20,9 @@ class BaseDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # 从最小化还原也会收到（系统发的）显示事件，那时不再淡入，否则像闪了一下。
+        if event.spontaneous():
+            return
         self._fade.stop()
         self.setWindowOpacity(0)
         self._fade.setStartValue(0.0)
@@ -69,6 +74,38 @@ def ask_confirmation(parent, title, text, *, confirm_text="确定", cancel_text=
     return accepted
 
 
+def standard_window(dialog):
+    """识别窗口当普通窗口用：能最小化、最大化，任务栏有自己的图标（实测决定）。
+
+    任务栏图标只给没有所有者的窗口，调用方要传 parent=None 并自己持有引用。
+    """
+    dialog.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
+                          | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
+
+
+def set_topmost(window, on):
+    """切换置顶而不重建原生窗口。
+
+    setWindowFlag 会销毁重建原生窗口：窗口先隐藏再显示、淡入重放，看着闪一下。
+    这里只改 QWindow 的标志（Windows 上 Qt 用 SetWindowPos 切换 TOPMOST），控件记录同步改，不重建。
+    """
+    flags = window.windowFlags()
+    flags = flags | Qt.WindowStaysOnTopHint if on else flags & ~Qt.WindowStaysOnTopHint
+    handle = window.windowHandle()
+    if handle is None:
+        window.setWindowFlags(flags)
+        return
+    window.overrideWindowFlags(flags)
+    handle.setFlags(flags)
+    if sys.platform == "win32":
+        # 个别 Qt 版本去掉置顶时不发 HWND_NOTOPMOST，直接告诉系统一次。
+        import ctypes
+        topmost, not_topmost = -1, -2
+        no_size_move_activate = 0x0001 | 0x0002 | 0x0010
+        ctypes.windll.user32.SetWindowPos(int(window.winId()), topmost if on else not_topmost,
+                                          0, 0, 0, 0, no_size_move_activate)
+
+
 def topmost_button(dialog, key):
     """识别窗口右上角的图钉：是否置顶由用户选，默认不置顶，记住上次选择（实测决定）。
 
@@ -92,13 +129,7 @@ def topmost_button(dialog, key):
 
     def toggle(value):
         settings.setValue(key, value)
-        # 改窗口标志会重建原生窗口并隐藏它，要重新显示。
-        visible = dialog.isVisible()
-        dialog.setWindowFlag(Qt.WindowStaysOnTopHint, value)
-        if visible:
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
+        set_topmost(dialog, value)
 
     button.toggled.connect(toggle)
     return button

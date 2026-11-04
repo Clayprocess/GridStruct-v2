@@ -56,7 +56,7 @@ VERSION = re.search(r'_VERSION = "(.+)"', (root / "settings" / "dialog.py").read
 
 
 def version_info(name, description):
-    # 无版本资源、无签名的 PyInstaller EXE 是 Defender 机器学习误报（如 Bearfoos.A!ml）的常见特征。
+    # 给两个入口写入一致的产品与版本标识，便于识别构建来源。
     numbers = (*map(int, VERSION.split(".")), 0)
     strings = {
         "CompanyName": "Clayprocess",

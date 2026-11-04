@@ -14,7 +14,6 @@ from .analysis import reading_order
 MIN_REGION = 16          # 新画的框两边都短于它视为误点，不留
 HANDLE_HIT = 7           # 角和边的可拖范围（屏幕像素）
 HANDLE_RADIUS = 4
-MAX_SCALE = 2.0
 _EDGES = {"l": (1, 0, 0, 0), "t": (0, 1, 0, 0), "r": (0, 0, 1, 0), "b": (0, 0, 0, 1)}
 _CURSORS = {"lt": Qt.SizeFDiagCursor, "rb": Qt.SizeFDiagCursor, "rt": Qt.SizeBDiagCursor, "lb": Qt.SizeBDiagCursor,
             "l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor, "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor}
@@ -51,12 +50,17 @@ class RegionCanvas(QWidget):
     # ---- 对外接口 ----
 
     def set_scale(self, scale):
-        self.scale = min(MAX_SCALE, scale)
+        self.scale = scale
         self.setFixedSize(self.sizeHint())
         self.update()
 
     def fit_scale(self, size):
         return min(size.width() / self._pixmap.width(), size.height() / self._pixmap.height())
+
+    @staticmethod
+    def pans_at(_point):
+        # 空白处拖动是画新框，拖图只能按住空格或中键。
+        return False
 
     def sizeHint(self):
         return QSize(round(self._pixmap.width() * self.scale), round(self._pixmap.height() * self.scale))

@@ -2,11 +2,12 @@
 
 交互对照 v1 ui/table_grid_editor.py：Shift+单击加横线、Ctrl+单击加竖线、Alt+单击删线，
 方向键选格（Shift 扩选），Ctrl+方向键选线后用方向键按 1 像素微调，Delete 删线。
-网格始终用原图物理像素；显示缩放只在绘制和鼠标换算时出现一次。
+网格始终用表格框内的物理像素；画布显示整页（缩放后可自由看别处），框外压暗，
+页内偏移和显示缩放只在绘制和鼠标换算时出现一次。
 """
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QWidget
 
 from styles import tokens as T
@@ -15,7 +16,6 @@ from .model import CellMerge, GridSpec
 SELECT, ADD_HORIZONTAL, ADD_VERTICAL, DELETE = "select", "add_h", "add_v", "delete"
 LINE_HIT_DISTANCE = 6
 MIN_CELL = 3
-MAX_SCALE = 2.0
 ARROWS = (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down)
 
 
@@ -31,12 +31,14 @@ class GridCanvas(QWidget):
     cellSelected = Signal(int, int)
     selectionChanged = Signal()
 
-    def __init__(self, image, parent=None):
+    def __init__(self, image, bounds=None, parent=None):
+        """image 为整页；bounds 为这张表在页里的位置，省略即整页一张表。"""
         super().__init__(parent)
         self._pixmap = QPixmap.fromImage(image)
         self._pixmap.setDevicePixelRatio(1)
         self._scale = 1.0
-        self.grid = GridSpec((0, image.height()), (0, image.width()))
+        self.bounds = QRect(bounds) if bounds is not None else QRect(0, 0, image.width(), image.height())
+        self.grid = GridSpec((0, self.bounds.height()), (0, self.bounds.width()))
         self.tool = SELECT
         self._selected = set()
         self._anchor = None
@@ -55,12 +57,16 @@ class GridCanvas(QWidget):
         return self._scale
 
     def set_scale(self, scale):
-        self._scale = min(MAX_SCALE, scale)
+        self._scale = scale
         self.setFixedSize(self.sizeHint())
         self.update()
 
     def fit_scale(self, size):
         return min(size.width() / self._pixmap.width(), size.height() / self._pixmap.height())
+
+    def pans_at(self, point):
+        """表格框外是空白处，左键拖动看整页。"""
+        return not self.bounds.contains(round(point.x() / self._scale), round(point.y() / self._scale))
 
     def sizeHint(self):
         return QSize(round(self._pixmap.width() * self._scale), round(self._pixmap.height() * self._scale))
@@ -112,6 +118,14 @@ class GridCanvas(QWidget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.scale(self._scale, self._scale)
         painter.drawPixmap(0, 0, self._pixmap)
+        page = QRectF(self._pixmap.rect())
+        if QRectF(self.bounds) != page:
+            outside = QPainterPath()
+            outside.addRect(page)
+            inner = QPainterPath()
+            inner.addRect(QRectF(self.bounds))
+            painter.fillPath(outside.subtracted(inner), QColor(*T.TABLE_OUTSIDE))
+        painter.translate(self.bounds.topLeft())
         for merge in self.grid.merges:
             painter.fillRect(self._rect(merge.top, merge.left), _color("merge"))
         for cell in self._selected:
@@ -129,7 +143,7 @@ class GridCanvas(QWidget):
         for cell in self._selected:
             painter.drawRect(self._rect(*cell))
         inset = 0.75 / self._scale
-        painter.drawRect(QRectF(0, 0, self._pixmap.width(), self._pixmap.height()).adjusted(inset, inset, -inset, -inset))
+        painter.drawRect(QRectF(0, 0, self.bounds.width(), self.bounds.height()).adjusted(inset, inset, -inset, -inset))
         active = self._dragging or self._keyboard_line or self._hovered
         if active is not None:
             pen = QPen(_color("active"), 2.5)
@@ -157,11 +171,11 @@ class GridCanvas(QWidget):
         """线被合并区域挡住的部分不画、也不能点中。"""
         grid = self.grid
         if orientation == "h":
-            y, extent = grid.horizontal_lines[index], self._pixmap.width()
+            y, extent = grid.horizontal_lines[index], self.bounds.width()
             blocked = sorted((grid.vertical_lines[m.left], grid.vertical_lines[m.right])
                              for m in grid.merges if m.top < index < m.bottom)
         else:
-            x, extent = grid.vertical_lines[index], self._pixmap.height()
+            x, extent = grid.vertical_lines[index], self.bounds.height()
             blocked = sorted((grid.horizontal_lines[m.top], grid.horizontal_lines[m.bottom])
                              for m in grid.merges if m.left < index < m.right)
         spans, cursor = [], 0
@@ -182,7 +196,13 @@ class GridCanvas(QWidget):
     # ---- 鼠标 ----
 
     def _point(self, event):
-        return event.position().x() / self._scale, event.position().y() / self._scale
+        return self._to_grid(event.position())
+
+    def _to_grid(self, point):
+        return point.x() / self._scale - self.bounds.x(), point.y() / self._scale - self.bounds.y()
+
+    def _inside(self, x, y):
+        return 0 <= x < self.bounds.width() and 0 <= y < self.bounds.height()
 
     def _line_at(self, x, y):
         best = None
@@ -199,13 +219,14 @@ class GridCanvas(QWidget):
         return None
 
     def _cell_at(self, x, y):
-        if not (0 <= x < self._pixmap.width() and 0 <= y < self._pixmap.height()):
+        if not self._inside(x, y):
             return None
         return self.grid.cell_at(x, y)
 
     def mousePressEvent(self, event):
         x, y = self._point(event)
-        if event.button() != Qt.LeftButton:
+        # 框外点击不加线、不选格：那里是整页里别的内容，左键留给拖动看图（ui.zoom）。
+        if event.button() != Qt.LeftButton or not self._inside(x, y):
             return
         modifiers = event.modifiers()
         if modifiers & Qt.AltModifier or self.tool == DELETE:
@@ -266,7 +287,9 @@ class GridCanvas(QWidget):
         super().leaveEvent(event)
 
     def contextMenuEvent(self, event):
-        x, y = event.pos().x() / self._scale, event.pos().y() / self._scale
+        x, y = self._to_grid(QPointF(event.pos()))
+        if not self._inside(x, y):
+            return
         line = self._line_at(x, y)
         cell = self._cell_at(x, y)
         if cell is not None and self.grid.anchor(*cell) not in self._selected:
