@@ -144,6 +144,22 @@ def check_card(app):
     flush(app)
 
 
+def check_short(app):
+    # 选区很矮（比滚动视图默认最小 64px 还矮）：窗口和截图一样大，识别前后都没有上下白边。
+    pixmap = QPixmap(420, 30)
+    pixmap.fill(QColor("#1e2a4a"))
+    window, _document = open_window(app, pixmap)
+    for _stage in ("adopted", "status only"):
+        assert window.size() == pixmap.size() and window._canvas.size() == pixmap.size(), window.size()
+        image = window.grab().toImage()
+        for y in (0, image.height() - 1):
+            assert image.pixelColor(image.width() // 2, y).name() == "#1e2a4a", (y, image.pixelColor(image.width() // 2, y).name())
+        window._ocr.invalidate("图像内容已变化，原识别结果已失效；请重新识别。")
+        flush(app)
+    window.close()
+    flush(app)
+
+
 def check_flip(app):
     # 选区靠屏幕底边：下方连卡片放不下，整条翻到选区上方，卡片在主条外侧。
     screen = app.primaryScreen().availableGeometry()
@@ -209,13 +225,14 @@ def main():
     apply_theme(app, "light")
     with TemporaryDirectory() as folder, patch("settings.storage.data_directory", return_value=Path(folder)):
         check_card(app)
+        check_short(app)
         check_flip(app)
         check_corners(app)
         screenshots(app)
     print("PASS: card shows editable full text, layout/pending/F8, locate both ways with the screenshot")
     print("PASS: typing keys stay in the text box, Esc/re-OCR/re-layout confirm when edited, copy text ends capture")
     print("PASS: edited text survives annotating (no locate), unedited is invalidated; flips above when no room")
-    print("PASS: toolbar corners have no square backgrounds, soft shadow")
+    print("PASS: toolbar corners have no square backgrounds, soft shadow; short selections get no white bars")
     print(f"Screenshots: {OUTPUT}")
 
 
