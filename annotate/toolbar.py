@@ -2,7 +2,7 @@
 # FloatPanel 浮动工具条：截图窗口的标注工具切换 + 操作按钮。
 #
 # 布局（同 PixPin 3.5.5.1 默认工具条，从左到右）：
-#   [几何▾ 画笔▾ 线条▾ 文字 序号 马赛克 橡皮擦] | [撤销] | [长截图 识别 贴图 保存 关闭 复制] [更多]
+#   [几何▾ 画笔▾ 线条▾ 文字 序号 马赛克 橡皮擦] | [撤销] | [长截图 文字识别 表格识别 贴图 保存 关闭 复制]
 #
 # 约束（AGENTS.md）：
 # - 样式全部走 styles/theme.py，本文件不写任何 setStyleSheet；
@@ -16,7 +16,7 @@ import sys as _sys
 # 作为模块导入时此操作无害（路径已存在则重复）。
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QRegion
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget,
@@ -42,14 +42,6 @@ _GROUP_OF = {tool[0]: group for group, tools in TOOL_GROUPS for tool in tools}
 _TOOL_INFO = {tool[0]: tool[1:] for _group, tools in TOOL_GROUPS for tool in tools}
 # 合并按钮不改快捷键：Shift+1～9 仍是 PixPin 文档的几何、折线、箭头、序号、铅笔、荧光笔、马赛克、文字、橡皮擦。
 DIGIT_TOOLS = ("geo", "polyline", "arrow", "serial", "pencil", "highlight", "mosaic", "text", "eraser")
-# “更多”菜单：低频工具和操作，同 PixPin 放在最右。
-MORE_TOOLS: list[tuple[str, str, str]] = [
-    ("magnifier", "放大镜", "zoom-in"),
-]
-MORE_ACTIONS: list[tuple[str, str, str]] = [
-    ("pipette", "取色", "pipette"),
-    ("redo", "重做", "redo-2"),
-]
 
 
 def shortcut_tool(event):
@@ -80,7 +72,7 @@ _END_BUTTONS: list[tuple[str, str, str]] = [
     (CANCEL_ID, "关闭", "x"),
     (CONFIRM_ID, "复制截图", "copy"),
 ]
-_SHORTCUTS = {"undo": "Ctrl+Z", "redo": "Ctrl+Y", "save": "Ctrl+S", "ocr": "Shift+O", "longshot": "Ctrl+Alt+L",
+_SHORTCUTS = {"undo": "Ctrl+Z", "save": "Ctrl+S", "ocr": "Shift+O", "longshot": "Ctrl+Alt+L",
               CONFIRM_ID: "Ctrl+C / Enter", CANCEL_ID: "Esc"}
 _SHORTCUTS.update({tool: f"Shift+{i + 1}" for i, tool in enumerate(DIGIT_TOOLS) if tool in _TOOL_INFO})
 _SHORTCUTS["rect"] = _SHORTCUTS["ellipse"] = "Shift+1"
@@ -249,6 +241,8 @@ class FloatPanel(QWidget):
         layout.addWidget(self._make_separator())
         undo = self._make_button(*UNDO_ACTION)
         undo.setEnabled(False)
+        # 同 PixPin 默认工具条只放撤销；重做没有按钮，在提示里写上快捷键。
+        undo.setToolTip("撤销 (Ctrl+Z)，重做 (Ctrl+Y)")
         undo.clicked.connect(lambda: self.actionTriggered.emit("undo"))
         layout.addWidget(undo)
         layout.addWidget(self._make_separator())
@@ -259,23 +253,6 @@ class FloatPanel(QWidget):
             btn.clicked.connect(
                 lambda _checked=False, aid=action_id: self.actionTriggered.emit(aid)
             )
-
-        self._more = self._make_button("more", "更多", "ellipsis")
-        self._more.setObjectName("MoreTools")
-        self._more.setPopupMode(QToolButton.InstantPopup)
-        self._more_menu = round_corners(QMenu(self._more))
-        for tool_id, label, icon_name in MORE_TOOLS:
-            action = self._more_menu.addAction(label, lambda tid=tool_id: self._pick(tid))
-            self._menu_icons.append((action, icon_name))
-        self._more_menu.addSeparator()
-        for action_id, label, icon_name in MORE_ACTIONS:
-            action = self._more_menu.addAction(_menu_text(action_id, label),
-                                               lambda aid=action_id: self.actionTriggered.emit(aid))
-            self._menu_icons.append((action, icon_name))
-        self._more.setMenu(self._more_menu)
-        # 同 PixPin 悬停即展开；showMenu 会进入嵌套事件循环，不能在事件过滤器里同步调用。
-        self._more.installEventFilter(self)
-        layout.addWidget(self._more)
 
         self._build_ocr_card()
         self._root_layout.addWidget(self._ocr_feedback)
@@ -367,8 +344,6 @@ class FloatPanel(QWidget):
         if watched is self._options and event.type() == QEvent.Show and self._card_end is None:
             # 面板刚显示时布局要等下一轮事件循环才排好，先整块藏起来，交给展开动画露出。
             self._options.setMask(QRegion(0, 0, 1, 1))
-        if watched is self._more and event.type() == QEvent.Enter and not self._more_menu.isVisible():
-            QTimer.singleShot(0, self._more.showMenu)
         return super().eventFilter(watched, event)
 
     def _pick(self, tool_id):
@@ -621,7 +596,7 @@ class FloatPanel(QWidget):
         """画布换了工具后同步按钮选中态和组按钮图标，不发信号。"""
         group = _GROUP_OF.get(tool_id)
         if group is None:
-            # 更多菜单里的工具在主条上没有按钮，只取消其他工具的高亮。
+            # 切回 OCR 选字等无标注工具状态时，清除工具高亮。
             self._uncheck_tools()
             return
         if tool_id != self._variant[group]:

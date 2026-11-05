@@ -1,12 +1,23 @@
-# 取色器：在画布上取色，显示放大预览和颜色值，点击复制。
-# PixPin 行为：悬停显示取色放大镜，点击复制颜色代码。
+# 框选阶段的取色放大镜：跟随鼠标显示放大像素、坐标和颜色值。
+# PixPin 行为：悬停显示，按 C 复制颜色值，单按 Shift 切换颜色格式。
 
 from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QPixmap, QColor, QPainter, QPainterPath, QPen, QFont, QFontMetrics, QGuiApplication
 from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize
 from styles import tokens as T
 from settings import get_settings
-from .color_dialog import COLOR_FORMATS, format_color
+
+# 同 PixPin：默认 RGB，另有 Hex、HSV、HSL。
+COLOR_FORMATS = ("RGB", "Hex", "HSV", "HSL")
+
+
+def format_color(color, color_format):
+    values = {"Hex": color.name().upper(), "RGB": f"rgb({color.red()}, {color.green()}, {color.blue()})",
+              "HSV": f"hsv({max(0, color.hue())}, {round(color.saturationF() * 100)}%, {round(color.valueF() * 100)}%)",
+              "HSL": f"hsl({max(0, color.hslHue())}, {round(color.hslSaturationF() * 100)}%, "
+                     f"{round(color.lightnessF() * 100)}%)"}
+    return values[color_format]
+
 
 _PAD = 6
 _SWATCH = 12
@@ -19,7 +30,7 @@ _OFFSET = QPoint(10, 20)
 class PipettePopup(QWidget):
     """跟随鼠标的取色放大镜：上面是放大图，下面一行坐标、一行颜色，再是快捷键提示，全部居中。"""
 
-    def __init__(self, pixmap: QPixmap, grid: bool = False, hint: str = "", origin: QPoint = QPoint()):
+    def __init__(self, pixmap: QPixmap, hint: str = "", origin: QPoint = QPoint()):
         """origin 是这张图左上角的全局物理坐标，用来显示鼠标所在像素的屏幕坐标；
         hint 中用 " · " 分隔的每一项单独一行。"""
         super().__init__(
@@ -30,7 +41,6 @@ class PipettePopup(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._pm = pixmap
         self._image = pixmap.toImage()
-        self._grid = grid  # 放大镜模式：画像素网格线
         self._hints = [part for part in hint.split(" · ") if part]
         self._origin = QPoint(origin)
         self._crop = None
@@ -93,14 +103,13 @@ class PipettePopup(QWidget):
             p.setRenderHint(QPainter.Antialiasing, False)
             p.setRenderHint(QPainter.SmoothPixmapTransform, False)
             p.drawImage(target, self._crop)
-            if self._grid:
-                p.setPen(QPen(QColor(*T.PIXEL_GRID), 0))
-                for i in range(1, _COLUMNS):
-                    x = target.left() + i * _ZOOM
-                    p.drawLine(x, target.top(), x, target.bottom())
-                for i in range(1, _ROWS):
-                    y = target.top() + i * _ZOOM
-                    p.drawLine(target.left(), y, target.right(), y)
+            p.setPen(QPen(QColor(*T.PIXEL_GRID), 0))
+            for i in range(1, _COLUMNS):
+                x = target.left() + i * _ZOOM
+                p.drawLine(x, target.top(), x, target.bottom())
+            for i in range(1, _ROWS):
+                y = target.top() + i * _ZOOM
+                p.drawLine(target.left(), y, target.right(), y)
             cell = QRect(target.left() + self._center.x() * _ZOOM, target.top() + self._center.y() * _ZOOM,
                          _ZOOM, _ZOOM)
             # 中心像素：外白内黑两道框，任何底色上都看得见。

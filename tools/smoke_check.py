@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSettings, Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QMouseEvent, QPainter, QPixmap, QTextCursor
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QKeyEvent, QMouseEvent, QPainter, QPixmap, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -353,10 +353,7 @@ def all_tools():
             tool.on_right_press(QPointF(160, 100), c._undo)
         rendered = c.render_to_pixmap()
         assert not rendered.isNull()
-        if name == "magnifier":
-            assert c._loupe is not None and c._undo.count() == 0
-            assert len(c.scene().items()) == 1, "loupe modified the captured image"
-        elif name != "eraser":
+        if name != "eraser":
             assert c._undo.count() == 1, name
             c.undo()
             assert len(c.scene().items()) == 1, name
@@ -728,7 +725,7 @@ def toolbar_stability():
         w.show()
         flush()
         spots = set()
-        for tool in ("rect", "text", "arrow", "serial", "pencil", "mosaic", "eraser", "line", "magnifier", "rect"):
+        for tool in ("rect", "text", "arrow", "serial", "pencil", "mosaic", "eraser", "line", "rect"):
             w.select_tool(tool)
             flush()
             w._toolbar._slide.stop()
@@ -876,7 +873,7 @@ def canvas_mouse_events():
     w.show()
     flush()
     c = w._canvas
-    for name in ("rect", "ellipse", "arrow", "line", "pencil", "highlight", "mosaic", "magnifier", "serial"):
+    for name in ("rect", "ellipse", "arrow", "line", "pencil", "highlight", "mosaic", "serial"):
         w._on_tool(name)
         p1, p2 = c.mapFromScene(QPointF(30, 30)), c.mapFromScene(QPointF(120, 90))
         QTest.mouseMove(c.viewport(), p1)
@@ -887,20 +884,70 @@ def canvas_mouse_events():
         QTest.mouseRelease(c.viewport(), Qt.LeftButton, pos=p2)
         assert not errors, errors
         c.undo()
-    w.trigger_action("pipette")
-    from annotate.color_dialog import ColorDialog
-    with patch.object(ColorDialog, "exec", return_value=ColorDialog.Accepted):
-        QTest.mouseClick(c.viewport(), Qt.LeftButton, pos=c.mapFromScene(QPointF(400, 80)))
-    # 取色默认格式同 PixPin 为 RGB。
-    background = QColor(T.LIGHT["background"])
-    assert app.clipboard().text() == f"rgb({background.red()}, {background.green()}, {background.blue()})"
-    assert not c.pipette_active
     count = len(_open_pins)
     w._on_action("pin")
     assert len(_open_pins) == count + 1 and not w.isVisible()
     _open_pins[-1]._allow_close = True
     _open_pins[-1].close()
     w.deleteLater()
+
+
+def capture_loupe_leave():
+    # 鼠标移到工具条上时遮罩收不到移动事件，放大镜不能卡在工具条边缘。
+    from capture import ScreenshotFlow, DesktopCapture, ScreenFrame
+    flow = ScreenshotFlow(app)
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(0, 0, 800, 600), sample(800, 600), QPoint())])
+    with patch("capture.flow.capture_virtual_desktop", return_value=shot):
+        flow.start()
+        flush()
+        overlay = flow._win._windows[0]
+        overlay.loupe.pick(QPoint(100, 100), QPoint(100, 100))
+        assert overlay.loupe.isVisible()
+        QApplication.sendEvent(overlay, QEvent(QEvent.Leave))
+        assert not overlay.loupe.isVisible(), "capture loupe stayed after pointer left the overlay"
+        # 回到遮罩的真实移动事件必须重新显示放大镜，不能只验证手动 pick。
+        position = QPointF(120, 100)
+        move = QMouseEvent(QEvent.MouseMove, position, position,
+                           Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+        QApplication.sendEvent(overlay, move)
+        assert overlay.loupe.isVisible(), "capture loupe did not return with pointer"
+        previous_format = overlay.loupe._format
+        # QTest.keyClick 对修饰键会合成额外按键，直接发送一次按下/松开。
+        QApplication.sendEvent(overlay, QKeyEvent(QEvent.KeyPress, Qt.Key_Shift, Qt.ShiftModifier))
+        QApplication.sendEvent(overlay, QKeyEvent(QEvent.KeyRelease, Qt.Key_Shift, Qt.NoModifier))
+        assert overlay.loupe._format != previous_format
+        QTest.keyClick(overlay, Qt.Key_C)
+        assert app.clipboard().text() == overlay.loupe.color_text
+        assert flow._win is None, "copying the color must end capture"
+        flush()
+    flow.deleteLater()
+
+
+def toolbar_keyboard_redo():
+    from annotate import AnnotationWindow
+    window = AnnotationWindow(sample(640, 320), QPoint())
+    window.show()
+    window.select_tool("rect")
+    flush()
+    canvas, toolbar = window._canvas, window._toolbar
+    assert "undo" in toolbar._buttons
+    assert not {"redo", "more", "pipette", "magnifier"}.intersection(toolbar._buttons)
+    assert "Ctrl+Y" in toolbar._buttons["undo"].toolTip()
+    canvas._tool.on_press(canvas.scene(), QPointF(30, 30), canvas._undo)
+    canvas._tool.on_release(QPointF(170, 90), canvas._undo)
+    assert canvas._undo.index() == 1
+    # 撤销按钮是唯一历史按钮；键盘重做仍须走窗口的事件分发。
+    QTest.mouseClick(toolbar._buttons["undo"], Qt.LeftButton)
+    assert canvas._undo.index() == 0 and canvas._undo.canRedo()
+    QTest.keyClick(canvas.viewport(), Qt.Key_Y, Qt.ControlModifier)
+    assert canvas._undo.index() == 1 and not canvas._undo.canRedo()
+    QTest.keyClick(canvas.viewport(), Qt.Key_Z, Qt.ControlModifier)
+    assert canvas._undo.index() == 0
+    QTest.keyClick(toolbar, Qt.Key_Y, Qt.ControlModifier)
+    assert canvas._undo.index() == 1
+    canvas._undo.setClean()
+    window.close()
+    flush()
 
 
 def drawing_interaction():
@@ -1120,7 +1167,7 @@ def ocr_confirm_selection():
 
 
 def render_windows():
-    from annotate import AnnotationWindow, ColorDialog
+    from annotate import AnnotationWindow
     from ocr import OCRResult, OCRResultDialog
     from capture.longshot import LongShotBar
     from ui import MessageDialog
@@ -1133,7 +1180,6 @@ def render_windows():
                    "settings": SettingsDialog(),
                    "ocr": OCRResultDialog([OCRResult(QRect(0, 0, 40, 20), "合成识别结果 Sample 123", 0.99)]),
                    "pin": PinWindow(sample(400, 200, 2)), "longshot": LongShotBar(),
-                   "color": ColorDialog(QColor(T.ANNOTATION_COLORS[0])),
                    "message": MessageDialog(None, "达到长截图上限", "已达到 29000 像素的拼接上限，可使用当前结果。",
                                             checkbox_text="下次不再提示")}
         for name, window in windows.items():
@@ -1161,7 +1207,7 @@ if __name__ == "__main__":
               text_undo, serial_undo, remove_undo_order, fresh_mark_color, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,
-              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
+              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, capture_loupe_leave, toolbar_keyboard_redo, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)

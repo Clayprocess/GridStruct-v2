@@ -24,7 +24,6 @@ class ScreenShotWindow(QObject):
     selectionChanged = Signal(QRect)
     actionRequested = Signal(str)
     cancelled = Signal()
-    pipettePicked = Signal(str)
 
     def __init__(self, screenshot, virtual_geo=None, keep_open=False):
         super().__init__()
@@ -53,7 +52,6 @@ class ScreenShotWindow(QObject):
         self._pointer_pos = self._manager.cursor_position()
         self._windows = []
         self._keyboard_windows = []
-        self._pipette_mode = False
         self._shift_alone = False
         self._size_editor = None
         self._build_windows()
@@ -254,12 +252,6 @@ class ScreenShotWindow(QObject):
         # 按下尚未跨屏抓取鼠标，事件坐标可保留队列中的起点而不会被最新光标覆盖。
         pos = event.globalPosition().toPoint()
         self._shift_alone = False
-        if self._pipette_mode:
-            window = next(window for window in self._windows if window.frame.geometry.contains(pos))
-            color = window.loupe.pick(pos - window.frame.geometry.topLeft(), pos)
-            self._pipette_mode = False
-            self.pipettePicked.emit(color.name())
-            return
         previous, dirty = QRect(self._sel), self._hover_region()
         self._pending_snap = QRect()
         self._pointer_pos = pos
@@ -298,8 +290,6 @@ class ScreenShotWindow(QObject):
                 window.loupe.pick(pos - window.frame.geometry.topLeft(), pos)
             else:
                 window.loupe.hide()
-        if self._pipette_mode:
-            return
         if not self._pending_snap.isNull():
             if (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
                 self.update(dirty | self._hover_region())
@@ -399,7 +389,7 @@ class ScreenShotWindow(QObject):
             return
         key, modifiers = event.key(), event.modifiers()
         if key == Qt.Key_Escape:
-            # 框选阶段还没有标注，退出不会丢东西，不打断；取色中也一样直接退出。
+            # 框选阶段还没有标注，退出不会丢东西，不打断。
             self.close()
         elif key in (Qt.Key_Return, Qt.Key_Enter) and not self._sel.isNull():
             self._accept_selection()
@@ -480,13 +470,9 @@ class ScreenShotWindow(QObject):
 
     def wheel(self, event):
         # 同 PixPin：未框选时滚轮在吸附到的元素和它的父/子元素之间切换。
-        if self._sel.isNull() and self._drag_mode is None and not self._pipette_mode:
+        if self._sel.isNull() and self._drag_mode is None:
             self._snap.step_level(1 if event.angleDelta().y() > 0 else -1)
 
-    def start_pipette(self):
-        self._pipette_mode = True
-        for window in self._windows:
-            window.setCursor(Qt.CrossCursor)
     def _handles(self):
         """8 手柄：返回 [(index, QRect)]，index 0..7 从左上顺时针。"""
         s = self._sel
@@ -573,7 +559,7 @@ class _ScreenOverlay(QWidget):
         self.setScreen(frame.screen)
         self.setGeometry(frame.geometry)
         from annotate import PipettePopup
-        self.loupe = PipettePopup(frame.pixmap, grid=True, hint="Shift: 切换颜色格式 · C: 复制颜色值",
+        self.loupe = PipettePopup(frame.pixmap, hint="Shift: 切换颜色格式 · C: 复制颜色值",
                                   origin=frame.physical_origin)
 
     def hover_region(self):
@@ -649,6 +635,12 @@ class _ScreenOverlay(QWidget):
 
     def mouseDoubleClickEvent(self, event):
         self.controller.mouse_double_click(event)
+
+    def leaveEvent(self, event):
+        # 鼠标移到工具条、工具菜单、选项面板等其他窗口上时，遮罩收不到移动事件，
+        # 放大镜会停在离开前的位置；同 PixPin，离开遮罩就收起，回来时由 mouse_move 再显示。
+        self.loupe.hide()
+        super().leaveEvent(event)
 
     def keyPressEvent(self, event):
         self.controller.key_press(event, self)
