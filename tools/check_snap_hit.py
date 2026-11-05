@@ -13,6 +13,7 @@
 from pathlib import Path
 import ctypes
 import sys
+import threading
 import time
 from unittest.mock import patch
 
@@ -24,8 +25,9 @@ import capture.snap as snap
 
 class FakeAccessible(snap._Accessibility):
     """objects: {id: (rect, [子对象 id 或 ("item", 子元素编号, rect)])}，1 是窗口对象。
-    deepest=True 模拟 Chrome：accHitTest 跳过中间层，直接返回最深的对象；也可只给一组会跳层的对象 id。
-    broken: accLocation 会失败的对象 id。"""
+    deepest=True 模拟 Chrome：accHitTest 跳过中间层，直接返回最深的对象；
+    也可给 {对象 id: 它命中时直接返回的对象 id}，只让某一层跳层。
+    broken: accLocation 会失败（抛 OSError）的对象 id。parent_failures: 前几次 get_accParent 失败。"""
 
     def __init__(self, objects, deepest=False, broken=()):
         self._ctypes = ctypes
@@ -43,6 +45,7 @@ class FakeAccessible(snap._Accessibility):
         self.acquired = []
         self.calls = 0
         self.parent_calls = 0
+        self.parent_failures = 0
         self.opened = 0
         fake = self
 
@@ -76,7 +79,9 @@ class FakeAccessible(snap._Accessibility):
                         variant.vt, variant.value.lVal = snap._Accessibility._VT_I4, child[1]
                         return 0
                 elif self.objects[child][0].contains(x, y):
-                    while (self.deepest is True or node in (self.deepest or ())) and self.objects[child][1]:
+                    if isinstance(self.deepest, dict) and node in self.deepest:
+                        child = self.deepest[node]
+                    while self.deepest is True and self.objects[child][1]:
                         inner = next((c for c in self.objects[child][1] if not isinstance(c, tuple)
                                       and self.objects[c][0].contains(x, y)), None)
                         if inner is None:
@@ -90,6 +95,9 @@ class FakeAccessible(snap._Accessibility):
             return 0
         if index == 7:  # get_accParent
             self.parent_calls += 1
+            if self.parent_failures:
+                self.parent_failures -= 1
+                raise OSError(-2147467259, "E_FAIL")
             parent = self.parents.get(node)
             args[0]._obj.value = None if parent is None else 1000 + parent
             if parent is not None:
@@ -101,7 +109,7 @@ class FakeAccessible(snap._Accessibility):
             return 0
         if index == 22:  # accLocation
             if node in self.broken:
-                return -2147467259  # E_FAIL
+                raise OSError(-2147467259, "E_FAIL")  # 真实 _call 把负 HRESULT 转成 OSError
             child = args[4].value.lVal
             rect = self.objects[node][0] if child == 0 else next(
                 c[2] for c in self.objects[node][1] if isinstance(c, tuple) and c[1] == child)
@@ -178,14 +186,23 @@ def check_hit_path():
     parents = provider.parent_calls
     assert full_path(provider, 220, 155) == full
     assert provider.parent_calls == parents, "同一元素补过祖先后应直接用缓存"
+    assert provider.hit_path(1, 220, 155) == full, "补过父链的元素第一段就给完整路径，静止刷新不退回短路径"
     provider.hit_path(1, 285, 175)
     assert provider.ancestors(lambda: True) is None, "有新请求时应放弃补祖先"
     assert full_path(provider, 50, 400) == [BODY]
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
     # 只有窗口一层跳到单元格，单元格往下正常逐层命中：单元格之上的行、表格也要补回。
-    provider = FakeAccessible(page(), deepest={1})
-    assert full_path(provider, 220, 155) == full
+    provider = FakeAccessible(page(), deepest={1: 8})
+    assert provider.hit_path(1, 220, 155) == [CELL, TEXT]
+    assert provider.ancestors(lambda: False) == full
+    # 取父对象偶发失败：这次先用已有路径，不缓存，下次重试能补全。
+    provider = FakeAccessible(page(), deepest=True)
+    provider.parent_failures = 1
+    assert full_path(provider, 220, 155) == [TEXT]
+    assert full_path(provider, 220, 155) == full, "补链失败后应重试"
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
     # 单元格和文字之间有一层同样大小的包装：不能因为矩形重复就停止向上。
     wrapped = page()
     wrapped[8], wrapped[10] = (CELL, [10]), (TEXT, [9])
@@ -211,10 +228,17 @@ def check_two_phase():
     original = (snap._IS_WIN, snap._try_init_msaa, snap._win32_api, snap._snapshot_windows)
     snap._IS_WIN, snap._win32_api, snap._try_init_msaa = True, FakeUser32, lambda: provider
     snap._snapshot_windows = lambda _ignored: [(7, WINDOW)]
-    detector = snap.RegionDetector(only_window=False)
-    results = []
-    detector.regionDetected.connect(results.append)
+    detectors = []
+
+    def start():
+        detector = snap.RegionDetector(only_window=False)
+        detectors.append(detector)
+        results = []
+        detector.regionDetected.connect(results.append)
+        return detector, results
+
     try:
+        detector, results = start()
         detector.detect(QPoint(220, 155))
         settle(app, detector)
         assert results[-1] == TEXT, results
@@ -223,8 +247,30 @@ def check_two_phase():
             assert results[-1] == expected, (expected, results)
         assert (7, WINDOW.getRect()) not in detector._slow
         print("PASS: two-phase query shows the hit first, then the wheel reaches the whole table")
+        # 补链还没回来时滚轮已切到窗口：补全后仍选中窗口，不能跳回单元格。
+        provider = FakeAccessible(page(), deepest=True)
+        gate = threading.Event()
+        walk = provider.ancestors
+        provider.ancestors = lambda interrupted: (gate.wait(3), walk(interrupted))[1]
+        detector, results = start()
+        detector.detect(QPoint(220, 155))
+        deadline = time.monotonic() + 3
+        while results[-1] != TEXT and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert results[-1] == TEXT, results
+        detector.step_level(1)
+        assert results[-1] == WINDOW, results
+        gate.set()
+        settle(app, detector)
+        assert detector._chain[-1] == WINDOW and len(detector._chain) == 6, detector._chain
+        assert results[-1] == WINDOW, ("补链完成不应改变已选层级", results)
+        detector.step_level(-1)
+        assert results[-1] == BODY, results
+        print("PASS: completing the chain keeps the level the wheel already selected")
     finally:
-        detector.shutdown()
+        for detector in detectors:
+            detector.shutdown()
         snap._IS_WIN, snap._try_init_msaa, snap._win32_api, snap._snapshot_windows = original
 
 

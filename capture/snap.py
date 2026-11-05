@@ -220,9 +220,13 @@ class RegionDetector(QObject):
         window_rect = QRect(*key[1])
         chain = [] if key in self._slow or _hung(key[0]) else self._element_chain(key, window_rect, x, y)
         chain.append(window_rect)
-        # 换到另一个元素上时回到最内层，在同一元素内移动保持滚轮选的层级。
+        # 换到另一个元素上时回到最内层；在同一元素内移动、或父链补全后，保持滚轮选中的那个框。
         if not self._chain or chain[0] != self._chain[0]:
             self._level = 0
+        else:
+            selected = self._chain[min(self._level, len(self._chain) - 1)]
+            if selected in chain:
+                self._level = chain.index(selected)
         self._chain = chain
         self._shown_key = key
         rect = chain[min(self._level, len(chain) - 1)]
@@ -555,11 +559,8 @@ class _Accessibility:
         if self._deep is None:
             return None
         node, x, y, stop, key, rects = self._deep
-        if key in self._walks:
-            self._drop_deep()
-            return self._walks[key]
         ctypes = self._ctypes
-        found, current = [], node
+        found, current, complete = [], node, True
         try:
             for _ in range(self._MAX_DEPTH):
                 if interrupted():
@@ -579,14 +580,15 @@ class _Accessibility:
                     break
                 found.append(rect)
         except OSError:
-            pass  # 某层不支持取父对象：保留已经补到的祖先。
+            complete = False  # 某层取父对象失败：先用已经补到的祖先，下次再重试，不缓存。
         finally:
             if current is not node:
                 self._release(current)
             self._drop_deep()
         unique = dict.fromkeys(r.getRect() for r in found + rects)
         full = sorted((QRect(*r) for r in unique), key=lambda r: r.width() * r.height(), reverse=True)
-        self._walks[key] = full
+        if complete:
+            self._walks[key] = full
         return full
 
     def hit_path(self, hwnd, x, y):
@@ -630,7 +632,11 @@ class _Accessibility:
                     break
             if descended:
                 key = (hwnd, tuple(r.getRect() for r in rects))
-                self._deep, accessible = (accessible, x, y, root_rect, key, list(rects)), root
+                if key in self._walks:
+                    # 补过父链的元素直接给完整路径，静止刷新时不会先退回短路径。
+                    rects = self._walks[key]
+                else:
+                    self._deep, accessible = (accessible, x, y, root_rect, key, list(rects)), root
         except OSError:
             # 某层不支持命中或定位：保留已经得到的外层路径。窗口对象本身失效（窗口已关）就丢掉缓存。
             if accessible is root and not rects:
