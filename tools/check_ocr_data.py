@@ -224,9 +224,12 @@ def annotation_transfer():
         tool.on_press(fresh._canvas.scene(), QPointF(10, 80), fresh._canvas._undo)
         tool.on_move(QPointF(100, 130))
         tool.on_release(QPointF(100, 130), fresh._canvas._undo)
-        assert fresh._ocr.document is None and fresh._text_layer is None
+        # 改过的全文标注后仍留着可复制，只是不再和截图定位（Clay 2026-11-05 定）；重新识别前先确认。
+        assert fresh._ocr.document is document and fresh._text_layer is None
         assert target._document is document
-        fresh.trigger_action("ocr")
+        with patch("annotate.window.ask_confirmation", return_value=True) as asked:
+            fresh.trigger_action("ocr")
+            assert asked.called
         obsolete = fresh._ocr._request
         fresh._canvas.undo()
         assert obsolete.cancelled.is_set() and not fresh._ocr.running

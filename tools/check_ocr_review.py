@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 from styles import apply_theme, tokens as T
 from ocr import OCRDocument, OCRResult, OCRResultDialog
-from ocr.dialog import find_spans, span_at
+from ocr.editor import find_spans, span_at
 
 OUTPUT = Path(__file__).resolve().parents[1] / ".scratch" / "ocr-review"
 
@@ -27,7 +27,7 @@ def flush(app):
 
 
 def span_of(dialog, identifier):
-    return next(span for span in dialog._spans if span[2].item_id == identifier)
+    return next(span for span in dialog._text.spans if span[2].item_id == identifier)
 
 
 def check_spans():
@@ -84,12 +84,12 @@ def main():
             assert document.layout == "paragraph" and first._layout_buttons["paragraph"].isChecked()
             assert first._text.toPlainText() == document.text()
             assert document.text().startswith("Invoice 2026 Amount: 12O.OO\nTax: 6.00"), document.text()
-            assert len(first._spans) == 4
+            assert len(first._text.spans) == 4
             # 低置信度：波浪线标记 + 计数，F8 跳过去并在原图高亮那一行。
             assert first._pending.text() == "低置信度 1 处" and first._pending.isVisible()
             assert any(selection.format.underlineStyle() == QTextCharFormat.WaveUnderline
                        for selection in first._text.extraSelections())
-            first._next_pending()
+            first._text.next_pending()
             start, end, _item = span_of(first, identifier)
             assert first._text.textCursor().position() == start
             assert document.focused_ids == (identifier,)
@@ -112,9 +112,9 @@ def main():
             assert "Amount: 120.00" in document.draft and second._text.toPlainText() == document.draft
             assert document.results[1].text == "Amount: 12O.OO"
             assert next(item for item in first._layer.childItems() if identifier in item._ids).toPlainText() == "Amount: 12O.OO"
-            assert first._pending_spans() == [] and not first._pending.isVisible()
+            assert first._text.pending_spans() == [] and not first._pending.isVisible()
             assert first._status.text().startswith("已修改")
-            assert len(first._spans) == 3
+            assert len(first._text.spans) == 3
             first._copy_all()
             assert QApplication.clipboard().text() == document.draft
             first._no_spaces.setChecked(True)
@@ -122,18 +122,18 @@ def main():
             assert " " not in QApplication.clipboard().text()
             first._no_spaces.setChecked(False)
             # 改过再换排版要确认：取消则什么都不变，确认则按识别结果重排、记住选择。
-            with patch("ocr.dialog.ask_confirmation", return_value=False) as asked:
+            with patch("ocr.editor.ask_confirmation", return_value=False) as asked:
                 first._layout_buttons["lines"].setChecked(True)
                 assert asked.called and first._layout_buttons["paragraph"].isChecked()
                 assert document.layout == "paragraph" and "Amount: 120.00" in document.text()
-            with patch("ocr.dialog.ask_confirmation", return_value=True):
+            with patch("ocr.editor.ask_confirmation", return_value=True):
                 first._layout_buttons["lines"].setChecked(True)
             assert document.layout == "lines" and document.draft is None
             assert second._layout_buttons["lines"].isChecked() and second._text.toPlainText() == document.text()
             assert "Invoice 2026\nAmount: 12O.OO\nTax: 6.00" in document.text()
             assert settings.value("ocr/layout") == "lines"
             # 没改过时换排版不用确认。
-            with patch("ocr.dialog.ask_confirmation", side_effect=AssertionError("asked without edits")):
+            with patch("ocr.editor.ask_confirmation", side_effect=AssertionError("asked without edits")):
                 first._layout_buttons["single"].setChecked(True)
                 assert "\n" not in document.text()
                 first._layout_buttons["paragraph"].setChecked(True)
@@ -171,7 +171,7 @@ def main():
                 dialog = OCRResultDialog(shown)
                 dialog.show()
                 flush(app)
-                dialog._next_pending()
+                dialog._text.next_pending()
                 flush(app)
                 assert dialog.grab().save(str(OUTPUT / f"review-{mode}.png"))
                 dialog.close()
@@ -181,7 +181,7 @@ def main():
                                     OCRResult(QRect(10, 35, 90, 20), "第二行", .4)], image)
             dialog = OCRResultDialog(adjacent)
             assert dialog._text.toPlainText() == "第一行第二行"
-            dialog._next_pending()
+            dialog._text.next_pending()
             assert adjacent.focused_ids == (adjacent.results[1].item_id,)
             dialog.deleteLater()
             legacy = OCRResultDialog([OCRResult(QRect(0, 0, 50, 20), "legacy", .9)])

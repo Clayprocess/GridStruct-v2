@@ -1,81 +1,22 @@
 """文字识别窗口：左边原图可缩放、滑选，右边是一份可直接修改的全文（复核窗口方案 A，Clay 2026-11-05 定）。
 
 布局与表格识别窗口一致：上方工具行、中间原图对照、底部状态 + 主操作。
-改字只改这份全文，不回写原图文字层（文字层透明，改了也看不见）。上方切换的是排版，不是视图。
-全文和原图双向定位：光标所在的识别文字在原图上高亮，点原图上的字，光标跳到全文里对应位置；
-低置信度的文字标波浪线，F8 逐处跳转。定位靠在全文里依次找回每条识别文字，改过的那条找不到就不再定位、不再标记。
+上方切换的是排版，不是视图。全文的编辑、双向定位与低置信度标记在 editor.py，截图里的识别卡片也用它。
 """
 
-from difflib import SequenceMatcher
-
-from PySide6.QtCore import QPointF, QSignalBlocker, Qt, Slot
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPixmap, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor, QTransform
+from PySide6.QtCore import QPointF, Qt, Slot
+from PySide6.QtGui import QKeySequence, QPainter, QPixmap, QShortcut, QTransform
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QFrame, QGraphicsScene, QGraphicsTextItem, QGraphicsView,
-    QHBoxLayout, QLabel, QPushButton, QSplitter, QTextEdit, QToolButton, QVBoxLayout,
+    QHBoxLayout, QLabel, QPushButton, QSplitter, QToolButton, QVBoxLayout,
 )
 from styles import tokens as T
-from ui import BaseDialog, PreviewZoom, ask_confirmation, show_toast, standard_window, topmost_button
+from ui import BaseDialog, PreviewZoom, show_toast, standard_window, topmost_button
 from ui.motion import SelectionPill
+from .editor import OCRTextEdit
 from .layer import add_text_layer
-from .layout import LAYOUTS, saved_layout
+from .layout import LAYOUTS
 from .model import OCRDocument
-
-# 这里只提示模型分数，不代表人工复核进度。
-_PENDING_SCORE = .8
-
-
-def _utf16(text):
-    """Python 下标转 QTextDocument 位置：后者按 UTF-16 计数，生僻字（扩展区）占两位。"""
-    if all(ord(ch) <= 0xFFFF for ch in text):
-        return lambda index: index
-    offsets, total = [], 0
-    for ch in text:
-        offsets.append(total)
-        total += 2 if ord(ch) > 0xFFFF else 1
-    offsets.append(total)
-    return offsets.__getitem__
-
-
-def find_spans(text, original, results):
-    """把每条识别文字在全文里的位置找出来，返回 [(起, 止, 条目)]（QTextDocument 位置）。
-
-    original 是排版整理出的原文，条目在里面按阅读顺序依次出现，位置是确定的；再按改动把位置
-    映射到当前全文：只有整条落在没改过的片段里才保留，改过、删掉的那条不再定位。
-    不在全文里直接搜字，是因为重复的字（两处“100”）会被改过的那条占走。
-    """
-    base, start = [], 0
-    for item in results:
-        needle = item.text.strip()
-        found = original.find(needle, start) if needle else -1
-        if found >= 0:
-            base.append((found, found + len(needle), item))
-            start = found + len(needle)
-    if text != original:
-        # 改动通常集中在一处：先去掉相同的头尾，只对中间做比对，长文逐字输入也不卡。
-        head = 0
-        while head < min(len(text), len(original)) and text[head] == original[head]:
-            head += 1
-        tail = 0
-        while tail < min(len(text), len(original)) - head and text[-1 - tail] == original[-1 - tail]:
-            tail += 1
-        blocks = [(0, 0, head), (len(original) - tail, len(text) - tail, tail)]
-        matcher = SequenceMatcher(None, original[head:len(original) - tail], text[head:len(text) - tail], autojunk=False)
-        blocks += [(a + head, b + head, size) for a, b, size in matcher.get_matching_blocks() if size]
-        kept = []
-        for begin, end, item in base:
-            block = next((block for block in blocks if block[0] <= begin and end <= block[0] + block[2]), None)
-            if block is not None:
-                kept.append((begin + block[1] - block[0], end + block[1] - block[0], item))
-        base = kept
-    position = _utf16(text)
-    return [(position(begin), position(end), item) for begin, end, item in base]
-
-
-def span_at(spans, position):
-    """光标所在的条目：中文合行时前一条的终点就是下一条的起点，起点优先归下一条。"""
-    return next((span for span in spans if span[0] <= position < span[1]), None) \
-        or next((span for span in spans if span[1] == position), None)
 
 
 class _ImagePreview(QGraphicsView):
@@ -125,9 +66,6 @@ class OCRResultDialog(BaseDialog):
         self.resize(1100, 680)
         self._mode = QApplication.instance().property("theme_mode") or "light"
         self._layer = None
-        self._spans = []
-        # 两边互相定位时，别让对方的回应再反过来挪自己。
-        self._syncing = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(T.SPACE_3, T.SPACE_3, T.SPACE_3, T.SPACE_3)
@@ -139,11 +77,8 @@ class OCRResultDialog(BaseDialog):
         self._preview.setScene(QGraphicsScene(self._preview))
         self._zoom = PreviewZoom(self._preview, self._preview, self)
 
-        self._text = QTextEdit()
-        self._text.setObjectName("OCRFullText")
-        self._text.setAcceptRichText(False)
-        self._text.textChanged.connect(self._edited)
-        self._text.cursorPositionChanged.connect(self._cursor_moved)
+        self._text = OCRTextEdit(self._mode)
+        self._text.marksChanged.connect(self._update_status)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -153,7 +88,7 @@ class OCRResultDialog(BaseDialog):
         layout.addWidget(splitter, 1)
         layout.addLayout(self._build_footer())
 
-        self._next_shortcut = QShortcut(QKeySequence("F8"), self, self._next_pending)
+        self._next_shortcut = QShortcut(QKeySequence("F8"), self, self._text.next_pending)
         QShortcut(QKeySequence("Ctrl+Shift+C"), self, self._copy_all)
         self._load(document, pixmap)
 
@@ -169,13 +104,10 @@ class OCRResultDialog(BaseDialog):
             self._zoom.fit()
         self._preview.setVisible(pixmap is not None)
         self._to_table.setEnabled(pixmap is not None)
-        # 没改过的结果按上次选的排版打开；改过的保持改的时候那种排版。
-        if document.draft is None:
-            document.set_layout(saved_layout(self._settings))
-        self._layout_buttons[document.layout].setChecked(True)
-        document.changed.connect(self._refresh)
-        document.focused.connect(self._focused)
-        self._refresh()
+        document.changed.connect(self._show_layout)
+        document.focused.connect(self._scroll_preview)
+        self._text.set_document(document)
+        self._show_layout()
 
     # ---- 构造 ----
 
@@ -225,7 +157,7 @@ class OCRResultDialog(BaseDialog):
         self._next = QPushButton("下一处")
         self._next.setProperty("class", "ghost")
         self._next.setToolTip("跳到下一处低置信度文字 (F8)")
-        self._next.clicked.connect(self._next_pending)
+        self._next.clicked.connect(self._text.next_pending)
         row.addWidget(self._pending)
         row.addWidget(self._next)
         row.addSpacing(T.SPACE_2)
@@ -241,79 +173,17 @@ class OCRResultDialog(BaseDialog):
         row.addWidget(self._copy)
         return row
 
-    # ---- 排版与全文 ----
+    # ---- 排版与状态 ----
 
     def _choose_layout(self, mode):
-        document = self._document
-        if mode == document.layout:
-            return
-        if document.draft is not None and not ask_confirmation(
-                self, "重新排版", "重新排版会按识别结果重新整理全文，你改过的文字会丢掉。", confirm_text="重新排版"):
-            self._layout_buttons[document.layout].setChecked(True)
-            return
-        self._settings.setValue("ocr/layout", mode)
-        document.set_layout(mode)
+        if not self._text.choose_layout(mode):
+            self._show_layout()
 
     @Slot()
-    def _refresh(self):
-        """文档变了（换排版、别的窗口改了同一份全文）：编辑框跟上，光标尽量留在原处。"""
-        text = self._document.text()
-        if self._text.toPlainText() != text:
-            position = self._text.textCursor().position()
-            with QSignalBlocker(self._text):
-                self._text.setPlainText(text)
-                self._format_blocks()
-                cursor = self._text.textCursor()
-                cursor.setPosition(min(position, len(self._text.toPlainText())))
-                self._text.setTextCursor(cursor)
+    def _show_layout(self):
         self._layout_buttons[self._document.layout].setChecked(True)
-        self._update_marks()
 
-    def _format_blocks(self):
-        # 行距放宽一点便于对照；“段落”排版一段只有一行，折行后看不出分段，段后再留点空。不进撤销记录。
-        document = self._text.document()
-        block = QTextBlockFormat()
-        block.setLineHeight(140, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
-        block.setBottomMargin(T.SPACE_2 if self._document.layout == "paragraph" else 0)
-        document.setUndoRedoEnabled(False)
-        cursor = QTextCursor(document)
-        cursor.select(QTextCursor.Document)
-        cursor.mergeBlockFormat(block)
-        document.setUndoRedoEnabled(True)
-
-    def _edited(self):
-        self._document.set_draft(self._text.toPlainText())
-        self._update_marks()
-
-    def _update_marks(self):
-        self._spans = find_spans(self._text.toPlainText(), self._document.recognized_text(), self._document.results)
-        self._paint_marks()
-        self._update_status()
-
-    def _paint_marks(self):
-        theme = T.THEMES[self._mode]
-        pending = QTextCharFormat()
-        pending.setBackground(QColor(theme["pending"]))
-        pending.setUnderlineStyle(QTextCharFormat.WaveUnderline)
-        pending.setUnderlineColor(QColor(theme["pending_line"]))
-        focused = QTextCharFormat()
-        focused.setBackground(QColor(*T.OCR_HOVER))
-        wanted = set(self._document.focused_ids)
-        selections = []
-        for start, end, item in self._spans:
-            for style, show in ((pending, item.score < _PENDING_SCORE), (focused, item.item_id in wanted)):
-                if show:
-                    selection = QTextEdit.ExtraSelection()
-                    selection.cursor = QTextCursor(self._text.document())
-                    selection.cursor.setPosition(start)
-                    selection.cursor.setPosition(end, QTextCursor.KeepAnchor)
-                    selection.format = style
-                    selections.append(selection)
-        self._text.setExtraSelections(selections)
-
-    def _pending_spans(self):
-        return [span for span in self._spans if span[2].score < _PENDING_SCORE]
-
+    @Slot()
     def _update_status(self):
         if not self._document:
             message = "未检测到文字"
@@ -322,7 +192,7 @@ class OCRResultDialog(BaseDialog):
             if self._layer is not None:
                 message += " · 点原图上的字，定位到这里"
         self._status.setText(message)
-        count = len(self._pending_spans())
+        count = len(self._text.pending_spans())
         self._pending.setText(f"低置信度 {count} 处")
         for widget in (self._pending, self._next):
             widget.setVisible(count > 0)
@@ -330,29 +200,9 @@ class OCRResultDialog(BaseDialog):
 
     # ---- 联动 ----
 
-    def _cursor_moved(self):
-        if self._syncing:
-            return
-        position = self._text.textCursor().position()
-        span = span_at(self._spans, position)
-        if span is not None and (span[2].item_id,) != self._document.focused_ids:
-            self._syncing = True
-            self._document.focus((span[2].item_id,))
-            self._syncing = False
-
     @Slot(object)
-    def _focused(self, ids):
+    def _scroll_preview(self, ids):
         wanted = set(ids)
-        self._paint_marks()
-        span = next((span for span in self._spans if span[2].item_id in wanted), None)
-        # 从原图点过来的：光标挪到全文里那处，不抢键盘焦点。
-        if span is not None and not self._syncing:
-            self._syncing = True
-            cursor = self._text.textCursor()
-            cursor.setPosition(span[0])
-            self._text.setTextCursor(cursor)
-            self._text.ensureCursorVisible()
-            self._syncing = False
         if self._layer is not None:
             visible = self._preview.mapToScene(self._preview.viewport().rect()).boundingRect()
             for item in self._layer.childItems():
@@ -362,18 +212,6 @@ class OCRResultDialog(BaseDialog):
                 if wanted.intersection(item._ids) and not visible.intersects(rect):
                     rect.setWidth(min(rect.width(), visible.width() / 2))
                     self._preview.ensureVisible(rect, 20, 20)
-
-    def _next_pending(self):
-        spans = self._pending_spans()
-        if not spans:
-            return
-        position = self._text.textCursor().position()
-        start = next((span[0] for span in spans if span[0] > position), spans[0][0])
-        cursor = self._text.textCursor()
-        cursor.setPosition(start)
-        self._text.setTextCursor(cursor)
-        self._text.ensureCursorVisible()
-        self._text.setFocus()
 
     # ---- 输出 ----
 

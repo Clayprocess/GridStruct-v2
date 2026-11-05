@@ -17,8 +17,10 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QRegion
-from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QMenu, QToolButton, QWidget, QLabel
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QRegion
+from PySide6.QtWidgets import (
+    QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget,
+)
 
 from styles import tokens as T
 from settings import get_settings
@@ -213,6 +215,7 @@ class FloatPanel(QWidget):
         self._button_layout.setContentsMargins(0, 0, 0, 0)
         self._button_layout.setSpacing(0)
         buttons = QWidget(self._button_container)
+        buttons.setObjectName("FloatPanelBar")
         self._button_row = buttons
         self._button_layout.addWidget(buttons, 0, Qt.AlignLeft)
         self._button_layout.addStretch()
@@ -274,31 +277,91 @@ class FloatPanel(QWidget):
         self._more.installEventFilter(self)
         layout.addWidget(self._more)
 
-        self._ocr_feedback = QWidget(self)
-        feedback_layout = QHBoxLayout(self._ocr_feedback)
-        feedback_layout.setContentsMargins(8, 4, 8, 4)
-        feedback_layout.setSpacing(T.SPACE_2)
-        self._ocr_spinner = Spinner(self._ocr_feedback)
-        feedback_layout.addWidget(self._ocr_spinner)
-        self._ocr_status = QLabel()
-        self._ocr_status.setWordWrap(True)
-        feedback_layout.addWidget(self._ocr_status, 1)
-        # 等待时可取消、失败后可重试，都留在这张卡片里，不弹窗打断截图。
-        self._ocr_buttons = {}
-        for action_id, text, tip in (("ocr_cancel", "取消", "停止等待这次识别"),
-                                     ("ocr", "重试", "重新识别当前截图"),
-                                     ("ocr_results", "查看全文", "打开可编辑的识别全文")):
-            button = QToolButton()
-            button.setText(text)
-            button.setProperty("class", "ghost")
-            button.setToolTip(tip)
-            button.clicked.connect(lambda _=False, aid=action_id: self.actionTriggered.emit(aid))
-            feedback_layout.addWidget(button)
-            self._ocr_buttons[action_id] = button
+        self._build_ocr_card()
         self._root_layout.addWidget(self._ocr_feedback)
         self._ocr_feedback.hide()
 
         self.refresh_icons(mode)
+
+    def _build_ocr_card(self):
+        """识别卡片：等待、失败时只有一行状态；识别出文字后展开成可直接改的全文（Clay 2026-11-05 定）。
+
+        对照截图核对、改字都在这里完成，不必再开识别窗口；排版和识别窗口共用同一个设置。
+        """
+        from ocr.editor import OCRTextEdit
+        from ocr.layout import LAYOUTS
+        card = QWidget(self)
+        card.setObjectName("FloatPanelCard")
+        self._ocr_feedback = card
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 6, 10, 10)
+        layout.setSpacing(T.SPACE_2)
+
+        header = QHBoxLayout()
+        header.setSpacing(T.SPACE_2)
+        self._ocr_spinner = Spinner(card)
+        header.addWidget(self._ocr_spinner)
+        self._ocr_status = QLabel()
+        self._ocr_status.setObjectName("OCRStatus")
+        self._ocr_status.setWordWrap(True)
+        header.addWidget(self._ocr_status, 1)
+        self._ocr_header = header
+        self._ocr_pending = QLabel()
+        self._ocr_pending.setObjectName("OCRPending")
+        self._ocr_pending.setToolTip("模型置信度较低的文字标了波浪线，仅供参考；文字正确时无需修改")
+        # 标签默认被拉到和排版下拉框一样高，低置信度的底色块会变成一大块。
+        header.addWidget(self._ocr_pending, 0, Qt.AlignVCenter)
+        # 等待时可取消、失败后可重试，都留在这张卡片里，不弹窗打断截图。
+        self._ocr_buttons = {}
+        for action_id, text, tip in (("ocr_next", "下一处 F8", "跳到下一处低置信度文字"),
+                                     ("ocr_cancel", "取消", "停止等待这次识别"),
+                                     ("ocr", "重试", "重新识别当前截图")):
+            button = QToolButton()
+            button.setText(text)
+            button.setProperty("class", "ghost")
+            button.setToolTip(tip)
+            header.addWidget(button)
+            self._ocr_buttons[action_id] = button
+        self._ocr_buttons["ocr_next"].clicked.connect(lambda: self.ocr_editor.next_pending())
+        for action_id in ("ocr_cancel", "ocr"):
+            self._ocr_buttons[action_id].clicked.connect(lambda _=False, aid=action_id: self.actionTriggered.emit(aid))
+        header.addStretch()
+        self._ocr_layout_caption = QLabel("排版")
+        self._ocr_layout_caption.setObjectName("OCRStatus")
+        header.addWidget(self._ocr_layout_caption)
+        self._ocr_layout = QComboBox()
+        self._ocr_layout.setToolTip("段落：一段合成一行；原样换行：保留截图里的换行；一行：全部接成一行")
+        for mode, label, tip in LAYOUTS:
+            self._ocr_layout.addItem(label, mode)
+        self._ocr_layout.activated.connect(self._choose_ocr_layout)
+        header.addWidget(self._ocr_layout)
+        layout.addLayout(header)
+
+        self.ocr_editor = OCRTextEdit(self._mode, card)
+        self.ocr_editor.marksChanged.connect(self._update_ocr_card)
+        layout.addWidget(self.ocr_editor)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(T.SPACE_2)
+        self._ocr_hint = QLabel()
+        self._ocr_hint.setObjectName("OCRStatus")
+        footer.addWidget(self._ocr_hint, 1)
+        open_window = QPushButton("在窗口中打开")
+        open_window.setToolTip("在文字识别窗口里对照原图核对，截图随即结束")
+        open_window.clicked.connect(lambda: self.actionTriggered.emit("ocr_results"))
+        copy = QPushButton("复制文字")
+        copy.setProperty("class", "primary")
+        copy.setToolTip("复制上面的全文并结束截图")
+        copy.clicked.connect(lambda: self.actionTriggered.emit("ocr_copy"))
+        footer.addWidget(open_window)
+        footer.addWidget(copy)
+        layout.addLayout(footer)
+        self._ocr_full = (self._ocr_layout_caption, self._ocr_layout, self.ocr_editor, self._ocr_hint, open_window, copy)
+        self._ocr_linked = False
+        self._ocr_message = ""
+        self._ocr_fitted = None
+        for widget in self._ocr_full:
+            widget.hide()
 
     def eventFilter(self, watched, event):
         if watched is self._options and event.type() == QEvent.Show and self._card_end is None:
@@ -336,13 +399,20 @@ class FloatPanel(QWidget):
                 geometry = self._card if self._card is not None else geometry
             if geometry.height() < 4:
                 continue
-            rect = QRectF(geometry).adjusted(-1.5, -1.5, 1.5, 1.5)
+            rect = QRectF(geometry).adjusted(-1, -1, 1, 1)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(*T.FLOAT_PANEL_SHADOW))
-            painter.drawRoundedRect(rect.translated(0, 3).adjusted(-1, -1, 1, 1), T.RADIUS_LG + 1, T.RADIUS_LG + 1)
-            painter.setBrush(QColor(t["popover"]))
-            painter.setPen(QPen(QColor(t["border"]), 1))
+            layers = len(T.FLOAT_PANEL_SHADOW_ALPHAS)
+            for index, alpha in enumerate(T.FLOAT_PANEL_SHADOW_ALPHAS):
+                spread = layers - index
+                painter.setBrush(QColor(0, 0, 0, alpha))
+                painter.drawRoundedRect(rect.translated(0, 2).adjusted(-spread, -spread, spread, spread),
+                                        T.RADIUS_LG + spread, T.RADIUS_LG + spread)
+            # 描边用“外圈填描边色、内圈填底色”两次填充，不用 1px 画笔：画笔线居中压在边界上，
+            # 125%/150% 缩放时落在半个物理像素上，圆角处发虚、深浅不一。
+            painter.setBrush(QColor(t["border"]))
             painter.drawRoundedRect(rect, T.RADIUS_LG, T.RADIUS_LG)
+            painter.setBrush(QColor(t["popover"]))
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), T.RADIUS_LG - 1, T.RADIUS_LG - 1)
 
     def _row_rect(self, row):
         return QRect(row.mapTo(self, QPoint()), row.size())
@@ -437,18 +507,87 @@ class FloatPanel(QWidget):
         """识别文字层本身透明，持续反馈让用户知道结果已可操作。"""
         from ocr.controller import WAITING_STATES
         waiting = state in WAITING_STATES
-        self._ocr_status.setText(message)
+        self._ocr_message = message
         self._ocr_spinner.setVisible(waiting)
         self._ocr_buttons["ocr_cancel"].setVisible(waiting)
         self._ocr_buttons["ocr"].setVisible(state in ("failed", "timeout", "cancelled"))
-        self._ocr_buttons["ocr_results"].setVisible(has_results)
+        self._update_ocr_card()
         self._ocr_feedback.show()
+
+    @property
+    def ocr_document(self):
+        return self.ocr_editor.document_model
+
+    def set_ocr_document(self, document, linked):
+        """卡片里显示这份识别全文；None 收起成一行状态。linked：截图上还有文字层可以互相定位。"""
+        if document is not None and not document:
+            document = None
+        if document is not self.ocr_document:
+            if self.ocr_document is not None:
+                self.ocr_document.changed.disconnect(self._fit_ocr_text)
+            self.ocr_editor.set_document(document)
+            if document is not None:
+                document.changed.connect(self._fit_ocr_text)
+                self._fit_ocr_text()
+        self._ocr_linked = linked and document is not None
+        for widget in self._ocr_full:
+            widget.setVisible(document is not None)
+        self._update_ocr_card()
+
+    def _choose_ocr_layout(self, index):
+        if self.ocr_editor.choose_layout(self._ocr_layout.itemData(index)):
+            self.ocr_editor.setFocus()
+        self._update_ocr_card()
+
+    def _fit_ocr_text(self):
+        """编辑框按内容定高：少则不留大片空白，多于 8 行就在框内滚动。
+        只在换结果、换排版时定一次，打字时不跟着变，免得工具条上下跳。"""
+        fitted = (self.ocr_document, self.ocr_document.layout)
+        if fitted == self._ocr_fitted:
+            return
+        self._ocr_fitted = fitted
+        editor = self.ocr_editor
+        # 第一次识别出结果时卡片还没显示过，样式表里的字号尚未生效，先套上样式再量。
+        editor.ensurePolished()
+        line = editor.fontMetrics().lineSpacing() * 1.4
+        margins = editor.contentsMargins()
+        chrome = margins.top() + margins.bottom() + 2 * editor.frameWidth()
+        card = self._ocr_feedback.layout().contentsMargins()
+        width = (self._button_row.sizeHint().width() - card.left() - card.right()
+                 - margins.left() - margins.right() - 2 * editor.frameWidth()
+                 - editor.verticalScrollBar().sizeHint().width())
+        height = min(max(editor.content_height(width), line * 3), line * 8)
+        editor.setFixedHeight(round(height + chrome))
+        if self._near is not None and self.isVisible():
+            self.set_position_near(self._near)
+
+    def _update_ocr_card(self):
+        document = self.ocr_document
+        # 只有一行状态时文字占满整行、长提示可折行；有全文时让低置信度紧跟在“已识别 N 处”后面。
+        self._ocr_header.setStretchFactor(self._ocr_status, 1 if document is None else 0)
+        if document is None:
+            self._ocr_status.setText(self._ocr_message)
+            self._ocr_pending.hide()
+            self._ocr_buttons["ocr_next"].hide()
+            return
+        self._ocr_status.setText(f"已识别 {len(document)} 处文字" if self._ocr_linked else self._ocr_message)
+        count = len(self.ocr_editor.pending_spans())
+        self._ocr_pending.setText(f"低置信度 {count} 处")
+        self._ocr_pending.setVisible(count > 0)
+        self._ocr_buttons["ocr_next"].setVisible(count > 0)
+        self._ocr_layout.setCurrentIndex(self._ocr_layout.findData(document.layout))
+        hint = "已修改，复制以这里为准" if document.draft is not None else "直接改字"
+        hint += " · Enter 换行"
+        if self._ocr_linked:
+            hint += " · 点截图上的字可定位到这里"
+        self._ocr_hint.setText(hint)
 
     def refresh_icons(self, mode: str) -> None:
         """按主题重染全部图标。mode: 'light' | 'dark'。"""
         if mode not in T.THEMES:
             raise ValueError(f"unknown theme mode: {mode}")
         self._mode = mode
+        self.ocr_editor.set_mode(mode)
         t = T.THEMES[mode]
         # Qt 自动生成的禁用图标在深色主题里几乎和正常态一样亮，禁用色自己给：弱化色再往底色淡一半。
         muted, base = QColor(t["muted_foreground"]), QColor(t["popover"])
@@ -579,9 +718,15 @@ class FloatPanel(QWidget):
             bar_above = bar_y + bar.height() // 2 < rect.center().y()
         else:
             bar_y = rect.bottom() + _GAP + margins.top()
+            above_y = rect.top() - _GAP - margins.bottom() - bar.height()
             bar_above = bar_y + bar.height() + margins.bottom() > geo.bottom() + 1
+            # 识别全文卡片很高：下方连卡片放不下、上方放得下时整条翻到选区上方，卡片不压住截图（Clay 2026-11-05 定）。
+            # 二级面板不这样做：换工具时主条跳到另一边太晃。
+            card = self._ocr_feedback.sizeHint().height() + _CARD_GAP if self.ocr_document is not None else 0
+            if card and not bar_above and bar_y + bar.height() + card + margins.bottom() > geo.bottom() + 1:
+                bar_above = above_y - card - margins.top() >= geo.top()
             if bar_above:
-                bar_y = max(geo.top() + margins.top(), rect.top() - _GAP - margins.bottom() - bar.height())
+                bar_y = max(geo.top() + margins.top(), above_y)
         # 二级面板放在主条背向选区的一侧，不遮住截图；那一侧放不下才换到另一侧。
         fits_below = bar_y - margins.top() + size.height() <= geo.bottom() + 1
         fits_above = bar_y - (size.height() - bar.height() - margins.bottom()) >= geo.top()

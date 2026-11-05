@@ -121,7 +121,8 @@ CAPTURE_LINE_WIDTH = 2.4
 CAPTURE_HANDLE_SIZE = 13
 CAPTURE_EDGE_HANDLE_MIN = 120
 PIXEL_GRID = (0, 0, 0, 60)
-FLOAT_PANEL_SHADOW = (0, 0, 0, 42)
+# 工具条卡片投影：由外向内逐层叠加的 alpha（同贴图做法），整体下移 2px；一层实心偏移影在卡片底边会出一道硬边。
+FLOAT_PANEL_SHADOW_ALPHAS = (3, 5, 8, 12)
 # 贴图阴影：由外向内逐层叠加的 alpha，层数即阴影宽度（px）。
 PIN_SHADOW_ALPHAS = (3, 5, 8, 11, 15, 20)
 # 贴图状态色（同 PixPin）：操作中蓝、锁定橙、鼠标穿透绿，其余时间是普通黑影。
