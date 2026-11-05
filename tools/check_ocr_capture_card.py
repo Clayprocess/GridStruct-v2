@@ -224,11 +224,15 @@ def main():
     app.setFont(QFont("Microsoft YaHei UI", 10))
     apply_theme(app, "light")
     with TemporaryDirectory() as folder, patch("settings.storage.data_directory", return_value=Path(folder)):
-        check_card(app)
-        check_short(app)
-        check_flip(app)
-        check_corners(app)
-        screenshots(app)
+        try:
+            check_card(app)
+            check_short(app)
+            check_flip(app)
+            check_corners(app)
+            screenshots(app)
+        finally:
+            # 没进事件循环不会发 aboutToQuit，手动让 OCR 服务线程收尾，否则进程退出时 Qt 中止（退出码 134）。
+            app.aboutToQuit.emit()
     print("PASS: card shows editable full text, layout/pending/F8, locate both ways with the screenshot")
     print("PASS: typing keys stay in the text box, Esc/re-OCR/re-layout confirm when edited, copy text ends capture")
     print("PASS: edited text survives annotating (no locate), unedited is invalidated; flips above when no room")

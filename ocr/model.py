@@ -148,8 +148,10 @@ class OCRDocument(QObject):
             if 0 <= start and start + removed <= len(old) and len(text) - len(old) == added - removed \
                     and text[:start] == old[:start] and text[start + added:] == old[start + removed:]:
                 shift = added - removed
-                self._spans = [(begin, end, item) if end <= start else (begin + shift, end + shift, item)
-                               for begin, end, item in spans if end <= start or begin >= start + removed]
+                kept = [(begin, end, item) if end <= start else (begin + shift, end + shift, item)
+                        for begin, end, item in spans if end <= start or begin >= start + removed]
+                original = self.recognized_text()
+                self._spans = restore_spans(text, original, map_spans(original, original, self.results), kept)
         self.changed.emit()
 
     def to_payload(self):
@@ -160,6 +162,8 @@ class OCRDocument(QObject):
                      "raw_index": item.raw_index} for item in self._raw],
             "layout": [{"id": item.item_id, "paragraph": item.paragraph, "line": item.line} for item in self._layout],
             "mode": self._mode, "draft": self._draft,
+            # 改过的全文里各条的位置是跟着每次改动算出来的，读回时不能靠文字比对重猜（重复文字会认错）。
+            "spans": None if self._draft is None else [[begin, end, item.item_id] for begin, end, item in self.spans()],
         }
 
     @classmethod
@@ -219,6 +223,24 @@ class OCRDocument(QObject):
             if mode not in {key for key, _label, _tip in LAYOUTS}:
                 raise ValueError("OCR 排版无效")
             document._mode = mode
+            spans = payload.get("spans")
+            if spans is not None:
+                if draft is None or not isinstance(spans, list):
+                    raise ValueError("OCR 定位数据无效")
+                order = {item.item_id: index for index, item in enumerate(document._layout)}
+                items = {item.item_id: item for item in document._layout}
+                restored, last, previous = [], 0, -1
+                for entry in spans:
+                    if not isinstance(entry, list) or len(entry) != 3 or type(entry[0]) is not int \
+                            or type(entry[1]) is not int or entry[2] not in order:
+                        raise ValueError("OCR 定位条目无效")
+                    begin, end, identifier = entry
+                    if not last <= begin < end <= len(draft) or order[identifier] <= previous \
+                            or draft[begin:end] != items[identifier].text.strip():
+                        raise ValueError("OCR 定位与全文不符")
+                    restored.append((begin, end, replace(items[identifier], box=QRect(items[identifier].box))))
+                    last, previous = end, order[identifier]
+                document._spans = restored
         document._draft = draft
         return document
 
@@ -286,3 +308,38 @@ def map_spans(text, original, results):
         if block is not None:
             kept.append((begin + block[1] - block[0], end + block[1] - block[0], item))
     return kept
+
+
+def restore_spans(text, original, base, kept):
+    """撤销等把某条改回原样时，恢复它的定位。
+
+    只看两条仍定位着的条目（或全文开头、结尾）之间的那一段：从左边那条往后、从右边那条往前，
+    和识别原文逐字相同的部分里的条目，就是原来那几条。位置由两边的锚点决定，不在全文里搜相同的字，
+    所以重复文字也不会认错（Clay 审查 PR #47：改两处、撤销一处后，撤回的那条要能重新定位）。
+    """
+    where = {item.item_id: (begin, end) for begin, end, item in kept}
+    result, group = [], []
+    original_at, text_at = 0, 0
+    for begin, end, item in base + [(len(original), len(original), None)]:
+        if item is not None and item.item_id not in where:
+            group.append((begin, end, item))
+            continue
+        current = where[item.item_id] if item is not None else (len(text), len(text))
+        if group:
+            before, after = original[original_at:begin], text[text_at:current[0]]
+            head = 0
+            while head < min(len(before), len(after)) and before[head] == after[head]:
+                head += 1
+            tail = 0
+            while tail < min(len(before), len(after)) - head and before[-1 - tail] == after[-1 - tail]:
+                tail += 1
+            for start, stop, missing in group:
+                if stop <= original_at + head:
+                    result.append((start - original_at + text_at, stop - original_at + text_at, missing))
+                elif start >= begin - tail:
+                    result.append((start - begin + current[0], stop - begin + current[0], missing))
+            group = []
+        if item is not None:
+            result.append((current[0], current[1], item))
+        original_at, text_at = end, current[1]
+    return result

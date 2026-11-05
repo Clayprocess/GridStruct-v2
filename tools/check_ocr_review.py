@@ -205,6 +205,21 @@ def main():
                 assert dialog._text.pending_spans() == []
                 twins.focus((twins.results[1].item_id,))
                 assert twins.focused_ids == (twins.results[1].item_id,)
+                # 贴图会话保存再读回：定位照旧归第二条，不退回文字比对重猜。
+                restored = OCRDocument.from_payload(twins.to_payload(), image)
+                reopened = OCRResultDialog(restored)
+                assert [(begin, stop, item.score) for begin, stop, item in reopened._text.spans] == [(0, 3, .99)], \
+                    (mode, reopened._text.spans)
+                reopened.deleteLater()
+                # 定位数据和全文对不上（被改坏）时按损坏处理，交给贴图恢复的备份流程，不猜。
+                broken = twins.to_payload()
+                broken["spans"] = [[0, 3, twins.results[1].item_id], [0, 3, twins.results[0].item_id]]
+                try:
+                    OCRDocument.from_payload(broken, image)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("overlapping spans accepted")
                 # 删掉第二处则第一条留在原处。
                 QTest.keyClick(dialog._text, Qt.Key_Z, Qt.ControlModifier)
                 assert dialog._text.toPlainText() == twins.recognized_text() and len(dialog._text.spans) == 2
@@ -216,6 +231,25 @@ def main():
                 assert [(begin, stop, item.score) for begin, stop, item in dialog._text.spans] == [(0, 3, .4)], \
                     (mode, dialog._text.spans)
                 dialog.deleteLater()
+            # 两条都改过、撤销一处（Clay 审查 PR #47 复现）：撤回原文的那条恢复定位和低置信度标记。
+            settings.setValue("ocr/layout", "lines")
+            pair = OCRDocument([OCRResult(QRect(10, 10, 90, 20), "Alpha", .4),
+                                OCRResult(QRect(10, 35, 90, 20), "Bravo", .4)], image)
+            dialog = OCRResultDialog(pair)
+            for position, letter in ((1, "x"), (7, "y")):
+                cursor = dialog._text.textCursor()
+                cursor.setPosition(position)
+                cursor.setPosition(position + 1, QTextCursor.KeepAnchor)
+                dialog._text.setTextCursor(cursor)
+                QTest.keyClicks(dialog._text, letter)
+            assert dialog._text.toPlainText() == "Axpha\nByavo" and dialog._text.spans == []
+            QTest.keyClick(dialog._text, Qt.Key_Z, Qt.ControlModifier)
+            assert dialog._text.toPlainText() == "Axpha\nBravo", dialog._text.toPlainText()
+            assert [(begin, stop, item.text) for begin, stop, item in dialog._text.spans] == [(6, 11, "Bravo")]
+            assert len(dialog._text.pending_spans()) == 1
+            QTest.keyClick(dialog._text, Qt.Key_Z, Qt.ControlModifier)
+            assert pair.draft is None and len(dialog._text.spans) == 2
+            dialog.deleteLater()
             legacy = OCRResultDialog([OCRResult(QRect(0, 0, 50, 20), "legacy", .9)])
             assert legacy._preview.isHidden() and not legacy._to_table.isEnabled()
             legacy._copy_all()
