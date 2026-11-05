@@ -13,7 +13,7 @@ import ctypes
 import sys
 from threading import Condition, Lock, Thread
 import time
-from PySide6.QtCore import QObject, Signal, QRect, QPoint, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, QRect, QPoint, Slot, Qt
 
 _IS_WIN = sys.platform == "win32"
 
@@ -45,6 +45,7 @@ class _Worker:
     def __init__(self, results):
         self._cond = Condition()
         self._pending = None
+        self._current = None
         self._stopped = False
         self._abandoned = False
         self.busy = None  # (hwnd, 开始时刻)：正在执行的查询
@@ -54,21 +55,33 @@ class _Worker:
     def submit(self, request):
         # 只留最新位置：鼠标划过的中间点没有必要再查。
         with self._cond:
-            self._pending = request
+            self._pending = None if request == self._current else request
             self._cond.notify()
 
     def stop(self):
         with self._cond:
-            self._stopped = True
-            self._pending = None
-            self._cond.notify()
+            self._stop_locked()
 
-    def abandon(self):
+    def _stop_locked(self):
         global _abandoned
-        with _abandoned_lock:
-            _abandoned += 1
-        self._abandoned = True
-        self.stop()
+        if self._stopped:
+            return
+        # 判断在途、登记名额、停止接单必须和查询完成互斥，否则会漏计或永久占住名额。
+        if self.busy is not None:
+            with _abandoned_lock:
+                _abandoned += 1
+            self._abandoned = True
+        self._stopped = True
+        self._pending = None
+        self._cond.notify()
+
+    def abandon_if_hung(self, now):
+        with self._cond:
+            busy = self.busy
+            if busy is None or now - busy[1] < _HUNG_S:
+                return None
+            self._stop_locked()
+            return busy[0]
 
     def _run(self):
         global _abandoned
@@ -81,6 +94,7 @@ class _Worker:
                     if self._stopped:
                         return
                     request, self._pending = self._pending, None
+                    self._current = request
                     self.busy = (request[2], time.monotonic())
                 token, key, hwnd, x, y = request
                 started = time.perf_counter()
@@ -93,6 +107,7 @@ class _Worker:
                 elapsed = (time.perf_counter() - started) * 1000
                 with self._cond:
                     self.busy = None
+                    self._current = None
                     if self._stopped:
                         return
                 self._results.done.emit((token, key, x, y, rects, elapsed))
@@ -130,12 +145,20 @@ class RegionDetector(QObject):
         self._level = 0
         self._channel = _result_channel()
         self._channel.done.connect(self._on_result)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setTimerType(Qt.PreciseTimer)
+        self._refresh_timer.timeout.connect(self._refresh_hover)
+
+    def _refresh_hover(self):
+        self.detect(self._last)
 
     def detect(self, pos: QPoint):
         from .screen import ScreenManager
 
         if self._stopping:
             return
+        self._refresh_timer.stop()
         self._last = QPoint(pos)
         manager = ScreenManager.instance()
         screen = manager.screen_at(pos)
@@ -163,14 +186,21 @@ class RegionDetector(QObject):
             # 刚进入这个窗口：先框整个窗口，控件结果到了再收紧。
             self._show(key, x, y)
         # 结果只沿用 1 秒：Chrome 等程序首次被查询后才逐步建好无障碍树，停住不动也要能细化。
-        if not covered or time.monotonic() - hits[2] >= _HIT_REUSE_S:
+        remaining = _HIT_REUSE_S - (time.monotonic() - hits[2]) if covered else 0
+        if remaining <= 0:
             self._request(key, hwnd, x, y)
+            if hwnd in _hung_hwnds:
+                self._show(key, x, y)
+                return
+            remaining = min(_HIT_REUSE_S, _HUNG_S)
+        # 无鼠标事件时也要重查懒加载控件，并检查永久不返回的查询；不恢复窗口枚举或结果轮询。
+        self._refresh_timer.start(max(1, int(remaining * 1000) + 1))
 
     def _show(self, key, x, y):
         from .screen import ScreenManager
 
         window_rect = QRect(*key[1])
-        chain = self._element_chain(key, window_rect, x, y)
+        chain = [] if key in self._slow or key[0] in _hung_hwnds else self._element_chain(key, window_rect, x, y)
         chain.append(window_rect)
         # 换到另一个元素上时回到最内层，在同一元素内移动保持滚轮选的层级。
         if not self._chain or chain[0] != self._chain[0]:
@@ -192,10 +222,10 @@ class RegionDetector(QObject):
 
     def _request(self, key, hwnd, x, y):
         worker = self._worker
-        if worker is not None and worker.busy is not None and time.monotonic() - worker.busy[1] >= _HUNG_S:
-            _hung_hwnds.add(worker.busy[0])
-            print(f"[GridStruct-V2] 点命中超过 {_HUNG_S:.0f}s 未返回，窗口 {worker.busy[0]} 改用窗口吸附", flush=True)
-            worker.abandon()
+        hung_hwnd = worker.abandon_if_hung(time.monotonic()) if worker is not None else None
+        if hung_hwnd is not None:
+            _hung_hwnds.add(hung_hwnd)
+            print(f"[GridStruct-V2] 点命中超过 {_HUNG_S:.0f}s 未返回，窗口 {hung_hwnd} 改用窗口吸附", flush=True)
             worker = self._worker = None
             if hwnd in _hung_hwnds:
                 return
@@ -253,13 +283,11 @@ class RegionDetector(QObject):
         if self._stopping:
             return
         self._stopping = True
+        self._refresh_timer.stop()
         self._channel.done.disconnect(self._on_result)
         if self._worker is not None:
             # 还卡在查询里的线程计入丢弃名额，反复截图同一个卡住的程序时不会越堆越多。
-            if self._worker.busy is not None:
-                self._worker.abandon()
-            else:
-                self._worker.stop()
+            self._worker.stop()
             self._worker = None
 
 

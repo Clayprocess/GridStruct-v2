@@ -4,7 +4,8 @@
    窗口对象同一会话只取一次；
 2. RegionDetector 用常驻工作线程查询、信号回传：命中矩形内移动不再查询，
    换控件时保留旧框直到新结果到达（不闪回外层），滚轮能切到父层，慢窗口降级；
-3. 查询卡死时丢弃那条线程、拉黑该窗口，新线程继续服务别的窗口，迟到结果被丢弃。
+3. 静止悬停仍能细化懒加载控件；查询卡死时丢弃线程、拉黑窗口，新线程继续服务，丢弃迟到结果；
+4. 查询完成与 UI 超时检查交错时不崩溃、不误判卡死。
 用法：QT_QPA_PLATFORM=offscreen python tools/check_snap_hit.py
 """
 
@@ -12,6 +13,7 @@ from pathlib import Path
 import ctypes
 import sys
 import time
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QRect, QPoint
@@ -174,6 +176,7 @@ def check_detector():
         detector.detect(QPoint(115, 18))
         settle(app, detector)
         assert key in detector._slow, "超过 300ms 的窗口应降级"
+        assert results[-1] == WINDOW, "降级时应立即退回窗口框，不沿用旧控件"
         calls = provider.calls
         detector._hits.clear()
         detector.detect(QPoint(400, 300))
@@ -216,9 +219,12 @@ def check_hung_query():
         deadline = time.monotonic() + 1
         while 7 not in seen and time.monotonic() < deadline:
             app.processEvents()
+        key = (7, WINDOW.getRect())
+        detector._hits[key] = (TAB, [TOOLBAR, TAB], time.monotonic() - snap._HIT_REUSE_S)
+        detector._show(key, 115, 18)
         time.sleep(0.35)
         hung = detector._worker
-        detector.detect(QPoint(116, 18))
+        app.processEvents()
         assert 7 in snap._hung_hwnds, "卡住超过阈值的窗口应改用窗口吸附"
         assert detector._worker is None and snap._abandoned == 1
         assert results[-1] == WINDOW
@@ -242,9 +248,92 @@ def check_hung_query():
         snap._IS_WIN, snap._try_init_msaa, snap._win32_api, snap._snapshot_windows, snap._HUNG_S = original
 
 
+def check_stationary_refinement():
+    """首查只得到外层，之后不再发鼠标事件，也应按缓存时限查询到内层。"""
+    from PySide6.QtTest import QTest
+    app = QApplication.instance() or QApplication([])
+    calls = []
+
+    class LazyProvider:
+        def hit_path(self, *_args):
+            calls.append(time.monotonic())
+            return [TOOLBAR] if len(calls) == 1 else [TOOLBAR, TAB, CLOSE]
+
+        def close(self):
+            pass
+
+    with patch.object(snap, "_IS_WIN", True), \
+            patch.object(snap, "_win32_api", FakeUser32), \
+            patch.object(snap, "_snapshot_windows", return_value=[(7, WINDOW)]), \
+            patch.object(snap, "_try_init_msaa", LazyProvider):
+        detector = snap.RegionDetector(only_window=False)
+        results = []
+        detector.regionDetected.connect(results.append)
+        try:
+            detector.detect(QPoint(115, 18))
+            settle(app, detector)
+            assert results[-1] == TOOLBAR
+            QTest.qWait(250)
+            assert len(calls) == 1, "缓存未到期不应重复查询"
+            QTest.qWait(1200)
+            settle(app, detector)
+            assert len(calls) >= 2 and results[-1] == CLOSE, \
+                f"静止悬停未细化：queries={len(calls)}, results={results}"
+            detector.shutdown()
+            count = len(calls)
+            QTest.qWait(1200)
+            assert len(calls) == count, "退出后不能继续定时查询"
+        finally:
+            detector.shutdown()
+    print("PASS: stationary hover refines a lazy accessibility tree and stops refreshing on shutdown")
+
+
+def check_completion_during_timeout_check():
+    """精确安排查询在 UI 读取超时时钟时结束，复现 busy 被清空的竞态。"""
+    import threading
+    app = QApplication.instance() or QApplication([])
+    entered, release = threading.Event(), threading.Event()
+
+    class Provider:
+        def hit_path(self, *_args):
+            entered.set()
+            release.wait(3)
+            return [TOOLBAR]
+
+        def close(self):
+            pass
+
+    with patch.object(snap, "_try_init_msaa", Provider):
+        detector = snap.RegionDetector(only_window=False)
+        key = (70, WINDOW.getRect())
+        detector._request(key, 70, 115, 18)
+        worker = detector._worker
+        assert entered.wait(1)
+        clock = time.monotonic
+
+        def complete():
+            release.set()
+            deadline = clock() + 1
+            while worker.busy is not None and clock() < deadline:
+                time.sleep(0.001)
+            assert worker.busy is None, "后台查询没有按预期完成"
+            return clock()
+
+        try:
+            with patch.object(snap.time, "monotonic", side_effect=complete):
+                detector._request(key, 70, 116, 18)
+            assert 70 not in snap._hung_hwnds, "已完成的查询不能被判为卡死"
+            settle(app, detector)
+        finally:
+            release.set()
+            detector.shutdown()
+    print("PASS: query completion during timeout checking neither crashes nor blacklists the window")
+
+
 if __name__ == "__main__":
     failures = []
-    for check in (check_hit_path, check_detector, check_hung_query):
+    for check in (check_hit_path, check_detector, check_hung_query, check_stationary_refinement,
+                  check_completion_during_timeout_check):
         try:
             check()
         except AssertionError as error:
