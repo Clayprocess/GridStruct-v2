@@ -867,6 +867,46 @@ def canvas_mouse_events():
     w.deleteLater()
 
 
+def loupe_hides_off_surface():
+    # 鼠标移到工具条或“更多”菜单上时，截图遮罩和画布上的放大镜不能停在原地。
+    from capture import ScreenshotFlow, DesktopCapture, ScreenFrame
+    flow = ScreenshotFlow(app)
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(0, 0, 800, 600), sample(800, 600), QPoint())])
+    with patch("capture.flow.capture_virtual_desktop", return_value=shot):
+        flow.start()
+        flush()
+        overlay = flow._win._windows[0]
+        overlay.loupe.pick(QPoint(100, 100), QPoint(100, 100))
+        assert overlay.loupe.isVisible()
+        QApplication.sendEvent(overlay, QEvent(QEvent.Leave))
+        assert not overlay.loupe.isVisible(), "capture loupe stayed after pointer left the overlay"
+        flow._win.close()
+        flush()
+    flow.deleteLater()
+    from annotate import AnnotationWindow
+    w = AnnotationWindow(sample(640, 320), QPoint())
+    w.show()
+    flush()
+    c = w._canvas
+    w._on_tool("magnifier")
+    QTest.mouseMove(c.viewport(), c.mapFromScene(QPointF(60, 60)))
+    c._loupe.pick(QPointF(60, 60), c.viewport().mapToGlobal(c.mapFromScene(QPointF(60, 60))))
+    assert c._loupe.isVisible()
+    QApplication.sendEvent(c, QEvent(QEvent.Leave))
+    assert not c._loupe.isVisible(), "magnifier loupe stayed after pointer left the canvas"
+    redo, menu = w._toolbar._menu_actions["redo"], w._toolbar._more_menu
+    menu.aboutToShow.emit()
+    assert not redo.isEnabled(), "redo enabled with nothing to redo"
+    w._on_tool("rect")
+    c._tool.on_press(c.scene(), QPointF(20, 20), c._undo)
+    c._tool.on_move(QPointF(80, 80))
+    c._tool.on_release(QPointF(80, 80), c._undo)
+    c.undo()
+    menu.aboutToShow.emit()
+    assert redo.isEnabled(), "redo stayed disabled after undo"
+    w.deleteLater()
+
+
 def drawing_interaction():
     from annotate import AnnotationWindow
     from PySide6.QtWidgets import QToolButton, QSpinBox
@@ -1126,7 +1166,7 @@ if __name__ == "__main__":
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,
-              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
+              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, loupe_hides_off_surface, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)

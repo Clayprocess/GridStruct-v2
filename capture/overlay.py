@@ -622,6 +622,12 @@ class _ScreenOverlay(QWidget):
     def mouseDoubleClickEvent(self, event):
         self.controller.mouse_double_click(event)
 
+    def leaveEvent(self, event):
+        # 鼠标移到工具条、“更多”菜单、选项面板等其他窗口上时，遮罩收不到移动事件，
+        # 放大镜会停在离开前的位置；同 PixPin，离开遮罩就收起，回来时由 mouse_move 再显示。
+        self.loupe.hide()
+        super().leaveEvent(event)
+
     def keyPressEvent(self, event):
         self.controller.key_press(event, self)
 

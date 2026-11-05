@@ -81,6 +81,7 @@ class AnnotationWindow(QWidget):
         self._ocr.statusChanged.connect(self._show_ocr_status)
         self._canvas._undo.indexChanged.connect(self._image_changed)
         self._canvas._undo.canUndoChanged.connect(self._toolbar.set_undo_enabled)
+        self._toolbar.set_redo_check(self._canvas._undo.canRedo)
         self._options.set_tool("")
         self._position_toolbar()
         self._toolbar.show()

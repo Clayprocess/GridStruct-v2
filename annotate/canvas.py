@@ -334,6 +334,10 @@ class AnnotationCanvas(QGraphicsView):
 
     def leaveEvent(self, event):
         self._clear_brush_preview()
+        # 放大镜和取色卡片只在画布上有意义；移到工具条或菜单上时收起，回到画布再由 mouseMoveEvent 显示。
+        for popup in (self._loupe, self._pipette):
+            if popup is not None:
+                popup.hide()
         super().leaveEvent(event)
 
     def event(self, event):

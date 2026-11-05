@@ -265,10 +265,15 @@ class FloatPanel(QWidget):
             action = self._more_menu.addAction(label, lambda tid=tool_id: self._pick(tid))
             self._menu_icons.append((action, icon_name))
         self._more_menu.addSeparator()
+        self._menu_actions = {}
         for action_id, label, icon_name in MORE_ACTIONS:
             action = self._more_menu.addAction(_menu_text(action_id, label),
                                                lambda aid=action_id: self.actionTriggered.emit(aid))
             self._menu_icons.append((action, icon_name))
+            self._menu_actions[action_id] = action
+        # 同撤销按钮：没有可重做的步骤时置灰。菜单展开前再查一次，不必跟着撤销栈的信号走，
+        # 窗口销毁时撤销栈清空发出的信号也就不会碰到已删除的菜单项。
+        self._more_menu.aboutToShow.connect(lambda: self._menu_actions["redo"].setEnabled(self._can_redo()))
         self._more.setMenu(self._more_menu)
         # 同 PixPin 悬停即展开；showMenu 会进入嵌套事件循环，不能在事件过滤器里同步调用。
         self._more.installEventFilter(self)
@@ -466,6 +471,10 @@ class FloatPanel(QWidget):
 
     def set_undo_enabled(self, enabled: bool) -> None:
         self._buttons["undo"].setEnabled(enabled)
+
+    def set_redo_check(self, can_redo) -> None:
+        """can_redo() 返回是否有可重做的步骤，“更多”菜单展开前据此置灰“重做”。"""
+        self._can_redo = can_redo
 
     def set_copy_text_selected(self, selected: bool):
         # 选字时 Ctrl+C 只复制文字不结束，只有按钮和 Enter 会复制文字并结束。
