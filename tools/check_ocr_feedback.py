@@ -150,11 +150,12 @@ def main():
                 service.finished.emit(controller._request, results, "")
                 app.processEvents()
                 text = _visible_text(window)
-                if "已识别" not in text or "原图" not in text:
+                # 截图里是可改的全文卡片（提示“点截图上的字”），贴图里是原图选字说明。
+                if "已识别" not in text or not ("原图" in text or "截图" in text):
                     errors.append(f"{mode}/{type(window).__name__}: 识别完成后无可见提示：{text}")
                 if isinstance(window, AnnotationWindow):
                     buttons = [b for b in window.findChildren(QAbstractButton)
-                               if b.isVisible() and b.text() == "查看全文"]
+                               if b.isVisible() and b.text() == "在窗口中打开"]
                     if not buttons:
                         errors.append(f"{mode}/AnnotationWindow: 没有可见全文入口")
                     window.select_tool("arrow")
@@ -179,7 +180,7 @@ def main():
                     service.finished.emit(controller._request, results, "")
                     app.processEvents()
                     buttons = [b for b in window.findChildren(QAbstractButton)
-                               if b.isVisible() and b.text() == "查看全文"]
+                               if b.isVisible() and b.text() == "在窗口中打开"]
                     closed = []
                     window.destroyed.connect(lambda: closed.append(True))
                     buttons[0].click()

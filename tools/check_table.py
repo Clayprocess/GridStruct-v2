@@ -499,36 +499,32 @@ def check_ocr_reuse(app):
         settings.setValue("config_version", 1)
         settings.sync()
         with patch("settings.storage.data_directory", return_value=Path(folder)):
-            for paragraph in (False, True):
-                image = QImage(200, 100, QImage.Format_RGB32)
-                image.fill(QColor(T.LIGHT["background"]))
-                raw = (OCRResult(QRect(5, 5, 60, 20), "120O", .6),
-                       OCRResult(QRect(5, 28, 60, 20), "total", .9))
-                document = OCRDocument(raw, image)
-                ids = document.groups()[0] if paragraph else (raw[0].item_id,)
-                document.correct(ids, "1200 total" if paragraph else "1200")
-                expected = ["1200 total"] if paragraph else ["1200", "total"]
-                pixmap = QPixmap.fromImage(image)
-                annotation = AnnotationWindow(pixmap, QPoint())
-                annotation._ocr.adopt_document(document, pixmap)
-                pin = PinWindow(pixmap, document=document)
-                dialog = OCRResultDialog(document)
-                for entry in (lambda: annotation._on_action("table"), pin._recognize_table, dialog._open_table):
-                    with patch("table.open_table") as opened:
-                        entry()
-                        passed_image, results = opened.call_args.args
-                        passed_image = passed_image.toImage() if isinstance(passed_image, QPixmap) else passed_image
-                        tokens = tokens_from_results(results, passed_image)
-                        assert [token.text for token in tokens] == expected
-                        if paragraph:
-                            assert len(tokens) == 1 and tokens[0].box.top == 5 and tokens[0].box.bottom == 48
-                pin._allow_close = True
-                pin.close()
-                dialog.close()
-                dialog.deleteLater()
-                app.processEvents()
-                QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-    print("PASS: corrected OCR reused by screenshot, pin and OCR result entries")
+            image = QImage(200, 100, QImage.Format_RGB32)
+            image.fill(QColor(T.LIGHT["background"]))
+            raw = (OCRResult(QRect(5, 5, 60, 20), "120O", .6),
+                   OCRResult(QRect(5, 28, 60, 20), "total", .9))
+            document = OCRDocument(raw, image)
+            # 识别窗口里改的全文不回写识别结果，表格拿到的是逐框的识别文字。
+            document.set_draft("1200 total")
+            pixmap = QPixmap.fromImage(image)
+            annotation = AnnotationWindow(pixmap, QPoint())
+            annotation._ocr.adopt_document(document, pixmap)
+            pin = PinWindow(pixmap, document=document)
+            dialog = OCRResultDialog(document)
+            for entry in (lambda: annotation._on_action("table"), pin._recognize_table, dialog._open_table):
+                with patch("table.open_table") as opened:
+                    entry()
+                    passed_image, results = opened.call_args.args
+                    passed_image = passed_image.toImage() if isinstance(passed_image, QPixmap) else passed_image
+                    tokens = tokens_from_results(results, passed_image)
+                    assert [token.text for token in tokens] == ["120O", "total"]
+            pin._allow_close = True
+            pin.close()
+            dialog.close()
+            dialog.deleteLater()
+            app.processEvents()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    print("PASS: OCR boxes reused by screenshot, pin and OCR result entries")
 
 
 def check_xlsx_failure(app):

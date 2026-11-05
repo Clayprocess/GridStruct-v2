@@ -35,6 +35,8 @@ LIGHT = {
     "ring":              "#18181b",  # --ring（focus 环）
     # 表格待复核单元格（amber-100）；xlsx 导出也用浅色这一档。
     "pending":           "#fef3c7",
+    # 文字识别全文里低置信度文字的波浪线（amber-600）。
+    "pending_line":      "#d97706",
     # 设置窗口：右侧内容底色比导航和卡片暗一档，分组卡片浮在上面（同 PixPin 配置窗口的层次）。
     "settings_surface":  "#f4f4f5",
     "settings_card":     "#ffffff",
@@ -66,6 +68,7 @@ DARK = {
     "input":             "#27272a",
     "ring":              "#d4d4d8",  # --ring: 240 4.9% 83.9%
     "pending":           "#422006",  # amber-950，深色底上仍能和普通格区分
+    "pending_line":      "#f59e0b",  # amber-500
     # 深色下卡片要比底色亮一档才分得出层次。
     "settings_surface":  "#111113",
     "settings_card":     "#1c1c1f",
@@ -118,7 +121,8 @@ CAPTURE_LINE_WIDTH = 2.4
 CAPTURE_HANDLE_SIZE = 13
 CAPTURE_EDGE_HANDLE_MIN = 120
 PIXEL_GRID = (0, 0, 0, 60)
-FLOAT_PANEL_SHADOW = (0, 0, 0, 42)
+# 工具条卡片投影：由外向内逐层叠加的 alpha（同贴图做法），整体下移 2px；一层实心偏移影在卡片底边会出一道硬边。
+FLOAT_PANEL_SHADOW_ALPHAS = (3, 5, 8, 12)
 # 贴图阴影：由外向内逐层叠加的 alpha，层数即阴影宽度（px）。
 PIN_SHADOW_ALPHAS = (3, 5, 8, 11, 15, 20)
 # 贴图状态色（同 PixPin）：操作中蓝、锁定橙、鼠标穿透绿，其余时间是普通黑影。
