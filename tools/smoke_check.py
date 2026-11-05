@@ -887,6 +887,17 @@ def loupe_hides_off_surface():
     w = AnnotationWindow(sample(640, 320), QPoint())
     w.show()
     flush()
+    # 悬停展开的“更多”菜单：鼠标停在菜单上不收，离开按钮和菜单后收起。
+    menu = w._toolbar._more_menu
+    menu.popup(w._toolbar._more.mapToGlobal(QPoint(0, w._toolbar._more.height())))
+    flush()
+    for target, visible in ((menu.geometry().center(), True), (menu.geometry().bottomRight() + QPoint(200, 200), False)):
+        move = QMouseEvent(QEvent.MouseMove, QPointF(menu.mapFromGlobal(target)), QPointF(target),
+                           Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+        with patch("annotate.toolbar.QCursor.pos", return_value=target):
+            QApplication.sendEvent(menu, move)
+            QTest.qWait(400)
+        assert menu.isVisible() == visible, f"more menu visible={menu.isVisible()} with cursor at {target}"
     c = w._canvas
     w._on_tool("magnifier")
     QTest.mouseMove(c.viewport(), c.mapFromScene(QPointF(60, 60)))
@@ -894,7 +905,7 @@ def loupe_hides_off_surface():
     assert c._loupe.isVisible()
     QApplication.sendEvent(c, QEvent(QEvent.Leave))
     assert not c._loupe.isVisible(), "magnifier loupe stayed after pointer left the canvas"
-    redo, menu = w._toolbar._menu_actions["redo"], w._toolbar._more_menu
+    redo = w._toolbar._menu_actions["redo"]
     menu.aboutToShow.emit()
     assert not redo.isEnabled(), "redo enabled with nothing to redo"
     w._on_tool("rect")

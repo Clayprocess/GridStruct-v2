@@ -17,7 +17,7 @@ import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QRegion
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QPainter, QPen, QRegion
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QMenu, QToolButton, QWidget, QLabel
 
 from styles import tokens as T
@@ -277,6 +277,11 @@ class FloatPanel(QWidget):
         self._more.setMenu(self._more_menu)
         # 同 PixPin 悬停即展开；showMenu 会进入嵌套事件循环，不能在事件过滤器里同步调用。
         self._more.installEventFilter(self)
+        # 悬停展开的菜单也要悬停收起：鼠标离开按钮和菜单一小会儿就关掉，否则会一直挂在那里。
+        # 留一点宽限，斜着划向菜单项时擦出边界不会误关。
+        self._more_leave = QTimer(self, singleShot=True, interval=250)
+        self._more_leave.timeout.connect(self._close_more_if_away)
+        self._more_menu.installEventFilter(self)
         layout.addWidget(self._more)
 
         self._ocr_feedback = QWidget(self)
@@ -311,7 +316,22 @@ class FloatPanel(QWidget):
             self._options.setMask(QRegion(0, 0, 1, 1))
         if watched is self._more and event.type() == QEvent.Enter and not self._more_menu.isVisible():
             QTimer.singleShot(0, self._more.showMenu)
+        if watched is self._more_menu and event.type() == QEvent.MouseMove:
+            # 菜单弹出时抓着鼠标，菜单外的移动也会送到这里。
+            if self._more_hover_zone().contains(event.globalPosition().toPoint()):
+                self._more_leave.stop()
+            elif not self._more_leave.isActive():
+                self._more_leave.start()
         return super().eventFilter(watched, event)
+
+    def _more_hover_zone(self):
+        # 按钮和菜单之间可能隔着几像素，取两者的外接矩形，划过缝隙不算离开。
+        button = QRect(self._more.mapToGlobal(QPoint()), self._more.size())
+        return button.united(self._more_menu.geometry())
+
+    def _close_more_if_away(self):
+        if self._more_menu.isVisible() and not self._more_hover_zone().contains(QCursor.pos()):
+            self._more_menu.close()
 
     def _pick(self, tool_id):
         self.toolSelected.emit(self._variant[tool_id] if tool_id in self._variant else tool_id)
