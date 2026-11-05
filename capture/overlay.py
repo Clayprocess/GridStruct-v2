@@ -69,6 +69,9 @@ class ScreenShotWindow(QObject):
         return self._drag_mode is not None and self._sel != self._sel_start
 
     def _build_windows(self):
+        self._screen_region = QRegion()
+        for frame in self._shot.frames:
+            self._screen_region |= QRegion(frame.geometry)
         self._windows = [_ScreenOverlay(self, frame) for frame in self._shot.frames]
         self._snap = RegionDetector(
             ignored_hwnds={int(widget.winId()) for window in self._windows
@@ -218,6 +221,22 @@ class ScreenShotWindow(QObject):
         # 内外遮罩随选区变化，异或区域也必须刷新，否则拖拽后会残留旧遮罩。
         changed = QRegion(previous).xored(QRegion(self._sel))
         return changed | self._border_region(previous) | self._border_region(self._sel)
+
+    def _preview_border_region(self, rect):
+        width = round(T.CAPTURE_PREVIEW_LINE_WIDTH)
+        inner = QRegion(rect)
+        border = QRegion(rect.adjusted(-width, -width, width, width)) - inner
+        x, y, w, h = rect.getRect()
+        # 只把落在真实屏幕覆盖之外的线段收回选区内；不能逐屏裁成矩形，
+        # 否则跨屏选区会多出接缝，虚拟包围框则会漏掉错位屏幕和逻辑空洞的边。
+        for strip, dx, dy in (
+            (QRect(x - width, y - width, width, h + 2 * width), width, 0),
+            (QRect(x + w, y - width, width, h + 2 * width), -width, 0),
+            (QRect(x - width, y - width, w + 2 * width, width), 0, width),
+            (QRect(x - width, y + h, w + 2 * width, width), 0, -width),
+        ):
+            border |= (QRegion(strip) - self._screen_region).translated(dx, dy) & inner
+        return border & self._screen_region
 
     def _hover_region(self):
         region = QRegion()
@@ -572,42 +591,42 @@ class _ScreenOverlay(QWidget):
     def paintEvent(self, event):
         c = self.controller
         offset = self.frame.geometry.topLeft()
-        selected = c._sel.translated(-offset)
         with QPainter(self) as painter:
             painter.drawPixmap(0, 0, self.frame.pixmap)
-            if not c._sel.isNull():
-                painter.setClipRegion(QRegion(self.rect()) - QRegion(selected))
-                painter.fillRect(self.rect(), _DIM)
-                painter.setClipping(False)
-                painter.setRenderHint(QPainter.Antialiasing)
-                border = QPen(QColor(T.CAPTURE_ACCENT), T.CAPTURE_LINE_WIDTH)
-                border.setJoinStyle(Qt.MiterJoin)
-                painter.setPen(border)
-                inset = T.CAPTURE_LINE_WIDTH / 2
-                painter.drawRect(QRectF(selected).adjusted(inset, inset, -inset, -inset))
-                if not c._frozen:
+            # 同 V1/PixPin：选区和悬停吸附到的元素都不压暗。
+            lit = (c._sel if not c._sel.isNull() else c._snap_shown).translated(-offset)
+            painter.setClipRegion(QRegion(self.rect()) - QRegion(lit))
+            painter.fillRect(self.rect(), _DIM)
+            painter.setClipping(False)
+            if not lit.isNull():
+                # 同 V1：悬停吸附和拖出新选区时粗线画在外侧，不压住要截的内容；定下后细线收回内侧。
+                outside = c._sel.isNull() or c._drag_mode == "create"
+                if outside:
+                    for part in c._preview_border_region(lit.translated(offset)).translated(-offset):
+                        painter.fillRect(part, QColor(T.CAPTURE_ACCENT))
+                else:
+                    half = T.CAPTURE_LINE_WIDTH / 2
+                    border = QPen(QColor(T.CAPTURE_ACCENT), T.CAPTURE_LINE_WIDTH)
+                    border.setJoinStyle(Qt.MiterJoin)
+                    painter.setRenderHint(QPainter.Antialiasing)
+                    painter.setPen(border)
+                    painter.drawRect(QRectF(lit).adjusted(half, half, -half, -half))
+            if not c._sel.isNull() and not c._frozen:
+                # 同 V1：拖动中隐藏手柄；尺寸提示照常显示，拖的时候正要看尺寸。
+                if c._drag_mode is None:
                     painter.setPen(QPen(QColor(T.CAPTURE_HANDLE_RING), 2))
                     painter.setBrush(QColor(T.CAPTURE_ACCENT))
                     for _, handle in c._handles():
                         painter.drawEllipse(QRectF(handle.translated(-offset)).adjusted(1, 1, -1, -1))
-                    painter.setPen(Qt.NoPen)
-                    painter.setRenderHint(QPainter.Antialiasing, False)
-                    tip, text = c.size_tip()
-                    tip.translate(-offset)
-                    if tip.intersects(self.rect()):
-                        painter.setBrush(QColor(*T.CAPTURE_TIP))
-                        painter.drawRoundedRect(tip, 6, 6)
-                        painter.setPen(QColor(T.DARK["foreground"]))
-                        painter.drawText(tip, Qt.AlignCenter, text)
-            else:
-                snap = c._snap_shown.translated(-offset)
-                # 同 PixPin：吸附到的元素本身不压暗。
-                painter.setClipRegion(QRegion(self.rect()) - QRegion(snap))
-                painter.fillRect(self.rect(), _DIM)
-                painter.setClipping(False)
-                if not snap.isNull():
-                    painter.setPen(QPen(QColor(T.CAPTURE_ACCENT), 2))
-                    painter.drawRect(snap.adjusted(1, 1, -1, -1))
+                painter.setPen(Qt.NoPen)
+                painter.setRenderHint(QPainter.Antialiasing, False)
+                tip, text = c.size_tip()
+                tip.translate(-offset)
+                if tip.intersects(self.rect()):
+                    painter.setBrush(QColor(*T.CAPTURE_TIP))
+                    painter.drawRoundedRect(tip, 6, 6)
+                    painter.setPen(QColor(T.DARK["foreground"]))
+                    painter.drawText(tip, Qt.AlignCenter, text)
             if c._guides and not c._frozen:
                 center = (c._sel.center() if not c._sel.isNull() else c._pointer_pos) - offset
                 painter.setPen(QPen(QColor(*T.CAPTURE_GUIDE), 1, Qt.DashLine))
