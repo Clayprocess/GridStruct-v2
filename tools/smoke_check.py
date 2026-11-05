@@ -65,7 +65,7 @@ def ocr_pixels():
     engine = OCREngine()
     previous = engine._engine
     seen = []
-    def infer(arr):
+    def infer(arr, **kwargs):
         seen.append(arr.shape)
         return SimpleNamespace(boxes=np.array([[[0, 0], [20, 0], [20, 10], [0, 10]]] * 2),
                                txts=["hello", "world"], scores=np.array([0.9, 0.8]))

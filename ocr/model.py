@@ -14,7 +14,8 @@ from .layout import LAYOUTS, arrange_results, format_text
 
 @dataclass(frozen=True)
 class OCRResult:
-    """polygon 为原图物理像素四点，box 为按图像 DPR 换算的逻辑区域。"""
+    """polygon 为原图物理像素四点，box 为按图像 DPR 换算的逻辑区域。
+    chars 为识别模型给出的逐字横向位置 ((字, left, right), ...)，原图物理像素，不含空格。"""
     box: QRect
     text: str
     score: float
@@ -23,6 +24,7 @@ class OCRResult:
     item_id: str = field(default_factory=lambda: uuid4().hex)
     polygon: tuple = ()
     raw_index: int = -1
+    chars: tuple = ()
 
 
 def _image_key(image):
@@ -159,7 +161,8 @@ class OCRDocument(QObject):
             "version": 2, "image_key": self.image_key,
             "raw": [{"id": item.item_id, "box": list(item.box.getRect()), "text": item.text,
                      "score": item.score, "polygon": [list(point) for point in item.polygon],
-                     "raw_index": item.raw_index} for item in self._raw],
+                     "raw_index": item.raw_index,
+                     "chars": [[text, left, right] for text, left, right in item.chars]} for item in self._raw],
             "layout": [{"id": item.item_id, "paragraph": item.paragraph, "line": item.line} for item in self._layout],
             "mode": self._mode, "draft": self._draft,
             # 改过的全文里各条的位置是跟着每次改动算出来的，读回时不能靠文字比对重猜（重复文字会认错）。
@@ -194,9 +197,19 @@ class OCRDocument(QObject):
             text, score, raw_index = entry.get("text"), entry.get("score"), entry.get("raw_index")
             if not isinstance(text, str) or type(score) not in (float, int) or not 0 <= score <= 1 or not math.isfinite(score) or type(raw_index) is not int:
                 raise ValueError("OCR 原始文字或置信度无效")
+            chars = entry.get("chars", [])
+            # 逐字位置是后加的可选字段：旧记录没有；格式不对就丢掉，表格分格会退回按字宽估算。
+            if not isinstance(chars, list) or any(
+                    not isinstance(item, list) or len(item) != 3 or not isinstance(item[0], str)
+                    or len(item[0]) != 1
+                    or any(type(value) not in (int, float) or not math.isfinite(value) for value in item[1:])
+                    or item[1] >= item[2]
+                    for item in chars):
+                chars = []
             identifiers.add(identifier)
             records.append(OCRResult(QRect(*box), text, score, item_id=identifier,
-                                     polygon=tuple(tuple(point) for point in polygon), raw_index=raw_index))
+                                     polygon=tuple(tuple(point) for point in polygon), raw_index=raw_index,
+                                     chars=tuple((item[0], float(item[1]), float(item[2])) for item in chars)))
         document = cls(records, image)
         by_id = {item.item_id: item for item in document._raw}
         arranged, used = [], set()

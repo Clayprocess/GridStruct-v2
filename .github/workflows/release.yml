@@ -57,6 +57,11 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python tools/check_ocr_windows.py
 
+      - name: 跨列表格数据回归
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tools/check_table.py --cross-column-only
+
       - name: 构建便携包
         run: |
           python tools/build_portable.py --output dist/release

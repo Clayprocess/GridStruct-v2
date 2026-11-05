@@ -142,10 +142,13 @@ def _write_sheet(sheet, document, normal, pending):
 
 
 def _confidence(cell):
+    split = "文字和相邻格被识别成一整段，已沿表格线切开" if cell.split else ""
+    if split and not cell.low_confidence:
+        return split
     weighted, minimum = cell.weighted_confidence, cell.minimum_confidence
     if weighted is None:
         return "模型置信度未知"
-    return f"模型置信度（加权平均）{weighted:.0%}，最低 {minimum:.0%}"
+    return (split + "；" if split else "") + f"模型置信度（加权平均）{weighted:.0%}，最低 {minimum:.0%}"
 
 
 def _spans(document, row, column):

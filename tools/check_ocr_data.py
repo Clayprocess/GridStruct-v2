@@ -174,9 +174,10 @@ def engine_geometry():
     engine = OCREngine()
     previous = engine._engine
     polygon = [[30, 45], [150, 30], [156, 60], [36, 75]]
-    engine._engine = lambda arr: SimpleNamespace(
+    words = ((("旋", .9, [[30, 45], [90, 40], [90, 70], [30, 75]]), ("转", .9, [[90, 40], [156, 30], [156, 60], [90, 70]])), ())
+    engine._engine = lambda arr, **kwargs: SimpleNamespace(
         boxes=np.array([polygon, [[0, 0], [10, 0], [10, 10], [0, 10]]]),
-        txts=["旋转", ""], scores=[.35, .1])
+        txts=["旋转", ""], scores=[.35, .1], word_results=words)
     try:
         phases = []
         result = engine.recognize_image(image(1.5), phases.append)
@@ -184,8 +185,18 @@ def engine_geometry():
         assert result[0].polygon == tuple(tuple(float(value) for value in point) for point in polygon)
         assert result[0].box == QRect(20, 20, 84, 30)
         assert [item.raw_index for item in result] == [0, 1]
+        # 逐字位置（表格沿列线切开跨列文字框用）随识别结果保存，坏数据读回时丢掉而不是整条报错。
+        assert result[0].chars == (("旋", 30.0, 90.0), ("转", 90.0, 156.0)) and result[1].chars == ()
         document = OCRDocument(result, image(1.5))
         assert len(document.raw_results) == 2 and len(document) == 1
+        payload = document.to_payload()
+        assert OCRDocument.from_payload(payload, image(1.5)).raw_results[0].chars == result[0].chars
+        for bad in ([["旋", "x", 1]], [["旋", 90, 30]], [["旋", 30, float("nan")]], [["旋转", 30, 90]], None):
+            payload["raw"][0]["chars"] = bad
+            assert OCRDocument.from_payload(payload, image(1.5)).raw_results[0].chars == ()
+        from ocr.engine import _chars
+        assert _chars(None) == ()
+        assert _chars((("旋", .9, [[float("nan"), 0], [90, 0]]),)) == ()
     finally:
         engine._engine = previous
     print("PASS DATA: physical rotated polygon, logical DPR box, raw engine order and empty evidence")
