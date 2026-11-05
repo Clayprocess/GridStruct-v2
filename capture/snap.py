@@ -1,12 +1,16 @@
 # 智能吸附：鼠标悬停时自动识别窗口/控件矩形。结构参考 PixPin：
 #   1. 截图开始时拍一次窗口快照（画面已冻结，期间不再刷新），鼠标所在窗口同步命中；
 #   2. 一条常驻工作线程做 MSAA 点命中：从窗口对象起逐层 accHitTest，最多 31 层，
-#      每层 accLocation 得到“窗口 → … → 最内层控件”的整条路径；COM 只初始化一次，
+#      每层 accLocation 得到“窗口 → … → 最内层控件”的路径；COM 只初始化一次，
 #      每个窗口的 IAccessible 对象建一次反复用；
+#      浏览器的 accHitTest 会跳层（直接返回单元格里的文字），整张表格、行不在路径里。
+#      所以分两段：点命中结果先送回界面出框；再沿 accParent 补全祖先（每层一次跨进程调用，
+#      Edge 里 9 层约 200ms），新请求一来就中断，补过的元素缓存，鼠标停住时滚轮就能切到整张表格；
 #   3. 请求只保留最新一个，结果用 Qt 信号立刻送回界面线程；
 #   4. 最内层矩形仍包含鼠标时不再查询；换控件时保留旧框直到新结果到达，
 #      避免先退回外层容器再跳到新控件；
-#   5. 单次查询超过 300ms 的窗口之后只用窗口矩形；卡住超过 2s 的线程丢弃、换新线程。
+#   5. 单次点命中（不含补祖先）超过 300ms 的窗口本次截图只用窗口矩形；
+#      卡住超过 2s 的线程丢弃、换新线程，那个窗口冷却 30s 后再试。
 # 非 Windows 平台返回空（Linux 开发机不断）。
 
 import ctypes
@@ -25,9 +29,15 @@ class _Results(QObject):
 
 
 _results = None
-# 外部 COM 调用可能不返回：卡住的窗口本次运行只用窗口吸附；卡住的线程留给它自己结束，
+# 外部 COM 调用可能不返回：卡住的窗口冷却期内只用窗口吸附；卡住的线程留给它自己结束，
 # 最多容忍 _MAX_ABANDONED 条，再多就整体停用点命中，避免无限堆积。
-_hung_hwnds = set()
+_hung_hwnds = {}  # hwnd -> 判为卡死的时刻
+
+
+def _hung(hwnd):
+    # 偶尔一次卡顿（首次查询、页面正忙）不该让窗口在整个运行期间都只能吸附整窗。
+    since = _hung_hwnds.get(hwnd)
+    return since is not None and time.monotonic() - since < _HUNG_COOLDOWN_S
 _abandoned_lock = Lock()
 _abandoned = 0
 
@@ -106,11 +116,19 @@ class _Worker:
                         print(f"[GridStruct-V2] 点命中查询失败：{error}", flush=True)
                 elapsed = (time.perf_counter() - started) * 1000
                 with self._cond:
+                    if self._stopped:
+                        return
+                self._results.done.emit((token, key, x, y, rects, elapsed))
+                # 第二段：补祖先。鼠标移到别处（有新请求）就放弃，不拖慢下一次点命中。
+                full = provider.ancestors(lambda: self._pending is not None or self._stopped) if provider else None
+                with self._cond:
                     self.busy = None
                     self._current = None
                     if self._stopped:
                         return
-                self._results.done.emit((token, key, x, y, rects, elapsed))
+                if full is not None and full != rects:
+                    # 补全耗时不计入慢窗口判断：点命中本身已经出框了。
+                    self._results.done.emit((token, key, x, y, full, 0.0))
         finally:
             # COM 的创建、调用和释放必须在同一线程。
             if provider is not None:
@@ -175,7 +193,7 @@ class RegionDetector(QObject):
         hwnd, window_rect = hit
         key = (hwnd, window_rect.getRect())
         x, y = self._point
-        if self._only_window or key in self._slow or hwnd in _hung_hwnds:
+        if self._only_window or key in self._slow or _hung(hwnd):
             self._show(key, x, y)
             return
         hits = self._hits.get(key)
@@ -189,7 +207,7 @@ class RegionDetector(QObject):
         remaining = _HIT_REUSE_S - (time.monotonic() - hits[2]) if covered else 0
         if remaining <= 0:
             self._request(key, hwnd, x, y)
-            if hwnd in _hung_hwnds:
+            if _hung(hwnd):
                 self._show(key, x, y)
                 return
             remaining = min(_HIT_REUSE_S, _HUNG_S)
@@ -200,7 +218,7 @@ class RegionDetector(QObject):
         from .screen import ScreenManager
 
         window_rect = QRect(*key[1])
-        chain = [] if key in self._slow or key[0] in _hung_hwnds else self._element_chain(key, window_rect, x, y)
+        chain = [] if key in self._slow or _hung(key[0]) else self._element_chain(key, window_rect, x, y)
         chain.append(window_rect)
         # 换到另一个元素上时回到最内层，在同一元素内移动保持滚轮选的层级。
         if not self._chain or chain[0] != self._chain[0]:
@@ -224,10 +242,11 @@ class RegionDetector(QObject):
         worker = self._worker
         hung_hwnd = worker.abandon_if_hung(time.monotonic()) if worker is not None else None
         if hung_hwnd is not None:
-            _hung_hwnds.add(hung_hwnd)
-            print(f"[GridStruct-V2] 点命中超过 {_HUNG_S:.0f}s 未返回，窗口 {hung_hwnd} 改用窗口吸附", flush=True)
+            _hung_hwnds[hung_hwnd] = time.monotonic()
+            print(f"[GridStruct-V2] 点命中超过 {_HUNG_S:.0f}s 未返回，窗口 {hung_hwnd} "
+                  f"{_HUNG_COOLDOWN_S:.0f}s 内改用窗口吸附", flush=True)
             worker = self._worker = None
-            if hwnd in _hung_hwnds:
+            if _hung(hwnd):
                 return
         if worker is None:
             if _abandoned >= _MAX_ABANDONED:
@@ -404,12 +423,13 @@ def _window_at(user32, x, y, ignored_hwnd):
 
 # 控件最小边长（物理像素）：任务栏、托盘、标签页关闭按钮这类小图标也要能框到。
 _MIN_ELEMENT = 4
-# 单次点命中超过这个耗时的窗口，之后不再做点命中（300ms 降级）。
+# 单次点命中（不含补祖先）超过这个耗时的窗口，本次截图不再做点命中（300ms 降级）。
 _SLOW_POINT_MS = 300
 # 点命中结果的沿用时长（秒）。
 _HIT_REUSE_S = 1.0
 # 单次点命中超过它视为卡死。
 _HUNG_S = 2.0
+_HUNG_COOLDOWN_S = 30.0
 _MAX_ABANDONED = 2
 
 
@@ -456,6 +476,10 @@ class _Accessibility:
         self._iid = (ctypes.c_byte * 16).from_buffer_copy(UUID(self._IID).bytes_le)
         # hwnd -> (窗口的 IAccessible, 它的矩形)：跨进程取一次要往返一趟，同一会话内复用。
         self._roots = {}
+        # 上次点命中最深的完整对象，留给 ancestors() 补祖先：(对象, x, y, 窗口矩形, 缓存键, 路径)
+        self._deep = None
+        # (hwnd, 点命中路径) -> 补全后的路径：鼠标停住时的重查不再重新走一遍父链。
+        self._walks = {}
 
     def _call(self, pointer, index, argtypes, *args):
         ctypes = self._ctypes
@@ -471,6 +495,7 @@ class _Accessibility:
             self._call(pointer, 2, [])
 
     def close(self):
+        self._drop_deep()
         for root, _rect in self._roots.values():
             self._release(root)
         self._roots.clear()
@@ -516,12 +541,29 @@ class _Accessibility:
             self._release(dispatch)
         return accessible
 
-    def _ancestors(self, node, x, y, stop):
-        """沿 accParent 一直向上到窗口对象，返回包含该点的祖先矩形（由外到内）。"""
+    def _drop_deep(self):
+        if self._deep is not None:
+            self._release(self._deep[0])
+            self._deep = None
+
+    def ancestors(self, interrupted):
+        """沿上次点命中最深对象的 accParent 走到窗口，返回补全后的路径（由外到内）。
+
+        矩形相同不代表是同一个对象（包装层常和子元素一样大），只在到达窗口或越界时停。
+        interrupted() 为真时放弃并返回 None；没有可补的对象也返回 None。
+        """
+        if self._deep is None:
+            return None
+        node, x, y, stop, key, rects = self._deep
+        if key in self._walks:
+            self._drop_deep()
+            return self._walks[key]
         ctypes = self._ctypes
         found, current = [], node
         try:
             for _ in range(self._MAX_DEPTH):
+                if interrupted():
+                    return None
                 parent = ctypes.c_void_p()
                 self._call(current, 7, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(parent))
                 if not parent:
@@ -533,7 +575,6 @@ class _Accessibility:
                 if not current:
                     break
                 rect = self._location(current, 0)
-                # 矩形相同不代表是同一个对象（包装层常和子元素一样大），只在到达窗口或越界时停。
                 if rect == stop or not rect.contains(x, y):
                     break
                 found.append(rect)
@@ -542,11 +583,16 @@ class _Accessibility:
         finally:
             if current is not node:
                 self._release(current)
-        return found[::-1]
+            self._drop_deep()
+        unique = dict.fromkeys(r.getRect() for r in found + rects)
+        full = sorted((QRect(*r) for r in unique), key=lambda r: r.width() * r.height(), reverse=True)
+        self._walks[key] = full
+        return full
 
     def hit_path(self, hwnd, x, y):
-        """由外到内返回鼠标所在的各层控件矩形（物理像素）。"""
+        """由外到内返回 accHitTest 逐层命中的控件矩形（物理像素），跳过的层由 ancestors() 补。"""
         ctypes = self._ctypes
+        self._drop_deep()
         entry = self._root(hwnd)
         if entry is None:
             return []
@@ -583,11 +629,8 @@ class _Accessibility:
                 else:
                     break
             if descended:
-                # 浏览器等程序的 accHitTest 会跳层（直接返回单元格里的文字），中间的整张表格、行
-                # 不在路径里；从最深的对象沿父对象走到窗口，把整条祖先链补回来，滚轮才能切到整张表格。
-                ancestors = self._ancestors(accessible, x, y, root_rect)
-                unique = dict.fromkeys(r.getRect() for r in ancestors + rects)
-                rects = sorted((QRect(*r) for r in unique), key=lambda r: r.width() * r.height(), reverse=True)
+                key = (hwnd, tuple(r.getRect() for r in rects))
+                self._deep, accessible = (accessible, x, y, root_rect, key, list(rects)), root
         except OSError:
             # 某层不支持命中或定位：保留已经得到的外层路径。窗口对象本身失效（窗口已关）就丢掉缓存。
             if accessible is root and not rects:

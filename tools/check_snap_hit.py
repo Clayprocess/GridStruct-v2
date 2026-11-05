@@ -31,6 +31,8 @@ class FakeAccessible(snap._Accessibility):
         self._ctypes = ctypes
         self._iid = (ctypes.c_byte * 16)()
         self._roots = {}
+        self._deep = None
+        self._walks = {}
         self._com_owned = False
         self.objects = objects
         self.deepest = deepest
@@ -40,6 +42,7 @@ class FakeAccessible(snap._Accessibility):
         self.released = []
         self.acquired = []
         self.calls = 0
+        self.parent_calls = 0
         self.opened = 0
         fake = self
 
@@ -86,6 +89,7 @@ class FakeAccessible(snap._Accessibility):
             variant.vt, variant.value.lVal = snap._Accessibility._VT_I4, 0
             return 0
         if index == 7:  # get_accParent
+            self.parent_calls += 1
             parent = self.parents.get(node)
             args[0]._obj.value = None if parent is None else 1000 + parent
             if parent is not None:
@@ -154,37 +158,74 @@ def settle(app, detector):
             return
 
 
+def full_path(provider, x, y):
+    """两段合起来：点命中，再补祖先（与工作线程的顺序一致）。"""
+    rects = provider.hit_path(1, x, y)
+    return provider.ancestors(lambda: False) or rects
+
+
 def check_hit_path():
     provider = FakeAccessible(tree())
-    assert provider.hit_path(1, 115, 18) == [TOOLBAR, TAB, CLOSE]
-    assert provider.hit_path(1, 400, 300) == [BODY]
+    assert full_path(provider, 115, 18) == [TOOLBAR, TAB, CLOSE]
+    assert full_path(provider, 400, 300) == [BODY]
     assert provider.opened == 1, "同一窗口的 IAccessible 应只取一次"
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
     full = [BODY, TABLE, ROW, CELL, TEXT]
     provider = FakeAccessible(page(), deepest=True)
-    assert provider.hit_path(1, 220, 155) == full
-    assert provider.hit_path(1, 50, 400) == [BODY]
+    assert provider.hit_path(1, 220, 155) == [TEXT], "第一段只做点命中，不等补祖先"
+    assert provider.ancestors(lambda: False) == full
+    parents = provider.parent_calls
+    assert full_path(provider, 220, 155) == full
+    assert provider.parent_calls == parents, "同一元素补过祖先后应直接用缓存"
+    provider.hit_path(1, 285, 175)
+    assert provider.ancestors(lambda: True) is None, "有新请求时应放弃补祖先"
+    assert full_path(provider, 50, 400) == [BODY]
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
     # 只有窗口一层跳到单元格，单元格往下正常逐层命中：单元格之上的行、表格也要补回。
     provider = FakeAccessible(page(), deepest={1})
-    assert provider.hit_path(1, 220, 155) == full, provider.hit_path(1, 220, 155)
+    assert full_path(provider, 220, 155) == full
     # 单元格和文字之间有一层同样大小的包装：不能因为矩形重复就停止向上。
     wrapped = page()
     wrapped[8], wrapped[10] = (CELL, [10]), (TEXT, [9])
     provider = FakeAccessible(wrapped, deepest=True)
-    assert provider.hit_path(1, 220, 155) == full, provider.hit_path(1, 220, 155)
+    assert full_path(provider, 220, 155) == full
+    provider.hit_path(1, 220, 155)  # 留一个未补的对象，close 也要释放
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
     # 最深对象取位置失败：保留已有路径，也不能漏放它的引用。
     provider = FakeAccessible(page(), deepest=True, broken={9})
     for _ in range(20):
-        provider.hit_path(1, 220, 155)
+        full_path(provider, 220, 155)
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
-    print("PASS: hit_path descends window → toolbar → tab → close button, recovers skipped table/row via accParent, "
-          "reuses the window object, releases every reference")
+    print("PASS: hit_path descends window → toolbar → tab → close button; ancestors() recovers skipped table/row, "
+          "caches the walk, stops on a new request, releases every reference")
+
+
+def check_two_phase():
+    """浏览器式跳层：先发点命中结果出框，停住后再发补全路径，滚轮能切到整张表格。"""
+    app = QApplication.instance() or QApplication([])
+    provider = FakeAccessible(page(), deepest=True)
+    original = (snap._IS_WIN, snap._try_init_msaa, snap._win32_api, snap._snapshot_windows)
+    snap._IS_WIN, snap._win32_api, snap._try_init_msaa = True, FakeUser32, lambda: provider
+    snap._snapshot_windows = lambda _ignored: [(7, WINDOW)]
+    detector = snap.RegionDetector(only_window=False)
+    results = []
+    detector.regionDetected.connect(results.append)
+    try:
+        detector.detect(QPoint(220, 155))
+        settle(app, detector)
+        assert results[-1] == TEXT, results
+        for expected in (CELL, ROW, TABLE, BODY):
+            detector.step_level(1)
+            assert results[-1] == expected, (expected, results)
+        assert (7, WINDOW.getRect()) not in detector._slow
+        print("PASS: two-phase query shows the hit first, then the wheel reaches the whole table")
+    finally:
+        detector.shutdown()
+        snap._IS_WIN, snap._try_init_msaa, snap._win32_api, snap._snapshot_windows = original
 
 
 def check_detector():
@@ -259,6 +300,9 @@ def check_hung_query():
                 release.wait(5)
             return [TOOLBAR] if hwnd == 7 else []
 
+        def ancestors(self, _interrupted):
+            return None
+
         def close(self):
             pass
 
@@ -280,7 +324,7 @@ def check_hung_query():
         time.sleep(0.35)
         hung = detector._worker
         app.processEvents()
-        assert 7 in snap._hung_hwnds, "卡住超过阈值的窗口应改用窗口吸附"
+        assert snap._hung(7), "卡住超过阈值的窗口应改用窗口吸附"
         assert detector._worker is None and snap._abandoned == 1
         assert results[-1] == WINDOW
         detector.detect(QPoint(100, 650))
@@ -299,7 +343,7 @@ def check_hung_query():
     finally:
         release.set()
         detector.shutdown()
-        snap._hung_hwnds.discard(7)
+        snap._hung_hwnds.pop(7, None)
         snap._IS_WIN, snap._try_init_msaa, snap._win32_api, snap._snapshot_windows, snap._HUNG_S = original
 
 
@@ -313,6 +357,9 @@ def check_stationary_refinement():
         def hit_path(self, *_args):
             calls.append(time.monotonic())
             return [TOOLBAR] if len(calls) == 1 else [TOOLBAR, TAB, CLOSE]
+
+        def ancestors(self, _interrupted):
+            return None
 
         def close(self):
             pass
@@ -355,6 +402,9 @@ def check_completion_during_timeout_check():
             release.wait(3)
             return [TOOLBAR]
 
+        def ancestors(self, _interrupted):
+            return None
+
         def close(self):
             pass
 
@@ -377,7 +427,7 @@ def check_completion_during_timeout_check():
         try:
             with patch.object(snap.time, "monotonic", side_effect=complete):
                 detector._request(key, 70, 116, 18)
-            assert 70 not in snap._hung_hwnds, "已完成的查询不能被判为卡死"
+            assert not snap._hung(70), "已完成的查询不能被判为卡死"
             settle(app, detector)
         finally:
             release.set()
@@ -387,7 +437,7 @@ def check_completion_during_timeout_check():
 
 if __name__ == "__main__":
     failures = []
-    for check in (check_hit_path, check_detector, check_hung_query, check_stationary_refinement,
+    for check in (check_hit_path, check_two_phase, check_detector, check_hung_query, check_stationary_refinement,
                   check_completion_during_timeout_check):
         try:
             check()

@@ -47,6 +47,9 @@ def run_case(action):
             gate.wait()
             return [element_rect]
 
+        def ancestors(self, _interrupted):
+            return None
+
         def close(self):
             self.record.append(threading.get_ident())
 
