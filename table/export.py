@@ -142,6 +142,8 @@ def _write_sheet(sheet, document, normal, pending):
 
 
 def _confidence(cell):
+    if cell.split and not cell.low_confidence:
+        return "文字和相邻格被识别成一整段，已沿表格线切开"
     weighted, minimum = cell.weighted_confidence, cell.minimum_confidence
     if weighted is None:
         return "模型置信度未知"

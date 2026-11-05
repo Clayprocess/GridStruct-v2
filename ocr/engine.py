@@ -66,9 +66,12 @@ class OCREngine:
         # Qt 每行按 4 字节对齐；RapidOCR 的 ndarray 输入采用 BGR。
         rows = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(h, img.bytesPerLine())
         arr = rows[:, :w * 3].reshape(h, w, 3).copy()
-        res = self._engine(arr)
+        # 逐字位置来自识别模型的 CTC 解码位置，不多跑一次识别；表格分格靠它沿列线切开跨列文字框。
+        res = self._engine(arr, return_word_box=True, return_single_char_box=True)
         out = []
         if res.boxes is not None:
+            words = getattr(res, "word_results", None) or ()
+            words = words if len(words) == len(res.txts) else ()
             for index, (box, txt, score) in enumerate(zip(res.boxes, res.txts, res.scores)):
                 xs = [p[0] for p in box]
                 ys = [p[1] for p in box]
@@ -76,5 +79,21 @@ class OCREngine:
                                   float(max(xs) - min(xs)), float(max(ys) - min(ys)))
                 r = ScreenManager.image_rect_to_logical(physical, image).toAlignedRect()
                 polygon = tuple((float(point[0]), float(point[1])) for point in box)
-                out.append(OCRResult(r, txt or "", float(score or 0), polygon=polygon, raw_index=index))
+                chars = _chars(words[index]) if words else ()
+                out.append(OCRResult(r, txt or "", float(score or 0), polygon=polygon, raw_index=index, chars=chars))
         return out
+
+
+def _chars(words):
+    """RapidOCR 的逐字结果 ((字, 置信度, 四点框), ...) 转成 ((字, left, right), ...)，原图物理像素。"""
+    chars = []
+    for word in words:
+        try:
+            text, _, box = word
+            xs = [float(point[0]) for point in box]
+        except (TypeError, ValueError, IndexError):
+            return ()
+        if not isinstance(text, str) or not xs:
+            return ()
+        chars.append((text, min(xs), max(xs)))
+    return tuple(chars)

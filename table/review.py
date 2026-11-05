@@ -4,10 +4,12 @@
 v1 只允许同形网格重跑，这里网格随拖线实时变化，所以按人工格的中心点找回新位置。
 """
 
+from bisect import bisect_right
 from dataclasses import replace
 from statistics import median
+from unicodedata import east_asian_width
 
-from .model import CONFIRMED, CORRECTED, PENDING, CellCorrection, TableCell, TableDocument
+from .model import CONFIRMED, CORRECTED, PENDING, CellCorrection, Rect, TableCell, TableDocument
 
 
 def visual_rows(tokens):
@@ -48,10 +50,70 @@ def join_lines(lines):
     return text
 
 
+def _char_spans(token):
+    """token.text 每个字符的横向范围。
+
+    优先用识别模型的逐字位置（实测误差约 2px）；没有或对不上时按字宽估算：
+    中文等全角字算 1，西文、数字、半角符号算 0.55，空格算 0.35。
+    """
+    text = token.text
+    glyphs = [index for index, ch in enumerate(text) if not ch.isspace()]
+    if token.chars and len(token.chars) == len(glyphs) and all(
+            text[index] == ch for index, (ch, _, _) in zip(glyphs, token.chars)):
+        spans = [None] * len(text)
+        for index, (_, left, right) in zip(glyphs, token.chars):
+            spans[index] = (left, right)
+        edge = token.box.left
+        for index, span in enumerate(spans):
+            # 空格跟着前一个字，切开后会被 strip 掉。
+            spans[index] = span or (edge, edge)
+            edge = spans[index][1]
+        return spans
+    weights = [0.35 if ch.isspace() else 1.0 if east_asian_width(ch) in "WF" else 0.55 for ch in text]
+    total = sum(weights) or 1.0
+    scale = token.box.width / total
+    spans, edge = [], token.box.left
+    for weight in weights:
+        spans.append((edge, edge + weight * scale))
+        edge += weight * scale
+    return spans
+
+
+def split_at_columns(token, grid):
+    """OCR 常把同一基线上、分属相邻两列的文字合成一个框（长账号顶满列宽、窄列文字贴线）。
+
+    按中心点整条落格会让左列多吃、右列丢字，所以分格前沿列线把框切开：
+    每个字按自己的中心归到列线某一侧。合并格内部的线两侧本是同一格，不切。
+    检测框只是略微压线、字都在一侧时原样返回，不算切开。
+    """
+    row = grid.cell_at(token.box.center_x, token.box.center_y)[0]
+    lines = grid.vertical_lines
+    cuts = [lines[index] for index in range(1, len(lines) - 1)
+            if token.box.left < lines[index] < token.box.right
+            and grid.anchor(row, index - 1) != grid.anchor(row, index)]
+    if not cuts:
+        return (token,)
+    groups = {}
+    for ch, (left, right) in zip(token.text, _char_spans(token)):
+        groups.setdefault(bisect_right(cuts, (left + right) / 2), []).append((ch, left, right))
+    parts = []
+    for _, chars in sorted(groups.items()):
+        text = "".join(ch for ch, _, _ in chars).strip()
+        glyphs = tuple((ch, left, right) for ch, left, right in chars if not ch.isspace())
+        if not text:
+            continue
+        left = round(min(left for _, left, _ in glyphs))
+        right = max(left + 1, round(max(right for _, _, right in glyphs)))
+        parts.append((text, Rect(left, token.box.top, right, token.box.bottom), glyphs))
+    if len(parts) < 2:
+        return (token,)
+    return tuple(replace(token, text=text, box=box, chars=glyphs, split=True) for text, box, glyphs in parts)
+
+
 def build_document(tokens, grid):
-    """文字按中心点落格，落进合并区域的归锚点格。"""
+    """文字按中心点落格，落进合并区域的归锚点格；跨列线的文字框先沿线切开。"""
     buckets = [[[] for _ in range(grid.column_count)] for _ in range(grid.row_count)]
-    for token in tokens:
+    for token in (part for token in tokens for part in split_at_columns(token, grid)):
         row, column = grid.anchor(*grid.cell_at(token.box.center_x, token.box.center_y))
         buckets[row][column].append(token)
     cells = []
@@ -61,7 +123,7 @@ def build_document(tokens, grid):
             lines = visual_rows(tuple(cell_tokens))
             text = join_lines(" ".join(token.text.strip() for token in line) for line in lines)
             cell = TableCell(text, text, tuple(token for line in lines for token in line))
-            row.append(replace(cell, status=PENDING) if cell.low_confidence else cell)
+            row.append(replace(cell, status=PENDING) if cell.needs_review else cell)
         cells.append(tuple(row))
     return TableDocument(grid, tuple(cells))
 
@@ -98,7 +160,7 @@ def carry_over(base, recognized):
             lines = visual_rows((*remaining, *(part for part in corrections if part.text)))
             text = join_lines(" ".join(part.text for part in line) for line in lines)
             status = (CORRECTED if any(part.status == CORRECTED for part in corrections) else CONFIRMED) if corrections else ""
-            if TableCell(tokens=remaining).low_confidence:
+            if TableCell(tokens=remaining).needs_review:
                 status = PENDING
             updated.append(replace(fresh, text=text, status=status, corrections=corrections))
         cells.append(tuple(updated))
@@ -142,7 +204,7 @@ class TableReview:
             return
         self._record(self.document)
         # 改回原文等于撤销人工修改，格子回到识别时的状态。
-        status = CORRECTED if text != cell.original_text else PENDING if cell.low_confidence else ""
+        status = CORRECTED if text != cell.original_text else PENDING if cell.needs_review else ""
         self.document = self.document.with_cell(row, column, replace(cell, text=text, status=status, corrections=()))
 
     def confirm(self, row, column):

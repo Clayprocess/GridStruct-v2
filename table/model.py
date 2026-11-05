@@ -42,9 +42,13 @@ class Rect:
 
 @dataclass(frozen=True, slots=True)
 class Token:
+    """chars：识别模型给出的逐字横向位置 ((字, left, right), ...)，不含空格；旧结果为空。
+    split：OCR 把相邻两列的文字合成一个框，分格时沿列线切出来的一段。"""
     text: str
     score: float
     box: Rect
+    chars: tuple = ()
+    split: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +194,14 @@ class TableCell:
         weighted, minimum = self.weighted_confidence, self.minimum_confidence
         return ((weighted is not None and weighted < LOW_CONFIDENCE_WEIGHTED)
                 or (minimum is not None and minimum < LOW_CONFIDENCE_MINIMUM))
+
+    @property
+    def split(self):
+        return any(token.split for token in self.tokens)
+
+    @property
+    def needs_review(self):
+        return self.low_confidence or self.split
 
     @property
     def human(self):

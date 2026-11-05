@@ -37,7 +37,8 @@ def tokens_from_results(results, image):
         top = max(0, round(min(ys)))
         right = min(image.width(), max(left + 1, round(max(xs))))
         bottom = min(image.height(), max(top + 1, round(max(ys))))
-        tokens.append(Token(result.text, float(result.score), Rect(left, top, right, bottom)))
+        tokens.append(Token(result.text, float(result.score), Rect(left, top, right, bottom),
+                            chars=tuple(getattr(result, "chars", ()))))
     return tuple(tokens)
 
 
@@ -124,7 +125,8 @@ def reading_order(regions):
 
 def _shift(token, dx, dy):
     box = token.box
-    return Token(token.text, token.score, Rect(box.left - dx, box.top - dy, box.right - dx, box.bottom - dy))
+    return Token(token.text, token.score, Rect(box.left - dx, box.top - dy, box.right - dx, box.bottom - dy),
+                 chars=tuple((ch, left - dx, right - dx) for ch, left, right in token.chars))
 
 
 @dataclass(frozen=True)

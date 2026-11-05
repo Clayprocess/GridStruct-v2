@@ -114,6 +114,74 @@ def check_review():
     assert review.document.cell(0, 1).status == ""
 
 
+def check_cross_column_split():
+    """#53：OCR 把相邻两列贴线的文字合成一个框时，沿列线切开，两格都标待复核。"""
+    from table.model import PENDING, CellMerge, GridSpec, Rect, Token
+    from table.review import TableReview
+    chars = tuple((ch, 10 + i * 10, 18 + i * 10) for i, ch in enumerate("0001某单位"))
+    joined = Token("0001 某单位", .99, Rect(8, 5, 88, 25), chars=chars)
+    grid = GridSpec((0, 30), (0, 49, 100))
+    review = TableReview((joined,), grid)
+    assert review.document.rows == (("0001", "某单位"),), review.document.rows
+    assert [cell.status for cell in review.document.cells[0]] == [PENDING, PENDING]
+    # 拖线后按新位置重新切：线挪到第 2 个字后，左格只剩前两个字。
+    review.set_grid(GridSpec((0, 30), (0, 29, 100)))
+    assert review.document.rows == (("00", "01 某单位"),), review.document.rows
+    review.undo()
+    assert review.document.rows == (("0001", "某单位"),)
+    # 合并格内部的线两侧本是同一格，不切。
+    merged = TableReview((joined,), GridSpec((0, 30), (0, 49, 100), (CellMerge(0, 0, 1, 2),)))
+    assert merged.document.rows == (("0001 某单位", ""),) and merged.document.cell(0, 0).status == ""
+    # 检测框只是略微压线、字都在一侧：不切、不标待复核。
+    edge = Token("人民币元", .99, Rect(50, 5, 102, 25), chars=tuple((ch, 52 + i * 12, 62 + i * 12) for i, ch in enumerate("人民币元")))
+    review = TableReview((edge,), GridSpec((0, 30), (0, 52, 110)))
+    assert review.document.rows == (("", "人民币元"),) and review.document.cell(0, 1).status == ""
+    # 没有逐字位置的旧结果按字宽估算：中文 1、数字和点 0.55。
+    estimated = Token("人民币元0.05", .99, Rect(0, 5, 88, 25))
+    review = TableReview((estimated,), GridSpec((0, 30), (0, 58, 120)))
+    assert review.document.rows == (("人民币元", "0.05"),), review.document.rows
+    # 逐字位置和文字对不上（旧数据或模型异常）时同样退回估算，不报错。
+    broken = Token("人民币元0.05", .99, Rect(0, 5, 88, 25), chars=(("x", 0, 5),))
+    assert TableReview((broken,), GridSpec((0, 30), (0, 58, 120))).document.rows == (("人民币元", "0.05"),)
+    # 整条链路：真 OCR 跑贴线的有线表，账号和户名、币种和利率各回各格。
+    image = QImage(720, 100, QImage.Format_RGB32)
+    image.fill(QColor("white"))
+    painter = QPainter(image)
+    font = QFont("WenQuanYi Zen Hei")
+    font.setPixelSize(15)
+    painter.setFont(font)
+    painter.setPen(QPen(QColor("black"), 1))
+    columns = (0, 40, 230, 450, 560, 640, 719)
+    for y in (0, 33, 66, 99):
+        painter.drawLine(0, y, 719, y)
+    for x in columns:
+        painter.drawLine(x, 0, x, 99)
+    rows = (("序号", "银行账号", "账户名称", "定期笔号", "币种", "利率(%)"),
+            ("1", "6200123456780001 0002", "某单位有限责任公司工会委员会", "0001", "人民币元", "0.05"),
+            ("2", "6200123456780003", "某某科技公司", "0002", "人民币元", "1.25"))
+    metrics = painter.fontMetrics()
+    for row, values in enumerate(rows):
+        for column, value in enumerate(values):
+            width = metrics.horizontalAdvance(value)
+            # 账号右对齐顶到右线、户名左对齐贴左线，复现 OCR 把两列合成一个框。
+            x = columns[column + 1] - width - 1 if column in (1, 5) else columns[column] + 2
+            painter.drawText(x, row * 33 + 22, value)
+    painter.end()
+    from ocr.engine import OCREngine
+    from table.analysis import tokens_from_results
+    tokens = tokens_from_results(OCREngine().recognize_image(image), image)
+    assert any(token.chars for token in tokens), "OCR 未返回逐字位置"
+    joined = [token.text for token in tokens if token.box.left < 230 < token.box.right]
+    grid = GridSpec((0, 33, 66, 99), columns)
+    document = TableReview(tokens, grid).document
+    print("跨列文字框:", joined, "→", document.rows[1:])
+    for row in (1, 2):
+        assert document.rows[row][2] == rows[row][2], document.rows[row]
+        assert document.rows[row][4:] == rows[row][4:], document.rows[row]
+        assert document.rows[row][1].replace(" ", "") == rows[row][1].replace(" ", ""), document.rows[row]
+    print("PASS: text boxes crossing column lines are split per character and marked for review")
+
+
 def check_cell_line_join():
     from table.model import GridSpec, Rect, Token
     from table.review import TableReview, join_lines
@@ -855,6 +923,7 @@ def main():
     check_grid_edits()
     check_review()
     check_cell_line_join()
+    check_cross_column_split()
     check_correction_merges()
     check_selection_after_grid_change(app)
     check_ocr_reuse(app)
