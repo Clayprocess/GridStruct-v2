@@ -516,8 +516,8 @@ class _Accessibility:
             self._release(dispatch)
         return accessible
 
-    def _ancestors(self, node, x, y, known):
-        """沿 accParent 向上，返回 known 之前被跳过的祖先矩形（由外到内）。"""
+    def _ancestors(self, node, x, y, stop):
+        """沿 accParent 一直向上到窗口对象，返回包含该点的祖先矩形（由外到内）。"""
         ctypes = self._ctypes
         found, current = [], node
         try:
@@ -533,7 +533,8 @@ class _Accessibility:
                 if not current:
                     break
                 rect = self._location(current, 0)
-                if rect.getRect() in known or not rect.contains(x, y):
+                # 矩形相同不代表是同一个对象（包装层常和子元素一样大），只在到达窗口或越界时停。
+                if rect == stop or not rect.contains(x, y):
                     break
                 found.append(rect)
         except OSError:
@@ -552,7 +553,7 @@ class _Accessibility:
         root, root_rect = entry
         accessible = root
         rects = []
-        position = None  # accessible 的矩形在 rects 里的位置
+        descended = False  # 是否下钻到过完整对象（不只是简单子元素）
         try:
             for _ in range(self._MAX_DEPTH):
                 variant = _Variant()
@@ -562,13 +563,17 @@ class _Accessibility:
                     child = self._query(variant.value.pointer)
                     if not child:
                         break
-                    rect = self._location(child, 0)
+                    try:
+                        rect = self._location(child, 0)
+                    except OSError:
+                        self._release(child)
+                        raise
                     if not rect.contains(x, y):
                         self._release(child)
                         break
                     if accessible is not root:
                         self._release(accessible)
-                    accessible, position = child, len(rects)
+                    accessible, descended = child, True
                     rects.append(rect)
                 elif variant.vt == self._VT_I4 and variant.value.lVal != 0:
                     rect = self._location(accessible, variant.value.lVal)
@@ -577,11 +582,12 @@ class _Accessibility:
                     break
                 else:
                     break
-            if position is not None:
-                # 浏览器等程序的 accHitTest 直接返回最深的元素（如单元格），中间的整张表格、行
-                # 被跳过；沿父对象补回来，滚轮才能切到整张表格。
-                known = {r.getRect() for r in rects} | {root_rect.getRect()}
-                rects[position:position] = self._ancestors(accessible, x, y, known)
+            if descended:
+                # 浏览器等程序的 accHitTest 会跳层（直接返回单元格里的文字），中间的整张表格、行
+                # 不在路径里；从最深的对象沿父对象走到窗口，把整条祖先链补回来，滚轮才能切到整张表格。
+                ancestors = self._ancestors(accessible, x, y, root_rect)
+                unique = dict.fromkeys(r.getRect() for r in ancestors + rects)
+                rects = sorted((QRect(*r) for r in unique), key=lambda r: r.width() * r.height(), reverse=True)
         except OSError:
             # 某层不支持命中或定位：保留已经得到的外层路径。窗口对象本身失效（窗口已关）就丢掉缓存。
             if accessible is root and not rects:

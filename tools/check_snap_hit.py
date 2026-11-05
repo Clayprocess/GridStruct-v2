@@ -24,15 +24,17 @@ import capture.snap as snap
 
 class FakeAccessible(snap._Accessibility):
     """objects: {id: (rect, [子对象 id 或 ("item", 子元素编号, rect)])}，1 是窗口对象。
-    deepest=True 模拟 Chrome：accHitTest 跳过中间层，直接返回最深的对象。"""
+    deepest=True 模拟 Chrome：accHitTest 跳过中间层，直接返回最深的对象；也可只给一组会跳层的对象 id。
+    broken: accLocation 会失败的对象 id。"""
 
-    def __init__(self, objects, deepest=False):
+    def __init__(self, objects, deepest=False, broken=()):
         self._ctypes = ctypes
         self._iid = (ctypes.c_byte * 16)()
         self._roots = {}
         self._com_owned = False
         self.objects = objects
         self.deepest = deepest
+        self.broken = set(broken)
         self.parents = {c: node for node, (_rect, children) in objects.items()
                         for c in children if not isinstance(c, tuple)}
         self.released = []
@@ -71,7 +73,7 @@ class FakeAccessible(snap._Accessibility):
                         variant.vt, variant.value.lVal = snap._Accessibility._VT_I4, child[1]
                         return 0
                 elif self.objects[child][0].contains(x, y):
-                    while self.deepest and self.objects[child][1]:
+                    while (self.deepest is True or node in (self.deepest or ())) and self.objects[child][1]:
                         inner = next((c for c in self.objects[child][1] if not isinstance(c, tuple)
                                       and self.objects[c][0].contains(x, y)), None)
                         if inner is None:
@@ -94,6 +96,8 @@ class FakeAccessible(snap._Accessibility):
             self.acquired.append(node - 1000)
             return 0
         if index == 22:  # accLocation
+            if node in self.broken:
+                return -2147467259  # E_FAIL
             child = args[4].value.lVal
             rect = self.objects[node][0] if child == 0 else next(
                 c[2] for c in self.objects[node][1] if isinstance(c, tuple) and c[1] == child)
@@ -157,9 +161,26 @@ def check_hit_path():
     assert provider.opened == 1, "同一窗口的 IAccessible 应只取一次"
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    full = [BODY, TABLE, ROW, CELL, TEXT]
     provider = FakeAccessible(page(), deepest=True)
-    assert provider.hit_path(1, 220, 155) == [BODY, TABLE, ROW, CELL, TEXT]
+    assert provider.hit_path(1, 220, 155) == full
     assert provider.hit_path(1, 50, 400) == [BODY]
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    # 只有窗口一层跳到单元格，单元格往下正常逐层命中：单元格之上的行、表格也要补回。
+    provider = FakeAccessible(page(), deepest={1})
+    assert provider.hit_path(1, 220, 155) == full, provider.hit_path(1, 220, 155)
+    # 单元格和文字之间有一层同样大小的包装：不能因为矩形重复就停止向上。
+    wrapped = page()
+    wrapped[8], wrapped[10] = (CELL, [10]), (TEXT, [9])
+    provider = FakeAccessible(wrapped, deepest=True)
+    assert provider.hit_path(1, 220, 155) == full, provider.hit_path(1, 220, 155)
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    # 最深对象取位置失败：保留已有路径，也不能漏放它的引用。
+    provider = FakeAccessible(page(), deepest=True, broken={9})
+    for _ in range(20):
+        provider.hit_path(1, 220, 155)
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
     print("PASS: hit_path descends window → toolbar → tab → close button, recovers skipped table/row via accParent, "
