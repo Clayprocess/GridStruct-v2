@@ -90,6 +90,14 @@ def data_contract():
     english = OCRDocument([row("on November 3,", 10, 10), row("2026. Co-", 10, 35), row("operate 合作", 10, 60),
                            row("说明", 10, 85)], image())
     assert english.text() == "on November 3, 2026. Co-operate 合作说明", english.text()
+    # 账号、金额、单据号断行直接接上，不补空格；英文单词之间照常补。
+    from ocr.layout import join_prose
+    cases = {("账号 6222 0212 3456", "7890 开户行"): "账号 6222 0212 34567890 开户行",
+             ("Account No. 62220212345678", "90123"): "Account No. 6222021234567890123",
+             ("Ref AB12CD", "34EF done"): "Ref AB12CD34EF done", ("in 2026", "the app"): "in 2026 the app",
+             ("courier collection point and the", "return address"): "courier collection point and the return address"}
+    for lines, expected in cases.items():
+        assert join_prose(lines) == expected, (lines, join_prose(lines))
     # 人工编辑只有一份全文；改回排版结果等于没改，换排版丢掉编辑。
     document.set_layout("lines")
     document.set_draft("独立草稿")

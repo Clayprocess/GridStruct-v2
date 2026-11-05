@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from statistics import median
+import string
 
 
 def _gap(items, horizontal, minimum):
@@ -72,19 +73,34 @@ def _wide(ch):
     return ord(ch) >= 0x2E80
 
 
-def join_prose(lines):
-    """正文换行合并：只要一边是中日韩文字就不补空格，行尾连字符原样接上，其余（英文、数字）补一个空格。
+_ALNUM = string.ascii_letters + string.digits
 
-    和表格格内换行（table.review.join_lines）不同：格内断开的多是长数字（“1,234 / 567”），正文里断开的是英文句子，
-    “November 3, / 2026” 必须补空格。
+
+def _code(token):
+    # 字母和数字混在一起的串：订单号、单据号这类。
+    return any(ch.isdigit() for ch in token) and any(ch.isascii() and ch.isalpha() for ch in token)
+
+
+def join_prose(lines):
+    """正文换行合并：只有断在两个英文单词（或英文标点与下一个词）之间才补一个空格，其余直接接上。
+
+    不补的情况：一边是中日韩文字；行尾连字符；两边都是数字（账号、金额、长编号断行，Clay 2026-11-05 指出）；
+    两边都是字母数字混排的串（单据号断行）。和表格格内换行（table.review.join_lines）不同：
+    正文里 “November 3, / 2026” 断在标点后，要补空格。
     """
     text = ""
     for line in lines:
         line = line.strip()
         if not line:
             continue
-        if text and not (_wide(text[-1]) or _wide(line[0]) or text[-1] == "-"):
-            text += " "
+        if text:
+            left, right = text[-1], line[0]
+            head = text[len(text.rstrip(_ALNUM)):]
+            tail = line[:len(line) - len(line.lstrip(_ALNUM))]
+            glued = _wide(left) or _wide(right) or left == "-" or left.isdigit() and right.isdigit() \
+                or _code(head) and _code(tail)
+            if not glued:
+                text += " "
         text += line
     return text
 
