@@ -432,7 +432,7 @@ class _Variant(ctypes.Structure):
 
 
 class _Accessibility:
-    # IAccessible 虚表：QueryInterface 0、Release 2、accLocation 22、accHitTest 24。
+    # IAccessible 虚表：QueryInterface 0、Release 2、get_accParent 7、accLocation 22、accHitTest 24。
     _IID = "618736e0-3c3d-11cf-810c-00aa00389b71"
     _VT_I4, _VT_DISPATCH = 3, 9
     _MAX_DEPTH = 31
@@ -454,7 +454,7 @@ class _Accessibility:
         self._oleacc.AccessibleObjectFromWindow.restype = ctypes.c_long
         self._user32 = _win32_api()
         self._iid = (ctypes.c_byte * 16).from_buffer_copy(UUID(self._IID).bytes_le)
-        # hwnd -> 窗口的 IAccessible：跨进程取一次要往返一趟，同一会话内复用。
+        # hwnd -> (窗口的 IAccessible, 它的矩形)：跨进程取一次要往返一趟，同一会话内复用。
         self._roots = {}
 
     def _call(self, pointer, index, argtypes, *args):
@@ -471,16 +471,16 @@ class _Accessibility:
             self._call(pointer, 2, [])
 
     def close(self):
-        for root in self._roots.values():
+        for root, _rect in self._roots.values():
             self._release(root)
         self._roots.clear()
         if self._com_owned:
             self._ole32.CoUninitialize()
 
     def _root(self, hwnd):
-        root = self._roots.get(hwnd)
-        if root is not None:
-            return root
+        entry = self._roots.get(hwnd)
+        if entry is not None:
+            return entry
         ctypes = self._ctypes
         result = ctypes.c_size_t()
         # 跨进程 COM 遇到无响应窗口会一直卡住线程，先用无副作用的 WM_NULL 探一下。
@@ -489,8 +489,12 @@ class _Accessibility:
         root = ctypes.c_void_p()
         if self._oleacc.AccessibleObjectFromWindow(hwnd, 0, ctypes.byref(self._iid), ctypes.byref(root)) < 0 or not root:
             return None
-        self._roots[hwnd] = root
-        return root
+        try:
+            entry = self._roots[hwnd] = (root, self._location(root, 0))
+        except OSError:
+            self._release(root)
+            return None
+        return entry
 
     def _location(self, accessible, child):
         ctypes = self._ctypes
@@ -501,45 +505,87 @@ class _Accessibility:
                    ctypes.byref(left), ctypes.byref(top), ctypes.byref(width), ctypes.byref(height), variant)
         return QRect(left.value, top.value, width.value, height.value)
 
+    def _query(self, dispatch):
+        """IDispatch 换成 IAccessible，并释放传入的 IDispatch。"""
+        ctypes = self._ctypes
+        accessible = ctypes.c_void_p()
+        try:
+            self._call(dispatch, 0, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+                       ctypes.byref(self._iid), ctypes.byref(accessible))
+        finally:
+            self._release(dispatch)
+        return accessible
+
+    def _ancestors(self, node, x, y, known):
+        """沿 accParent 向上，返回 known 之前被跳过的祖先矩形（由外到内）。"""
+        ctypes = self._ctypes
+        found, current = [], node
+        try:
+            for _ in range(self._MAX_DEPTH):
+                parent = ctypes.c_void_p()
+                self._call(current, 7, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(parent))
+                if not parent:
+                    break
+                accessible = self._query(parent)
+                if current is not node:
+                    self._release(current)
+                current = accessible
+                if not current:
+                    break
+                rect = self._location(current, 0)
+                if rect.getRect() in known or not rect.contains(x, y):
+                    break
+                found.append(rect)
+        except OSError:
+            pass  # 某层不支持取父对象：保留已经补到的祖先。
+        finally:
+            if current is not node:
+                self._release(current)
+        return found[::-1]
+
     def hit_path(self, hwnd, x, y):
         """由外到内返回鼠标所在的各层控件矩形（物理像素）。"""
         ctypes = self._ctypes
-        root = self._root(hwnd)
-        if root is None:
+        entry = self._root(hwnd)
+        if entry is None:
             return []
+        root, root_rect = entry
         accessible = root
         rects = []
+        position = None  # accessible 的矩形在 rects 里的位置
         try:
             for _ in range(self._MAX_DEPTH):
                 variant = _Variant()
                 self._call(accessible, 24, [ctypes.c_long, ctypes.c_long, ctypes.POINTER(_Variant)],
                            x, y, ctypes.byref(variant))
                 if variant.vt == self._VT_DISPATCH and variant.value.pointer:
-                    dispatch, child = variant.value.pointer, ctypes.c_void_p()
-                    try:
-                        self._call(dispatch, 0, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
-                                   ctypes.byref(self._iid), ctypes.byref(child))
-                    finally:
-                        self._release(dispatch)
+                    child = self._query(variant.value.pointer)
+                    if not child:
+                        break
+                    rect = self._location(child, 0)
+                    if not rect.contains(x, y):
+                        self._release(child)
+                        break
                     if accessible is not root:
                         self._release(accessible)
-                    accessible = child
-                    if not accessible:
-                        break
-                    rect = self._location(accessible, 0)
+                    accessible, position = child, len(rects)
+                    rects.append(rect)
                 elif variant.vt == self._VT_I4 and variant.value.lVal != 0:
                     rect = self._location(accessible, variant.value.lVal)
+                    if rect.contains(x, y):
+                        rects.append(rect)
+                    break
                 else:
                     break
-                if not rect.contains(x, y):
-                    break
-                rects.append(rect)
-                if variant.vt == self._VT_I4:
-                    break
+            if position is not None:
+                # 浏览器等程序的 accHitTest 直接返回最深的元素（如单元格），中间的整张表格、行
+                # 被跳过；沿父对象补回来，滚轮才能切到整张表格。
+                known = {r.getRect() for r in rects} | {root_rect.getRect()}
+                rects[position:position] = self._ancestors(accessible, x, y, known)
         except OSError:
             # 某层不支持命中或定位：保留已经得到的外层路径。窗口对象本身失效（窗口已关）就丢掉缓存。
             if accessible is root and not rects:
-                self._release(self._roots.pop(hwnd))
+                self._release(self._roots.pop(hwnd)[0])
         finally:
             if accessible is not root:
                 self._release(accessible)

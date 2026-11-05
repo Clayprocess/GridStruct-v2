@@ -1,7 +1,8 @@
 """点命中吸附回归：不调用原生 MSAA，也不读取桌面。
 
 1. _Accessibility.hit_path 逐层 accHitTest 的路径、简单子元素、越界停止、引用释放，
-   窗口对象同一会话只取一次；
+   窗口对象同一会话只取一次；浏览器式 accHitTest 直接返回最深元素时，沿 accParent
+   补回被跳过的表格、行；
 2. RegionDetector 用常驻工作线程查询、信号回传：命中矩形内移动不再查询，
    换控件时保留旧框直到新结果到达（不闪回外层），滚轮能切到父层，慢窗口降级；
 3. 静止悬停仍能细化懒加载控件；查询卡死时丢弃线程、拉黑窗口，新线程继续服务，丢弃迟到结果；
@@ -22,14 +23,18 @@ import capture.snap as snap
 
 
 class FakeAccessible(snap._Accessibility):
-    """objects: {id: (rect, [子对象 id 或 ("item", 子元素编号, rect)])}，1 是窗口对象。"""
+    """objects: {id: (rect, [子对象 id 或 ("item", 子元素编号, rect)])}，1 是窗口对象。
+    deepest=True 模拟 Chrome：accHitTest 跳过中间层，直接返回最深的对象。"""
 
-    def __init__(self, objects):
+    def __init__(self, objects, deepest=False):
         self._ctypes = ctypes
         self._iid = (ctypes.c_byte * 16)()
         self._roots = {}
         self._com_owned = False
         self.objects = objects
+        self.deepest = deepest
+        self.parents = {c: node for node, (_rect, children) in objects.items()
+                        for c in children if not isinstance(c, tuple)}
         self.released = []
         self.acquired = []
         self.calls = 0
@@ -66,11 +71,23 @@ class FakeAccessible(snap._Accessibility):
                         variant.vt, variant.value.lVal = snap._Accessibility._VT_I4, child[1]
                         return 0
                 elif self.objects[child][0].contains(x, y):
+                    while self.deepest and self.objects[child][1]:
+                        inner = next((c for c in self.objects[child][1] if not isinstance(c, tuple)
+                                      and self.objects[c][0].contains(x, y)), None)
+                        if inner is None:
+                            break
+                        child = inner
                     # 返回 IDispatch：用 1000+id 区分，QueryInterface 后换回真正的对象 id。
                     variant.vt, variant.value.pointer = snap._Accessibility._VT_DISPATCH, 1000 + child
                     self.acquired.append(1000 + child)
                     return 0
             variant.vt, variant.value.lVal = snap._Accessibility._VT_I4, 0
+            return 0
+        if index == 7:  # get_accParent
+            parent = self.parents.get(node)
+            args[0]._obj.value = None if parent is None else 1000 + parent
+            if parent is not None:
+                self.acquired.append(1000 + parent)
             return 0
         if index == 0:  # QueryInterface
             args[1]._obj.value = node - 1000
@@ -102,6 +119,17 @@ def tree():
             4: (NEXT_TAB, []), 5: (BODY, [])}
 
 
+TABLE = QRect(100, 100, 400, 200)
+ROW = QRect(100, 140, 400, 40)
+CELL = QRect(200, 140, 100, 40)
+TEXT = QRect(210, 150, 60, 20)
+
+
+def page():
+    """网页：窗口 → 正文 → 表格 → 行 → 单元格 → 文字。"""
+    return {1: (WINDOW, [5]), 5: (BODY, [6]), 6: (TABLE, [7]), 7: (ROW, [8]), 8: (CELL, [9]), 9: (TEXT, [])}
+
+
 class FakeUser32:
     @staticmethod
     def IsWindow(_hwnd):
@@ -129,7 +157,13 @@ def check_hit_path():
     assert provider.opened == 1, "同一窗口的 IAccessible 应只取一次"
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
-    print("PASS: hit_path descends window → toolbar → tab → close button, reuses the window object, releases every reference")
+    provider = FakeAccessible(page(), deepest=True)
+    assert provider.hit_path(1, 220, 155) == [BODY, TABLE, ROW, CELL, TEXT]
+    assert provider.hit_path(1, 50, 400) == [BODY]
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    print("PASS: hit_path descends window → toolbar → tab → close button, recovers skipped table/row via accParent, "
+          "reuses the window object, releases every reference")
 
 
 def check_detector():
