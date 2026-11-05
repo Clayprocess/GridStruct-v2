@@ -183,6 +183,42 @@ def remove_undo_order():
     c.deleteLater()
 
 
+def fresh_mark_color():
+    """刚画完自动选中的标注改色，要同时成为下一笔和其他工具的颜色；重新点选的旧标注只改自己。"""
+    c = AnnotationCanvas(sample(320, 200))
+    c.set_tool_by_id("rect")
+    c.update_style("color", QColor(T.ANNOTATION_COLORS[0]))
+
+    def draw(x):
+        c._tool.on_press(c.scene(), QPointF(x, 20), c._undo)
+        c._tool.on_move(QPointF(x + 40, 60))
+        c._tool.on_release(QPointF(x + 40, 60), c._undo)
+        return c._selected_marks()[0]
+
+    blue, green = QColor(T.ANNOTATION_COLORS[3]), QColor(T.ANNOTATION_COLORS[2])
+    first = draw(20)
+    c.update_style("color", blue)
+    assert first.style.color == blue and c.styles["rect"].color == blue, "刚画完改色没记成矩形的当前色"
+    assert c.styles["arrow"].color == blue, "共用颜色没同步到其他工具"
+    assert c.styles["highlight"].color == QColor(T.ANNOTATION_COLORS[-1]), "荧光笔应单独记色"
+    second = draw(100)
+    assert second.style.color == blue, "下一笔跳回了旧颜色"
+    c.update_style("width", 6)
+    assert c.styles["rect"].width == 6
+    # 撤销再重做出来的标注不算刚画的，选中旧标注改色只改它自己。
+    c.undo()
+    c.undo()
+    c.redo()
+    assert c._selected_marks() == [second]
+    c.update_style("color", green)
+    assert second.style.color == green and c.styles["rect"].color == blue
+    c.scene().clearSelection()
+    first.setSelected(True)
+    c.update_style("color", green)
+    assert first.style.color == green and c.styles["rect"].color == blue
+    c.deleteLater()
+
+
 def text_live_style():
     c = AnnotationCanvas(sample(640, 300))
     c.resize(640, 300)
@@ -1123,7 +1159,7 @@ def render_windows():
 
 if __name__ == "__main__":
     checks = [eraser_removes_marks, high_dpi_canvas, ocr_pixels, offline_models, empty_polyline,
-              text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
+              text_undo, serial_undo, remove_undo_order, fresh_mark_color, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,
               longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
