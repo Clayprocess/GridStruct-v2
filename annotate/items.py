@@ -48,7 +48,6 @@ class MarkStyle:
         self.mosaic_size = 32
         self.opacity = 32
         self.eraser_size = 24
-        self.zoom = 2
         self.wheel_enabled = True
 
 

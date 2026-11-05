@@ -43,7 +43,6 @@ class ScreenshotFlow(QObject):
         self._win.regionSelected.connect(self._on_region)
         self._win.selectionChanged.connect(self._on_selection)
         self._win.actionRequested.connect(self._trigger_action)
-        self._win.pipettePicked.connect(self._pick_color)
         self._win.cancelled.connect(self._cleanup)
         self._win.show()
 
@@ -75,9 +74,6 @@ class ScreenshotFlow(QObject):
         if action.startswith("tool:"):
             self._select_tool(action[5:])
             return
-        if action == "pipette":
-            self._win.start_pipette()
-            return
         if action == "cancel":
             # 与 Esc 一致：框选阶段直接退出，不先转成标注窗口再问。
             self._win.close()
@@ -89,15 +85,6 @@ class ScreenshotFlow(QObject):
             return
         if self._win.confirm():
             self._ann.trigger_action(action)
-
-    def _pick_color(self, color):
-        from annotate import ColorDialog
-        dialog = ColorDialog(color, QApplication.activeWindow())
-        dialog.apply_color.setChecked(False)
-        dialog.apply_color.hide()
-        if dialog.exec() == ColorDialog.Accepted:
-            QApplication.clipboard().setText(dialog.value.text())
-        dialog.deleteLater()
 
     def start_longshot(self, region=None):
         """托盘、工具条和热键共享同一个长截图会话。"""

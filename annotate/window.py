@@ -3,13 +3,12 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QApplication, QGraphicsTextItem, QDialog, QLineEdit, QAbstractSpinBox, QComboBox,
 )
-from PySide6.QtGui import QPixmap, QColor, QKeySequence
+from PySide6.QtGui import QPixmap, QKeySequence
 from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QEvent
 
 from .canvas import AnnotationCanvas
 from .toolbar import FloatPanel, shortcut_tool
 from .options import ToolOptions
-from .color_dialog import ColorDialog
 from ui import floating_window_type, MessageDialog, show_toast
 from ui.motion import animation
 from settings import get_settings
@@ -51,7 +50,6 @@ class AnnotationWindow(QWidget):
         self._ended = False
         self._text_layer = None
         self._ocr_selected_text = ""
-        self._pipette_tool = ""
         self.setAttribute(Qt.WA_DeleteOnClose)
         self._canvas = AnnotationCanvas(pixmap)
         if scrollable:
@@ -75,13 +73,11 @@ class AnnotationWindow(QWidget):
         self._toolbar.actionTriggered.connect(self._on_action)
         self._canvas.toolChanged.connect(self._tool_changed)
         self._canvas.optionsChanged.connect(self._options_changed)
-        self._canvas.pipettePicked.connect(self._on_pipette_picked)
         self._ocr = OCRController(self, layer_first=True)
         self._ocr.recognized.connect(self._show_text_layer)
         self._ocr.statusChanged.connect(self._show_ocr_status)
         self._canvas._undo.indexChanged.connect(self._image_changed)
         self._canvas._undo.canUndoChanged.connect(self._toolbar.set_undo_enabled)
-        self._toolbar.set_redo_check(self._canvas._undo.canRedo)
         self._options.set_tool("")
         self._position_toolbar()
         self._toolbar.show()
@@ -133,33 +129,12 @@ class AnnotationWindow(QWidget):
         self._on_action(action)
 
     def _on_tool(self, tool_id):
-        self._toggle_pipette(False)
         if self._text_layer is not None:
             self._show_ocr_status("已切换到标注，识别结果仍可查看全文", True)
         self._remove_text_layer()
         self._canvas.set_tool_by_id(tool_id)
         self.activateWindow()
         self._canvas.setFocus()
-
-    def _toggle_pipette(self, on):
-        if on:
-            self._pipette_tool = self._canvas.tool_id
-        self._canvas.set_pipette_mode(on)
-        if on:
-            self.activateWindow()
-            self._canvas.setFocus()
-        elif self._pipette_tool:
-            self._canvas.set_tool_by_id(self._pipette_tool)
-            self._pipette_tool = ""
-
-    def _on_pipette_picked(self, color):
-        self._toggle_pipette(False)
-        dialog = ColorDialog(color, self)
-        if dialog.exec() == ColorDialog.Accepted:
-            QApplication.clipboard().setText(dialog.value.text())
-            if dialog.apply_color.isChecked():
-                self._canvas.update_style("color", QColor(color))
-        dialog.deleteLater()
 
     def _remove_text_layer(self):
         self._ocr_selected_text = ""
@@ -178,7 +153,6 @@ class AnnotationWindow(QWidget):
         if isinstance(results, OCRDocument) and not results.matches(self._render()):
             self._ocr.invalidate("图像内容已变化，本次识别结果已失效；请重新识别。")
             return
-        self._toggle_pipette(False)
         self._remove_text_layer()
         if results:
             # 只有挂载可选文字时进入选择模式；结果失效不能打断连续标注。
@@ -229,7 +203,6 @@ class AnnotationWindow(QWidget):
                 self._canvas._undo.setClean()
             self._focus_canvas()
         elif action == "ocr":
-            self._toggle_pipette(False)
             self._ocr.start(self._render())
         elif action == "ocr_results":
             self._open_ocr_results()
@@ -242,8 +215,6 @@ class AnnotationWindow(QWidget):
             document = self._ocr.document
             open_table(pixmap, document.results if document is not None and document.matches(pixmap) else None)
             self.close()
-        elif action == "pipette":
-            self._toggle_pipette(not self._canvas.pipette_active)
         elif action == "longshot":
             self.longshotRequested.emit(QRect(self._capture_region))
         elif action == "pin":
@@ -281,7 +252,7 @@ class AnnotationWindow(QWidget):
         if QApplication.activePopupWidget() is not None:
             return False
         if event.key() == Qt.Key_Escape:
-            # 文字框、取色和面板控件都会先吃掉 Esc，统一在这里截下。
+            # 文字框和面板控件都会先吃掉 Esc，统一在这里截下。
             self._on_action("escape")
             event.accept()
             return True
@@ -330,7 +301,6 @@ class AnnotationWindow(QWidget):
         QApplication.instance().removeEventFilter(self)
         self._ocr.cancel()
         self._canvas.clear_tool()
-        self._canvas.set_pipette_mode(False)
         self._toolbar.close()
         if not self._ended:
             self._ended = True

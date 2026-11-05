@@ -16,8 +16,8 @@ import sys as _sys
 # 作为模块导入时此操作无害（路径已存在则重复）。
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QPainter, QPen, QRegion
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QVariantAnimation, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPen, QRegion
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QVBoxLayout, QMenu, QToolButton, QWidget, QLabel
 
 from styles import tokens as T
@@ -40,14 +40,6 @@ _GROUP_OF = {tool[0]: group for group, tools in TOOL_GROUPS for tool in tools}
 _TOOL_INFO = {tool[0]: tool[1:] for _group, tools in TOOL_GROUPS for tool in tools}
 # 合并按钮不改快捷键：Shift+1～9 仍是 PixPin 文档的几何、折线、箭头、序号、铅笔、荧光笔、马赛克、文字、橡皮擦。
 DIGIT_TOOLS = ("geo", "polyline", "arrow", "serial", "pencil", "highlight", "mosaic", "text", "eraser")
-# “更多”菜单：低频工具和操作，同 PixPin 放在最右。
-MORE_TOOLS: list[tuple[str, str, str]] = [
-    ("magnifier", "放大镜", "zoom-in"),
-]
-MORE_ACTIONS: list[tuple[str, str, str]] = [
-    ("pipette", "取色", "pipette"),
-    ("redo", "重做", "redo-2"),
-]
 
 
 def shortcut_tool(event):
@@ -78,7 +70,7 @@ _END_BUTTONS: list[tuple[str, str, str]] = [
     (CANCEL_ID, "关闭", "x"),
     (CONFIRM_ID, "复制截图", "copy"),
 ]
-_SHORTCUTS = {"undo": "Ctrl+Z", "redo": "Ctrl+Y", "save": "Ctrl+S", "ocr": "Shift+O", "longshot": "Ctrl+Alt+L",
+_SHORTCUTS = {"undo": "Ctrl+Z", "save": "Ctrl+S", "ocr": "Shift+O", "longshot": "Ctrl+Alt+L",
               CONFIRM_ID: "Ctrl+C / Enter", CANCEL_ID: "Esc"}
 _SHORTCUTS.update({tool: f"Shift+{i + 1}" for i, tool in enumerate(DIGIT_TOOLS) if tool in _TOOL_INFO})
 _SHORTCUTS["rect"] = _SHORTCUTS["ellipse"] = "Shift+1"
@@ -246,6 +238,8 @@ class FloatPanel(QWidget):
         layout.addWidget(self._make_separator())
         undo = self._make_button(*UNDO_ACTION)
         undo.setEnabled(False)
+        # 同 PixPin 默认工具条只放撤销；重做没有按钮，在提示里写上快捷键。
+        undo.setToolTip("撤销 (Ctrl+Z)，重做 (Ctrl+Y)")
         undo.clicked.connect(lambda: self.actionTriggered.emit("undo"))
         layout.addWidget(undo)
         layout.addWidget(self._make_separator())
@@ -257,32 +251,6 @@ class FloatPanel(QWidget):
                 lambda _checked=False, aid=action_id: self.actionTriggered.emit(aid)
             )
 
-        self._more = self._make_button("more", "更多", "ellipsis")
-        self._more.setObjectName("MoreTools")
-        self._more.setPopupMode(QToolButton.InstantPopup)
-        self._more_menu = round_corners(QMenu(self._more))
-        for tool_id, label, icon_name in MORE_TOOLS:
-            action = self._more_menu.addAction(label, lambda tid=tool_id: self._pick(tid))
-            self._menu_icons.append((action, icon_name))
-        self._more_menu.addSeparator()
-        self._menu_actions = {}
-        for action_id, label, icon_name in MORE_ACTIONS:
-            action = self._more_menu.addAction(_menu_text(action_id, label),
-                                               lambda aid=action_id: self.actionTriggered.emit(aid))
-            self._menu_icons.append((action, icon_name))
-            self._menu_actions[action_id] = action
-        # 同撤销按钮：没有可重做的步骤时置灰。菜单展开前再查一次，不必跟着撤销栈的信号走，
-        # 窗口销毁时撤销栈清空发出的信号也就不会碰到已删除的菜单项。
-        self._more_menu.aboutToShow.connect(lambda: self._menu_actions["redo"].setEnabled(self._can_redo()))
-        self._more.setMenu(self._more_menu)
-        # 同 PixPin 悬停即展开；showMenu 会进入嵌套事件循环，不能在事件过滤器里同步调用。
-        self._more.installEventFilter(self)
-        # 悬停展开的菜单也要悬停收起：鼠标离开按钮和菜单一小会儿就关掉，否则会一直挂在那里。
-        # 留一点宽限，斜着划向菜单项时擦出边界不会误关。
-        self._more_leave = QTimer(self, singleShot=True, interval=250)
-        self._more_leave.timeout.connect(self._close_more_if_away)
-        self._more_menu.installEventFilter(self)
-        layout.addWidget(self._more)
 
         self._ocr_feedback = QWidget(self)
         feedback_layout = QHBoxLayout(self._ocr_feedback)
@@ -314,24 +282,7 @@ class FloatPanel(QWidget):
         if watched is self._options and event.type() == QEvent.Show and self._card_end is None:
             # 面板刚显示时布局要等下一轮事件循环才排好，先整块藏起来，交给展开动画露出。
             self._options.setMask(QRegion(0, 0, 1, 1))
-        if watched is self._more and event.type() == QEvent.Enter and not self._more_menu.isVisible():
-            QTimer.singleShot(0, self._more.showMenu)
-        if watched is self._more_menu and event.type() == QEvent.MouseMove:
-            # 菜单弹出时抓着鼠标，菜单外的移动也会送到这里。
-            if self._more_hover_zone().contains(event.globalPosition().toPoint()):
-                self._more_leave.stop()
-            elif not self._more_leave.isActive():
-                self._more_leave.start()
         return super().eventFilter(watched, event)
-
-    def _more_hover_zone(self):
-        # 按钮和菜单之间可能隔着几像素，取两者的外接矩形，划过缝隙不算离开。
-        button = QRect(self._more.mapToGlobal(QPoint()), self._more.size())
-        return button.united(self._more_menu.geometry())
-
-    def _close_more_if_away(self):
-        if self._more_menu.isVisible() and not self._more_hover_zone().contains(QCursor.pos()):
-            self._more_menu.close()
 
     def _pick(self, tool_id):
         self.toolSelected.emit(self._variant[tool_id] if tool_id in self._variant else tool_id)
@@ -491,10 +442,6 @@ class FloatPanel(QWidget):
 
     def set_undo_enabled(self, enabled: bool) -> None:
         self._buttons["undo"].setEnabled(enabled)
-
-    def set_redo_check(self, can_redo) -> None:
-        """can_redo() 返回是否有可重做的步骤，“更多”菜单展开前据此置灰“重做”。"""
-        self._can_redo = can_redo
 
     def set_copy_text_selected(self, selected: bool):
         # 选字时 Ctrl+C 只复制文字不结束，只有按钮和 Enter 会复制文字并结束。

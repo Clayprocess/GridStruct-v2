@@ -588,7 +588,7 @@ QToolButton#MoreOptions {{
 QToolButton#ToolCaret {{
     padding: 6px 1px;
 }}
-QToolButton#MoreOptions::menu-indicator, QToolButton#MoreTools::menu-indicator,
+QToolButton#MoreOptions::menu-indicator,
 QToolButton#ToolCaret::menu-indicator {{
     image: none;
     width: 0;

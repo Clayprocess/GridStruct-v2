@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import (
     QPainter, QPixmap, QKeySequence, QUndoStack, QPen, QColor, QCursor, QTextCursor,
 )
-from PySide6.QtCore import Qt, QRect, QRectF, QPointF, Signal, QEvent
+from PySide6.QtCore import Qt, QRect, QRectF, QPointF, Signal
 from copy import copy
 
 from .items import MarkStyle, arrow_heads, SerialMarkItem, TextMarkItem, ArrowMarkItem
@@ -16,7 +16,6 @@ from .tools import create_tool
 from .tools import TOOL_CLASSES, TextTool
 from .commands import (RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand,
                        ArrowCommentCommand, ArrowCurveCommand, StyleMarksCommand)
-from .pipette import PipettePopup
 from styles import tokens as T
 from settings import get_settings
 
@@ -26,11 +25,10 @@ _REMEMBERED_STYLE = ("color", "width", "font_size", "font_family",
                      "polyline_cap", "polyline_join", "line_style", "text_bold", "text_italic", "text_underline",
                      "text_alignment", "text_background",
                      "text_outline", "background_color", "outline_color", "mosaic_shape", "mosaic_mode",
-                     "mosaic_strength", "mosaic_size", "opacity", "eraser_size", "zoom", "wheel_enabled")
+                     "mosaic_strength", "mosaic_size", "opacity", "eraser_size", "wheel_enabled")
 
 
 class AnnotationCanvas(QGraphicsView):
-    pipettePicked = Signal(str)  # 取色完成，HEX
     toolChanged = Signal(str)
     optionsChanged = Signal(str)
 
@@ -60,8 +58,6 @@ class AnnotationCanvas(QGraphicsView):
         self._comment_edit = None
         self._curve_drag = None
         self._tool = None
-        self._pipette = None
-        self._loupe = None  # 放大镜：跟随式 loupe，不落图元
         self._undo = QUndoStack(self)
 
         self._scene = QGraphicsScene(self)
@@ -93,17 +89,10 @@ class AnnotationCanvas(QGraphicsView):
         tool = create_tool(tool_id, self._style)
         if tool is None:
             return False
-        self.set_pipette_mode(False)
         self._tool = tool
         self._tool_id = tool_id
         self._scene.setProperty("serial_auto_renumber", self.styles["serial"].serial_auto_renumber)
         self._scene.clearSelection()
-        # 放大镜是检查模式：跟随式 loupe，不在画布落图元
-        if self._loupe is not None:
-            self._loupe.close()
-            self._loupe = None
-        if tool_id == "magnifier":
-            self._loupe = PipettePopup(self._bg_pixmap, grid=True)
         self.viewport().setCursor(self._tool_cursor())
         if self._brush_radius() is not None and self.viewport().underMouse():
             self._brush_pos = self.viewport().mapFromGlobal(QCursor.pos())
@@ -117,9 +106,6 @@ class AnnotationCanvas(QGraphicsView):
         self._clear_brush_preview()
         self._tool = None
         self._tool_id = ""
-        if self._loupe is not None:
-            self._loupe.close()
-            self._loupe = None
         self.viewport().setCursor(Qt.ArrowCursor)
         self.toolChanged.emit("")
         self.optionsChanged.emit(self.options_tool_id)
@@ -139,23 +125,6 @@ class AnnotationCanvas(QGraphicsView):
     def _continuous_drawing(self):
         return (self._tool_id in ("pencil", "highlight", "eraser")
                 or self._tool_id == "mosaic" and self._style.mosaic_shape == "brush")
-
-    # ---------- 取色器 ----------
-
-    def set_pipette_mode(self, on: bool):
-        if on:
-            self.clear_tool()
-            self._pipette = PipettePopup(self._bg_pixmap, hint="点击: 取色 · Shift: 切换颜色格式")
-            self.viewport().setCursor(Qt.CrossCursor)
-        else:
-            if self._pipette is not None:
-                self._pipette.close()
-                self._pipette = None
-            self.viewport().setCursor(Qt.ArrowCursor)
-
-    @property
-    def pipette_active(self) -> bool:
-        return self._pipette is not None
 
     @property
     def style(self) -> MarkStyle:
@@ -334,30 +303,9 @@ class AnnotationCanvas(QGraphicsView):
 
     def leaveEvent(self, event):
         self._clear_brush_preview()
-        # 放大镜和取色卡片只在画布上有意义；移到工具条或菜单上时收起，回到画布再由 mouseMoveEvent 显示。
-        for popup in (self._loupe, self._pipette):
-            if popup is not None:
-                popup.hide()
         super().leaveEvent(event)
 
-    def event(self, event):
-        if (event.type() == QEvent.KeyPress and event.key() == Qt.Key_Shift
-                and self._pipette is not None and not event.isAutoRepeat()):
-            # 同截图阶段：取色时按 Shift 切换颜色格式。
-            self._pipette.cycle_color_format()
-            event.accept()
-            return True
-        return super().event(event)
-
     def mousePressEvent(self, e):
-        if self._loupe is not None:
-            e.accept()
-            return
-        if self._pipette is not None and e.button() == Qt.LeftButton:
-            color = self._pipette.pick(self.mapToScene(e.pos()), e.globalPosition().toPoint())
-            self.set_pipette_mode(False)
-            self.pipettePicked.emit(color.name().upper())
-            return
         hit = self._selection_hit(e.pos())
         select_existing = not self._continuous_drawing() or bool(e.modifiers() & Qt.ControlModifier)
         if self._comment_edit is not None and hit is not self._comment_edit[0].comment_item:
@@ -425,9 +373,6 @@ class AnnotationCanvas(QGraphicsView):
             super().mousePressEvent(e)
 
     def mouseDoubleClickEvent(self, e):
-        if self._loupe is not None:
-            e.accept()
-            return
         item = self._selection_hit(e.pos())
         if self._continuous_drawing() and not e.modifiers() & Qt.ControlModifier:
             # Qt 用双击事件替代第二次按下；快落第二笔时仍应开始绘制。
@@ -480,17 +425,10 @@ class AnnotationCanvas(QGraphicsView):
             for item, before in self._moving.items():
                 item.setPos(before + delta)
             return
-        if self._loupe is not None:
-            self._loupe.pick(self.mapToScene(e.pos()),
-                             e.globalPosition().toPoint())
-        if self._pipette is not None:
-            self._pipette.pick(self.mapToScene(e.pos()),
-                               e.globalPosition().toPoint())
-        elif self._tool is not None and (self._drawing or self._tool.preview_on_hover):
+        if self._tool is not None and (self._drawing or self._tool.preview_on_hover):
             self._tool.on_move(self.mapToScene(e.pos()))
         else:
-            if self._loupe is None:
-                self._hover_cursor(e.pos(), e.modifiers())
+            self._hover_cursor(e.pos(), e.modifiers())
             super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
@@ -547,9 +485,6 @@ class AnnotationCanvas(QGraphicsView):
             super().keyPressEvent(e)
 
     def wheelEvent(self, event):
-        if self._loupe is not None:
-            event.ignore()
-            return
         if event.modifiers() & Qt.ControlModifier:
             self._wheel_color_alpha(event)
             return
@@ -563,7 +498,6 @@ class AnnotationCanvas(QGraphicsView):
         key, lo, hi = {
             "text": ("font_size", 6, 96), "serial": ("serial_size", 12, 96),
             "mosaic": mosaic, "eraser": ("eraser_size", 4, 120),
-            "magnifier": ("zoom", 1, 8),
         }.get(self.options_tool_id, ("width", 1, 30))
         if not self.style_key_enabled(key):
             event.ignore()
@@ -574,7 +508,7 @@ class AnnotationCanvas(QGraphicsView):
 
     def _wheel_color_alpha(self, event):
         # 同 PixPin：Ctrl+滚轮调当前颜色透明度，每格 10%；下限 10%，免得标注画出来却看不见。
-        if (self.options_tool_id in ("", "mosaic", "eraser", "magnifier")
+        if (self.options_tool_id in ("", "mosaic", "eraser")
                 or not self.style_key_enabled("color")):
             event.ignore()
             return

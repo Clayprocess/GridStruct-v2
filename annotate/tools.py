@@ -1,10 +1,10 @@
-# 标注工具：12 个工具全部在此注册。
+# 标注工具：11 个工具全部在此注册。
 #
 # 实现新工具的模式：
 #   1. 子类化 MarkTool，实现 on_press / on_move / on_release；
 #   2. on_press 建图元（items.py）并 scene.addItem（拖拽时可见）；
 #   3. on_release 收尾：合法则 undo.push(AddMarkCommand)，非法则 scene.removeItem；
-#   4. 在 TOOL_CLASSES 注册 id，并加进 annotate/toolbar.py 的 TOOL_GROUPS 或 MORE_TOOLS。
+#   4. 在 TOOL_CLASSES 注册 id，并加进 annotate/toolbar.py 的 TOOL_GROUPS。
 
 from PySide6.QtCore import QRect, QRectF, QPointF, Qt
 from PySide6.QtWidgets import QGraphicsScene, QApplication
@@ -324,18 +324,6 @@ class EraserTool(MarkTool):
         self._erased = []
 
 
-class MagnifierTool(MarkTool):
-    # 检查模式：跟随式 loupe 由画布接管，此处不落图元。
-    def on_press(self, scene, pos, undo):
-        pass
-
-    def on_move(self, pos):
-        pass
-
-    def on_release(self, pos, undo):
-        pass
-
-
 class SerialTool(MarkTool):
     def on_press(self, scene, pos, undo):
         self._scene = scene
@@ -372,7 +360,7 @@ def _next_serial_index(scene, style) -> int:
     return int(nxt)
 
 
-# id -> 工具类。id 必须出现在 toolbar.py 的 TOOL_GROUPS 或 MORE_TOOLS 里。
+# id -> 工具类。id 必须出现在 toolbar.py 的 TOOL_GROUPS 里。
 TOOL_CLASSES: dict[str, type[MarkTool]] = {
     "rect": RectTool,
     "ellipse": EllipseTool,
@@ -385,7 +373,6 @@ TOOL_CLASSES: dict[str, type[MarkTool]] = {
     "mosaic": MosaicTool,
     "highlight": HighlightTool,
     "eraser": EraserTool,
-    "magnifier": MagnifierTool,
 }
 
 

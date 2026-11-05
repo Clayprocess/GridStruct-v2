@@ -322,7 +322,7 @@ class ToolOptions(QWidget):
         if tool_id in ("rect", "ellipse") and self._canvas.tool_id == tool_id:
             self._geo_shape(tool_id)
             self._separator()
-        if tool_id not in ("mosaic", "eraser", "magnifier"):
+        if tool_id not in ("mosaic", "eraser"):
             self._colors("color")
         if tool_id in ("rect", "ellipse", "arrow", "line", "polyline", "pencil", "highlight"):
             self._separator()
@@ -392,10 +392,7 @@ class ToolOptions(QWidget):
         elif tool_id == "eraser":
             self._spin("eraser_size", 4, 120, "橡皮擦大小", _size_glyph)
             self._label("碰到的标注整条删除，原图不变")
-        elif tool_id == "magnifier":
-            self._label("像素预览 15 × 7，移动鼠标查看")
-        if tool_id != "magnifier":
-            more.append(("wheel_enabled", "滚轮调节大小"))
+        more.append(("wheel_enabled", "滚轮调节大小"))
         self._layout.addStretch()
         self._more(more)
         self._sync(tool_id)

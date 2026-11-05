@@ -317,10 +317,7 @@ def all_tools():
             tool.on_right_press(QPointF(160, 100), c._undo)
         rendered = c.render_to_pixmap()
         assert not rendered.isNull()
-        if name == "magnifier":
-            assert c._loupe is not None and c._undo.count() == 0
-            assert len(c.scene().items()) == 1, "loupe modified the captured image"
-        elif name != "eraser":
+        if name != "eraser":
             assert c._undo.count() == 1, name
             c.undo()
             assert len(c.scene().items()) == 1, name
@@ -692,7 +689,7 @@ def toolbar_stability():
         w.show()
         flush()
         spots = set()
-        for tool in ("rect", "text", "arrow", "serial", "pencil", "mosaic", "eraser", "line", "magnifier", "rect"):
+        for tool in ("rect", "text", "arrow", "serial", "pencil", "mosaic", "eraser", "line", "rect"):
             w.select_tool(tool)
             flush()
             w._toolbar._slide.stop()
@@ -840,7 +837,7 @@ def canvas_mouse_events():
     w.show()
     flush()
     c = w._canvas
-    for name in ("rect", "ellipse", "arrow", "line", "pencil", "highlight", "mosaic", "magnifier", "serial"):
+    for name in ("rect", "ellipse", "arrow", "line", "pencil", "highlight", "mosaic", "serial"):
         w._on_tool(name)
         p1, p2 = c.mapFromScene(QPointF(30, 30)), c.mapFromScene(QPointF(120, 90))
         QTest.mouseMove(c.viewport(), p1)
@@ -851,14 +848,6 @@ def canvas_mouse_events():
         QTest.mouseRelease(c.viewport(), Qt.LeftButton, pos=p2)
         assert not errors, errors
         c.undo()
-    w.trigger_action("pipette")
-    from annotate.color_dialog import ColorDialog
-    with patch.object(ColorDialog, "exec", return_value=ColorDialog.Accepted):
-        QTest.mouseClick(c.viewport(), Qt.LeftButton, pos=c.mapFromScene(QPointF(400, 80)))
-    # 取色默认格式同 PixPin 为 RGB。
-    background = QColor(T.LIGHT["background"])
-    assert app.clipboard().text() == f"rgb({background.red()}, {background.green()}, {background.blue()})"
-    assert not c.pipette_active
     count = len(_open_pins)
     w._on_action("pin")
     assert len(_open_pins) == count + 1 and not w.isVisible()
@@ -867,8 +856,8 @@ def canvas_mouse_events():
     w.deleteLater()
 
 
-def loupe_hides_off_surface():
-    # 鼠标移到工具条或“更多”菜单上时，截图遮罩和画布上的放大镜不能停在原地。
+def capture_loupe_leave():
+    # 鼠标移到工具条上时遮罩收不到移动事件，放大镜不能卡在工具条边缘。
     from capture import ScreenshotFlow, DesktopCapture, ScreenFrame
     flow = ScreenshotFlow(app)
     shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(0, 0, 800, 600), sample(800, 600), QPoint())])
@@ -883,39 +872,6 @@ def loupe_hides_off_surface():
         flow._win.close()
         flush()
     flow.deleteLater()
-    from annotate import AnnotationWindow
-    w = AnnotationWindow(sample(640, 320), QPoint())
-    w.show()
-    flush()
-    # 悬停展开的“更多”菜单：鼠标停在菜单上不收，离开按钮和菜单后收起。
-    menu = w._toolbar._more_menu
-    menu.popup(w._toolbar._more.mapToGlobal(QPoint(0, w._toolbar._more.height())))
-    flush()
-    for target, visible in ((menu.geometry().center(), True), (menu.geometry().bottomRight() + QPoint(200, 200), False)):
-        move = QMouseEvent(QEvent.MouseMove, QPointF(menu.mapFromGlobal(target)), QPointF(target),
-                           Qt.NoButton, Qt.NoButton, Qt.NoModifier)
-        with patch("annotate.toolbar.QCursor.pos", return_value=target):
-            QApplication.sendEvent(menu, move)
-            QTest.qWait(400)
-        assert menu.isVisible() == visible, f"more menu visible={menu.isVisible()} with cursor at {target}"
-    c = w._canvas
-    w._on_tool("magnifier")
-    QTest.mouseMove(c.viewport(), c.mapFromScene(QPointF(60, 60)))
-    c._loupe.pick(QPointF(60, 60), c.viewport().mapToGlobal(c.mapFromScene(QPointF(60, 60))))
-    assert c._loupe.isVisible()
-    QApplication.sendEvent(c, QEvent(QEvent.Leave))
-    assert not c._loupe.isVisible(), "magnifier loupe stayed after pointer left the canvas"
-    redo = w._toolbar._menu_actions["redo"]
-    menu.aboutToShow.emit()
-    assert not redo.isEnabled(), "redo enabled with nothing to redo"
-    w._on_tool("rect")
-    c._tool.on_press(c.scene(), QPointF(20, 20), c._undo)
-    c._tool.on_move(QPointF(80, 80))
-    c._tool.on_release(QPointF(80, 80), c._undo)
-    c.undo()
-    menu.aboutToShow.emit()
-    assert redo.isEnabled(), "redo stayed disabled after undo"
-    w.deleteLater()
 
 
 def drawing_interaction():
@@ -1136,7 +1092,7 @@ def ocr_confirm_selection():
 
 
 def render_windows():
-    from annotate import AnnotationWindow, ColorDialog
+    from annotate import AnnotationWindow
     from ocr import OCRResult, OCRResultDialog
     from capture.longshot import LongShotBar
     from ui import MessageDialog
@@ -1149,7 +1105,6 @@ def render_windows():
                    "settings": SettingsDialog(),
                    "ocr": OCRResultDialog([OCRResult(QRect(0, 0, 40, 20), "合成识别结果 Sample 123", 0.99)]),
                    "pin": PinWindow(sample(400, 200, 2)), "longshot": LongShotBar(),
-                   "color": ColorDialog(QColor(T.ANNOTATION_COLORS[0])),
                    "message": MessageDialog(None, "达到长截图上限", "已达到 29000 像素的拼接上限，可使用当前结果。",
                                             checkbox_text="下次不再提示")}
         for name, window in windows.items():
@@ -1177,7 +1132,7 @@ if __name__ == "__main__":
               text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,
-              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, loupe_hides_off_surface, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
+              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, capture_loupe_leave, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)
