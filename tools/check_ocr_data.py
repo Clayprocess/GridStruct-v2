@@ -113,6 +113,21 @@ def data_contract():
     assert OCRDocument.from_payload(legacy, document.image).text() == "标题\n\n整段改写\n\n右上\n右下"
     legacy.update(paragraphs=[], draft="旧草稿")
     assert OCRDocument.from_payload(legacy, document.image).text() == "旧草稿"
+    # 全文改完以后又逐行改过（旧版 draft_stale）：两份都留下，较新的逐行修改在上面。
+    legacy.update(corrections={identifiers[1]: "左上校正"}, revision=2, draft_revision=1)
+    both = OCRDocument.from_payload(legacy, document.image).text()
+    assert both.startswith("标题\n\n左上校正\n左下") and both.endswith("——\n\n旧草稿"), both
+    # 全文在逐行校正之后改的，已经包含了校正。
+    legacy.update(revision=2, draft_revision=2)
+    assert OCRDocument.from_payload(legacy, document.image).text() == "旧草稿"
+    legacy.update(revision=1, draft_revision=2)
+    try:
+        OCRDocument.from_payload(legacy, document.image)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("bad v1 revision accepted")
+    legacy.update(corrections={}, revision=1, draft_revision=0)
     legacy.update(draft=None)
     untouched = OCRDocument.from_payload(legacy, document.image)
     assert untouched.draft is None and untouched.layout == "paragraph"

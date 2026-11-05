@@ -101,9 +101,13 @@ class OCRDocument(QObject):
         """人工改过的全文；没改过为 None。"""
         return self._draft
 
+    def recognized_text(self):
+        """按当前排版整理的识别结果，即没改过时的全文。"""
+        return format_text(self._layout, self._mode)
+
     def text(self):
         """复制、贴出去的文字：改过就是改过的全文，否则按当前排版整理识别结果。"""
-        return self._draft if self._draft is not None else format_text(self._layout, self._mode)
+        return self._draft if self._draft is not None else self.recognized_text()
 
     def set_layout(self, mode):
         """换排版就是重新整理识别结果，手动改过的全文随之丢弃（界面先确认）。"""
@@ -117,7 +121,7 @@ class OCRDocument(QObject):
         if not isinstance(text, str):
             raise ValueError("全文必须是文字")
         # 改回和排版结果一模一样，就等于没改过。
-        draft = None if text == format_text(self._layout, self._mode) else text
+        draft = None if text == self.recognized_text() else text
         if draft != self._draft:
             self._draft = draft
             self.changed.emit()
@@ -193,13 +197,21 @@ class OCRDocument(QObject):
         return document
 
 
+# 第 1 版全文之后又逐行改过时，两份修改合不起来，都留在全文里让用户挑。
+_LEGACY_BOTH = "\n\n—— 升级前有两份修改：上面是后来逐行改的，下面是更早在“全文”里改的，保留需要的部分后删掉其余 ——\n\n"
+
+
 def _legacy_draft(document, payload, draft):
     """第 1 版逐行/逐段校正并进全文，旧贴图里改过的字不丢；没改过就按新排版重新整理。"""
     corrections, paragraphs = payload.get("corrections"), payload.get("paragraphs")
+    revision, draft_revision = payload.get("revision"), payload.get("draft_revision")
     if not isinstance(corrections, dict) or any(not isinstance(text, str) for text in corrections.values()) \
             or not isinstance(paragraphs, list):
         raise ValueError("OCR 校正格式无效")
-    if draft is not None or not corrections and not paragraphs:
+    if type(revision) is not int or type(draft_revision) is not int or not 0 <= draft_revision <= revision:
+        raise ValueError("OCR 校正版本无效")
+    # 全文是在最后一次逐行校正之后改的，已经包含了那些校正。
+    if not corrections and not paragraphs or draft is not None and draft_revision == revision:
         return draft
     items = [replace(item, text=corrections.get(item.item_id, item.text)) for item in document._layout]
     for entry in paragraphs:
@@ -212,4 +224,5 @@ def _legacy_draft(document, payload, draft):
             items[members[0]] = replace(items[members[0]], text=entry["text"])
             for index in reversed(members[1:]):
                 del items[index]
-    return format_text(items, "lines")
+    corrected = format_text(items, "lines")
+    return corrected if draft is None else corrected + _LEGACY_BOTH + draft

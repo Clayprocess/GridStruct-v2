@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 from styles import apply_theme, tokens as T
 from ocr import OCRDocument, OCRResult, OCRResultDialog
-from ocr.dialog import find_spans
+from ocr.dialog import find_spans, span_at
 
 OUTPUT = Path(__file__).resolve().parents[1] / ".scratch" / "ocr-review"
 
@@ -33,9 +33,19 @@ def span_of(dialog, identifier):
 def check_spans():
     records = [OCRResult(QRect(0, 0, 10, 10), "X", .9), OCRResult(QRect(0, 20, 10, 10), "Excel 文件", .9),
                OCRResult(QRect(0, 40, 10, 10), "𠀀 生僻", .5)]
-    spans = find_spans("Excel 文件\n𠀀 生僻", records)
+    original = "X\nExcel 文件\n𠀀 生僻"
+    spans = find_spans("Excel 文件\n𠀀 生僻", original, records)
     # “X” 被删了：后面 “Excel” 里的 X 不算它；生僻字按 UTF-16 占两位。
     assert [(start, end, item.text) for start, end, item in spans] == [(0, 8, "Excel 文件"), (9, 14, "𠀀 生僻")], spans
+    # 两处相同的字：改了第一处，第二处仍归第二条，不被改过的那条占走。
+    same = [OCRResult(QRect(0, 0, 10, 10), "100", .4), OCRResult(QRect(20, 0, 10, 10), "100", .99)]
+    spans = find_spans("200 100", "100 100", same)
+    assert [(start, end, item.score) for start, end, item in spans] == [(4, 7, .99)], spans
+    # 中文合行时前一条终点就是下一条起点：光标在起点归下一条，在末尾归最后一条。
+    lines = [OCRResult(QRect(10, 10, 90, 20), "第一行", .99), OCRResult(QRect(10, 35, 90, 20), "第二行", .4)]
+    spans = find_spans("第一行第二行", "第一行第二行", lines)
+    assert span_at(spans, 3)[2].text == "第二行" and span_at(spans, 0)[2].text == "第一行"
+    assert span_at(spans, 6)[2].text == "第二行" and span_at(spans, 7) is None
 
 
 def main():
@@ -167,6 +177,13 @@ def main():
                 dialog.close()
                 dialog.deleteLater()
                 flush(app)
+            adjacent = OCRDocument([OCRResult(QRect(10, 10, 90, 20), "第一行", .99),
+                                    OCRResult(QRect(10, 35, 90, 20), "第二行", .4)], image)
+            dialog = OCRResultDialog(adjacent)
+            assert dialog._text.toPlainText() == "第一行第二行"
+            dialog._next_pending()
+            assert adjacent.focused_ids == (adjacent.results[1].item_id,)
+            dialog.deleteLater()
             legacy = OCRResultDialog([OCRResult(QRect(0, 0, 50, 20), "legacy", .9)])
             assert legacy._preview.isHidden() and not legacy._to_table.isEnabled()
             legacy._copy_all()

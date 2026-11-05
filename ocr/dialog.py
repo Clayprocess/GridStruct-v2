@@ -6,6 +6,8 @@
 低置信度的文字标波浪线，F8 逐处跳转。定位靠在全文里依次找回每条识别文字，改过的那条找不到就不再定位、不再标记。
 """
 
+from difflib import SequenceMatcher
+
 from PySide6.QtCore import QPointF, QSignalBlocker, Qt, Slot
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPixmap, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor, QTransform
 from PySide6.QtWidgets import (
@@ -35,25 +37,45 @@ def _utf16(text):
     return offsets.__getitem__
 
 
-def find_spans(text, results):
-    """按阅读顺序在全文里找回每条识别文字，返回 [(起, 止, 条目)]（QTextDocument 位置）。
+def find_spans(text, original, results):
+    """把每条识别文字在全文里的位置找出来，返回 [(起, 止, 条目)]（QTextDocument 位置）。
 
-    下一条反而出现得更早，说明这一条被改掉或删了，后面那处同样的字不是它，跳过。
+    original 是排版整理出的原文，条目在里面按阅读顺序依次出现，位置是确定的；再按改动把位置
+    映射到当前全文：只有整条落在没改过的片段里才保留，改过、删掉的那条不再定位。
+    不在全文里直接搜字，是因为重复的字（两处“100”）会被改过的那条占走。
     """
+    base, start = [], 0
+    for item in results:
+        needle = item.text.strip()
+        found = original.find(needle, start) if needle else -1
+        if found >= 0:
+            base.append((found, found + len(needle), item))
+            start = found + len(needle)
+    if text != original:
+        # 改动通常集中在一处：先去掉相同的头尾，只对中间做比对，长文逐字输入也不卡。
+        head = 0
+        while head < min(len(text), len(original)) and text[head] == original[head]:
+            head += 1
+        tail = 0
+        while tail < min(len(text), len(original)) - head and text[-1 - tail] == original[-1 - tail]:
+            tail += 1
+        blocks = [(0, 0, head), (len(original) - tail, len(text) - tail, tail)]
+        matcher = SequenceMatcher(None, original[head:len(original) - tail], text[head:len(text) - tail], autojunk=False)
+        blocks += [(a + head, b + head, size) for a, b, size in matcher.get_matching_blocks() if size]
+        kept = []
+        for begin, end, item in base:
+            block = next((block for block in blocks if block[0] <= begin and end <= block[0] + block[2]), None)
+            if block is not None:
+                kept.append((begin + block[1] - block[0], end + block[1] - block[0], item))
+        base = kept
     position = _utf16(text)
-    needles = [(item.text.strip(), item) for item in results]
-    spans, start = [], 0
-    for index, (needle, item) in enumerate(needles):
-        found = text.find(needle, start) if needle else -1
-        if found < 0:
-            continue
-        following = next((value for value, _item in needles[index + 1:] if value), "")
-        ahead = text.find(following, start) if following else -1
-        if 0 <= ahead < found:
-            continue
-        spans.append((position(found), position(found + len(needle)), item))
-        start = found + len(needle)
-    return spans
+    return [(position(begin), position(end), item) for begin, end, item in base]
+
+
+def span_at(spans, position):
+    """光标所在的条目：中文合行时前一条的终点就是下一条的起点，起点优先归下一条。"""
+    return next((span for span in spans if span[0] <= position < span[1]), None) \
+        or next((span for span in spans if span[1] == position), None)
 
 
 class _ImagePreview(QGraphicsView):
@@ -264,7 +286,7 @@ class OCRResultDialog(BaseDialog):
         self._update_marks()
 
     def _update_marks(self):
-        self._spans = find_spans(self._text.toPlainText(), self._document.results)
+        self._spans = find_spans(self._text.toPlainText(), self._document.recognized_text(), self._document.results)
         self._paint_marks()
         self._update_status()
 
@@ -312,7 +334,7 @@ class OCRResultDialog(BaseDialog):
         if self._syncing:
             return
         position = self._text.textCursor().position()
-        span = next((span for span in self._spans if span[0] <= position <= span[1]), None)
+        span = span_at(self._spans, position)
         if span is not None and (span[2].item_id,) != self._document.focused_ids:
             self._syncing = True
             self._document.focus((span[2].item_id,))
