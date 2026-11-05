@@ -42,6 +42,7 @@ class AddMarkCommand(QUndoCommand):
         self._scene = scene
         self._item = item
         self._in_scene = True  # on_press 已加入
+        self.fresh = True  # 画布据此认出“刚画完、自动选中”的标注；重做不算新画
 
     def redo(self):
         if not self._in_scene:
