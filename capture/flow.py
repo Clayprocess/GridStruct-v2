@@ -45,17 +45,25 @@ class ScreenshotFlow(QObject):
         self._win.actionRequested.connect(self._trigger_action)
         self._win.cancelled.connect(self._cleanup)
         self._win.show()
+        # 工具条有二十多个按钮和图标，现场创建要几十毫秒；以前在刚拖出选区时创建，拖动会卡一下。
+        # 遮罩先画出来，再趁用户还没开始拖时建好；人的反应时间远大于这 100ms。
+        QTimer.singleShot(100, self._prepare_panel)
+
+    def _prepare_panel(self):
+        if self._win is None or self._panel is not None:
+            return
+        self._panel = FloatPanel(self._app.property("theme_mode") or self._mode)
+        self._win.route_keyboard(self._panel)
+        self._panel.toolSelected.connect(self._select_tool)
+        self._panel.actionTriggered.connect(self._trigger_action)
+        # 提前建好原生窗口，第一次显示时不再付这笔开销。
+        self._panel.winId()
 
     def _on_selection(self, rect):
-        if rect.width() < 4 or rect.height() < 4:
-            if self._panel is not None:
-                self._panel.hide()
+        self._prepare_panel()
+        if rect.width() < 4 or rect.height() < 4 or self._win.dragging():
+            self._panel.hide()
             return
-        if self._panel is None:
-            self._panel = FloatPanel(self._app.property("theme_mode") or self._mode)
-            self._win.route_keyboard(self._panel)
-            self._panel.toolSelected.connect(self._select_tool)
-            self._panel.actionTriggered.connect(self._trigger_action)
         self._panel.set_position_near(rect)
         self._panel.show()
 

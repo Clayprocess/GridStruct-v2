@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSettings, Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QMouseEvent, QPainter, QPixmap, QTextCursor
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QKeyEvent, QMouseEvent, QPainter, QPixmap, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -180,6 +180,42 @@ def remove_undo_order():
         flush()
         c.undo()
         assert c.render_to_pixmap().toImage() == before, "undo delete changed stacking order"
+    c.deleteLater()
+
+
+def fresh_mark_color():
+    """刚画完自动选中的标注改色，要同时成为下一笔和其他工具的颜色；重新点选的旧标注只改自己。"""
+    c = AnnotationCanvas(sample(320, 200))
+    c.set_tool_by_id("rect")
+    c.update_style("color", QColor(T.ANNOTATION_COLORS[0]))
+
+    def draw(x):
+        c._tool.on_press(c.scene(), QPointF(x, 20), c._undo)
+        c._tool.on_move(QPointF(x + 40, 60))
+        c._tool.on_release(QPointF(x + 40, 60), c._undo)
+        return c._selected_marks()[0]
+
+    blue, green = QColor(T.ANNOTATION_COLORS[3]), QColor(T.ANNOTATION_COLORS[2])
+    first = draw(20)
+    c.update_style("color", blue)
+    assert first.style.color == blue and c.styles["rect"].color == blue, "刚画完改色没记成矩形的当前色"
+    assert c.styles["arrow"].color == blue, "共用颜色没同步到其他工具"
+    assert c.styles["highlight"].color == QColor(T.ANNOTATION_COLORS[-1]), "荧光笔应单独记色"
+    second = draw(100)
+    assert second.style.color == blue, "下一笔跳回了旧颜色"
+    c.update_style("width", 6)
+    assert c.styles["rect"].width == 6
+    # 撤销再重做出来的标注不算刚画的，选中旧标注改色只改它自己。
+    c.undo()
+    c.undo()
+    c.redo()
+    assert c._selected_marks() == [second]
+    c.update_style("color", green)
+    assert second.style.color == green and c.styles["rect"].color == blue
+    c.scene().clearSelection()
+    first.setSelected(True)
+    c.update_style("color", green)
+    assert first.style.color == green and c.styles["rect"].color == blue
     c.deleteLater()
 
 
@@ -869,9 +905,49 @@ def capture_loupe_leave():
         assert overlay.loupe.isVisible()
         QApplication.sendEvent(overlay, QEvent(QEvent.Leave))
         assert not overlay.loupe.isVisible(), "capture loupe stayed after pointer left the overlay"
-        flow._win.close()
+        # 回到遮罩的真实移动事件必须重新显示放大镜，不能只验证手动 pick。
+        position = QPointF(120, 100)
+        move = QMouseEvent(QEvent.MouseMove, position, position,
+                           Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+        QApplication.sendEvent(overlay, move)
+        assert overlay.loupe.isVisible(), "capture loupe did not return with pointer"
+        previous_format = overlay.loupe._format
+        # QTest.keyClick 对修饰键会合成额外按键，直接发送一次按下/松开。
+        QApplication.sendEvent(overlay, QKeyEvent(QEvent.KeyPress, Qt.Key_Shift, Qt.ShiftModifier))
+        QApplication.sendEvent(overlay, QKeyEvent(QEvent.KeyRelease, Qt.Key_Shift, Qt.NoModifier))
+        assert overlay.loupe._format != previous_format
+        QTest.keyClick(overlay, Qt.Key_C)
+        assert app.clipboard().text() == overlay.loupe.color_text
+        assert flow._win is None, "copying the color must end capture"
         flush()
     flow.deleteLater()
+
+
+def toolbar_keyboard_redo():
+    from annotate import AnnotationWindow
+    window = AnnotationWindow(sample(640, 320), QPoint())
+    window.show()
+    window.select_tool("rect")
+    flush()
+    canvas, toolbar = window._canvas, window._toolbar
+    assert "undo" in toolbar._buttons
+    assert not {"redo", "more", "pipette", "magnifier"}.intersection(toolbar._buttons)
+    assert "Ctrl+Y" in toolbar._buttons["undo"].toolTip()
+    canvas._tool.on_press(canvas.scene(), QPointF(30, 30), canvas._undo)
+    canvas._tool.on_release(QPointF(170, 90), canvas._undo)
+    assert canvas._undo.index() == 1
+    # 撤销按钮是唯一历史按钮；键盘重做仍须走窗口的事件分发。
+    QTest.mouseClick(toolbar._buttons["undo"], Qt.LeftButton)
+    assert canvas._undo.index() == 0 and canvas._undo.canRedo()
+    QTest.keyClick(canvas.viewport(), Qt.Key_Y, Qt.ControlModifier)
+    assert canvas._undo.index() == 1 and not canvas._undo.canRedo()
+    QTest.keyClick(canvas.viewport(), Qt.Key_Z, Qt.ControlModifier)
+    assert canvas._undo.index() == 0
+    QTest.keyClick(toolbar, Qt.Key_Y, Qt.ControlModifier)
+    assert canvas._undo.index() == 1
+    canvas._undo.setClean()
+    window.close()
+    flush()
 
 
 def drawing_interaction():
@@ -996,7 +1072,6 @@ def drawing_interaction():
 def ocr_copy_text():
     from ocr import OCRResult, OCRResultDialog
     dialog = OCRResultDialog([OCRResult(QRect(), "plain text", 0.99)])
-    dialog._view_buttons["full"].setChecked(True)
     cursor = dialog._text.textCursor()
     cursor.select(QTextCursor.Document)
     dialog._text.setTextCursor(cursor)
@@ -1129,10 +1204,10 @@ def render_windows():
 
 if __name__ == "__main__":
     checks = [eraser_removes_marks, high_dpi_canvas, ocr_pixels, offline_models, empty_polyline,
-              text_undo, serial_undo, remove_undo_order, text_live_style, square_edge, pin_missing_fields,
+              text_undo, serial_undo, remove_undo_order, fresh_mark_color, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,
-              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, capture_loupe_leave, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
+              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, capture_loupe_leave, toolbar_keyboard_redo, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)

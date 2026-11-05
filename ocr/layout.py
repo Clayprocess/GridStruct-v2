@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from statistics import median
+import string
 
 
 def _gap(items, horizontal, minimum):
@@ -55,13 +56,89 @@ def arrange_results(results):
     return ordered
 
 
-def format_text(results):
-    """同一行片段空格连接、行间换行、段落间空行；兼容未标记的历史结果。"""
-    output, previous = [], None
+# 排版（同 PixPin 的 OCR 布局：自动 / 多行 / 去换行）。
+LAYOUTS = (("paragraph", "段落", "同一段的几行合成一行，段与段之间换行"),
+           ("lines", "原样换行", "保留图片里的每一处换行"),
+           ("single", "一行", "全部合成一行"))
+
+
+def saved_layout(settings):
+    """识别窗口上次选的排版，直接复制也用它；设置里没有或写坏了就用“段落”。"""
+    value = settings.value("ocr/layout", "paragraph")
+    return value if value in {key for key, _label, _tip in LAYOUTS} else "paragraph"
+
+
+def _wide(ch):
+    # 汉字、假名、谚文和全角标点：这些字之间排版本来就不留空格。
+    return ord(ch) >= 0x2E80
+
+
+_ALNUM = string.ascii_letters + string.digits
+
+
+def _code(token):
+    # 字母和数字混在一起的串：订单号、单据号这类。
+    return any(ch.isdigit() for ch in token) and any(ch.isascii() and ch.isalpha() for ch in token)
+
+
+def join_prose(lines):
+    """正文换行合并：只有断在两个英文单词（或英文标点与下一个词）之间才补一个空格，其余直接接上。
+
+    不补的情况：一边是中日韩文字；行尾连字符；两边都是数字（账号、金额、长编号断行，Clay 2026-11-05 指出）；
+    两边都是字母数字混排的串（单据号断行）。和表格格内换行（table.review.join_lines）不同：
+    正文里 “November 3, / 2026” 断在标点后，要补空格。
+    """
+    text = ""
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if text:
+            left, right = text[-1], line[0]
+            head = text[len(text.rstrip(_ALNUM)):]
+            tail = line[:len(line) - len(line.lstrip(_ALNUM))]
+            glued = _wide(left) or _wide(right) or left == "-" or left.isdigit() and right.isdigit() \
+                or _code(head) and _code(tail)
+            if not glued:
+                text += " "
+        text += line
+    return text
+
+
+def _prose_paragraphs(lines):
+    """“段落”排版再按行宽切段：没写满的一行（小标题、段尾）后面断开，首行缩进的一行前面断开。
+
+    版面分段只认整块空白，紧挨着的小标题和正文会被并成一段；这里补上按行宽判断，阈值约两个字宽。
+    """
+    lefts = [min(item.box.left() for item in line) for line in lines]
+    rights = [max(item.box.right() for item in line) for line in lines]
+    left, right = min(lefts), max(rights)
+    chunks = [[]]
+    for line, start, end in zip(lines, lefts, rights):
+        height = median(item.box.height() for item in line)
+        if chunks[-1] and start - left > 1.5 * height:
+            chunks.append([])
+        chunks[-1].append(" ".join(item.text for item in line))
+        if right - end > 2 * height:
+            chunks.append([])
+    return [join_prose(chunk) for chunk in chunks if chunk]
+
+
+def format_text(results, layout="lines"):
+    """同一行的片段空格连接；行与段按 layout 合并。兼容没有行段编号的历史结果。"""
+    paragraphs, previous = [], None
     for index, item in enumerate(results):
         key = (item.paragraph, item.line) if item.paragraph >= 0 else (0, index)
-        if previous is not None:
-            output.append("\n\n" if key[0] != previous[0] else "\n" if key[1] != previous[1] else " ")
-        output.append(item.text)
+        if previous is None or key[0] != previous[0]:
+            paragraphs.append([[item]])
+        elif key[1] != previous[1]:
+            paragraphs[-1].append([item])
+        else:
+            paragraphs[-1][-1].append(item)
         previous = key
-    return "".join(output)
+    if layout == "paragraph":
+        return "\n".join(text for lines in paragraphs for text in _prose_paragraphs(lines))
+    texts = [[" ".join(item.text for item in line) for line in lines] for lines in paragraphs]
+    if layout == "single":
+        return join_prose(line for lines in texts for line in lines)
+    return "\n\n".join("\n".join(lines) for lines in texts)

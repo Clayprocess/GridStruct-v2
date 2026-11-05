@@ -71,11 +71,7 @@ def data_contract():
     assert [item.text for item in document] == ["标题", "左上", "左下", "右上", "右下"]
     assert [item.text for item in document.raw_results] == [item.text for item in records]
     identifiers = [item.item_id for item in document]
-    document.correct((identifiers[1],), "左上校正")
-    document.relayout()
     assert [item.item_id for item in document] == identifiers
-    assert document.results[1].text == "左上校正"
-    assert document.results[1].original_text == "左上"
     assert len(document.raw_results) == 5 and document.raw_results[-1].score == .4
     document.raw_results[0].box.setX(555)
     document.results[-1].box.translate(33, 0)
@@ -84,16 +80,65 @@ def data_contract():
     source.setPixelColor(2, 2, QColor(T.LIGHT["foreground"]))
     assert not document.matches(source)
     assert document.matches(document.image)
-    paragraph = document.groups()[1]
-    document.correct(paragraph, "整段自由改写\n第二行")
-    assert document.results[1].source_ids == paragraph
-    assert document.results[1].polygon == () and len(document) == 4
+    # 排版：段落合行（中文不补空格）、原样换行、一行。
+    assert document.layout == "paragraph" and document.text() == "标题\n左上左下\n右上右下"
+    document.set_layout("lines")
+    assert document.text() == "标题\n\n左上\n左下\n\n右上\n右下"
+    document.set_layout("single")
+    assert document.text() == "标题左上左下右上右下"
+    # 正文合行：英文、数字之间补空格，碰到中文不补，行尾连字符直接接上。
+    english = OCRDocument([row("on November 3,", 10, 10), row("2026. Co-", 10, 35), row("operate 合作", 10, 60),
+                           row("说明", 10, 85)], image())
+    assert english.text() == "on November 3, 2026. Co-operate 合作说明", english.text()
+    # 账号、金额、单据号断行直接接上，不补空格；英文单词之间照常补。
+    from ocr.layout import join_prose
+    cases = {("账号 6222 0212 3456", "7890 开户行"): "账号 6222 0212 34567890 开户行",
+             ("Account No. 62220212345678", "90123"): "Account No. 6222021234567890123",
+             ("Ref AB12CD", "34EF done"): "Ref AB12CD34EF done", ("in 2026", "the app"): "in 2026 the app",
+             ("courier collection point and the", "return address"): "courier collection point and the return address"}
+    for lines, expected in cases.items():
+        assert join_prose(lines) == expected, (lines, join_prose(lines))
+    # 人工编辑只有一份全文；改回排版结果等于没改，换排版丢掉编辑。
+    document.set_layout("lines")
     document.set_draft("独立草稿")
-    document.correct((identifiers[0],), "标题更新")
-    assert document.draft_stale and document.draft == "独立草稿"
+    assert document.draft == "独立草稿" and document.text() == "独立草稿"
+    assert [item.text for item in document] == ["标题", "左上", "左下", "右上", "右下"]
     encoded = json.loads(json.dumps(document.to_payload(), ensure_ascii=False))
     restored = OCRDocument.from_payload(encoded, document.image)
-    assert restored.to_payload() == encoded and restored.text() == document.text()
+    assert restored.to_payload() == encoded and restored.text() == "独立草稿" and restored.layout == "lines"
+    document.set_draft("标题\n\n左上\n左下\n\n右上\n右下")
+    assert document.draft is None
+    document.set_draft("再改")
+    document.set_layout("paragraph")
+    assert document.draft is None and document.text() == "标题\n左上左下\n右上右下"
+    # 第 1 版贴图：逐行校正并进全文，旧草稿原样保留。
+    legacy = {key: value for key, value in encoded.items() if key not in ("mode", "draft")}
+    legacy.update(version=1, draft=None, revision=1, draft_revision=0,
+                  corrections={identifiers[1]: "左上校正"}, paragraphs=[])
+    migrated = OCRDocument.from_payload(legacy, document.image)
+    assert migrated.text() == "标题\n\n左上校正\n左下\n\n右上\n右下" and migrated.layout == "lines"
+    legacy.update(corrections={}, paragraphs=[{"ids": list(document.results[i].item_id for i in (1, 2)), "text": "整段改写"}])
+    assert OCRDocument.from_payload(legacy, document.image).text() == "标题\n\n整段改写\n\n右上\n右下"
+    legacy.update(paragraphs=[], draft="旧草稿")
+    assert OCRDocument.from_payload(legacy, document.image).text() == "旧草稿"
+    # 全文改完以后又逐行改过（旧版 draft_stale）：两份都留下，较新的逐行修改在上面。
+    legacy.update(corrections={identifiers[1]: "左上校正"}, revision=2, draft_revision=1)
+    both = OCRDocument.from_payload(legacy, document.image).text()
+    assert both.startswith("标题\n\n左上校正\n左下") and both.endswith("——\n\n旧草稿"), both
+    # 全文在逐行校正之后改的，已经包含了校正。
+    legacy.update(revision=2, draft_revision=2)
+    assert OCRDocument.from_payload(legacy, document.image).text() == "旧草稿"
+    legacy.update(revision=1, draft_revision=2)
+    try:
+        OCRDocument.from_payload(legacy, document.image)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("bad v1 revision accepted")
+    legacy.update(corrections={}, revision=1, draft_revision=0)
+    legacy.update(draft=None)
+    untouched = OCRDocument.from_payload(legacy, document.image)
+    assert untouched.draft is None and untouched.layout == "paragraph"
     for mutate in (lambda p: p.update(version=True),
                    lambda p: p["layout"][0].update(id=[]),
                    lambda p: p["raw"][0].update(score=float("nan")),
@@ -101,7 +146,8 @@ def data_contract():
                    lambda p: p["raw"][0].update(polygon=[[10**400, 0]] * 4),
                    lambda p: p["raw"][0].update(polygon=[[0, 0]]),
                    lambda p: p["layout"].pop(),
-                   lambda p: p.update(draft_revision=-1)):
+                   lambda p: p.update(mode="columns"),
+                   lambda p: p.update(draft=3)):
         corrupted = copy.deepcopy(encoded)
         mutate(corrupted)
         try:
@@ -121,7 +167,7 @@ def data_contract():
         restored_image.setDevicePixelRatio(dpr)
         assert document.matches(restored_image)
         assert OCRDocument.from_payload(document.to_payload(), restored_image).text() == "DPR"
-    print("PASS DATA: raw evidence, columns/title, stable IDs, correction, draft, validation, DPR PNG")
+    print("PASS DATA: raw evidence, columns/title, stable IDs, layouts, single draft, v1 migration, validation, DPR PNG")
 
 
 def engine_geometry():
@@ -162,13 +208,13 @@ def annotation_transfer():
         service.stage.emit(request, "recognizing")
         service.finished.emit(request, [row("原文", 10, 20)], "")
         document = window._ocr.document
-        document.correct((document.results[0].item_id,), "已校正")
+        document.set_draft("已校正")
         assert window._render().toImage().convertToFormat(QImage.Format_RGBA8888) == pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
         window.trigger_action("pin")
         flush()
         target = pin._open_pins[-1]
         assert target._document is document and target._document.text() == "已校正"
-        target._document.correct((target._document.results[0].item_id,), "来源关闭后校正")
+        target._document.set_draft("来源关闭后校正")
         target._recognize()
         assert target._ocr_controller._dialogs[-1]._document is document
         fresh = AnnotationWindow(pixmap, QPoint())
@@ -178,9 +224,12 @@ def annotation_transfer():
         tool.on_press(fresh._canvas.scene(), QPointF(10, 80), fresh._canvas._undo)
         tool.on_move(QPointF(100, 130))
         tool.on_release(QPointF(100, 130), fresh._canvas._undo)
-        assert fresh._ocr.document is None and fresh._text_layer is None
+        # 改过的全文标注后仍留着可复制，只是不再和截图定位（Clay 2026-11-05 定）；重新识别前先确认。
+        assert fresh._ocr.document is document and fresh._text_layer is None
         assert target._document is document
-        fresh.trigger_action("ocr")
+        with patch("annotate.window.ask_confirmation", return_value=True) as asked:
+            fresh.trigger_action("ocr")
+            assert asked.called
         obsolete = fresh._ocr._request
         fresh._canvas.undo()
         assert obsolete.cancelled.is_set() and not fresh._ocr.running

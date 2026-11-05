@@ -142,7 +142,9 @@ QToolButton[pill="true"]:checked {{
 /* ===== FloatPanel 浮动工具条 ===== */
 /* 注：面板本体的圆角卡片背景由 FloatPanel.paintEvent 手绘
    （WA_TranslucentBackground 下 QSS 不绘制自身背景），颜色取自 tokens */
-QWidget#FloatPanelRow {{
+/* 卡片里的行容器都不能自己铺底：普通 QWidget 会按上面的全局规则画方形底色，
+   四个直角从圆角卡片里露出来，看着就是圆角发毛、不平滑。 */
+QWidget#FloatPanelRow, QWidget#FloatPanelBar, QWidget#FloatPanelCard {{
     background: transparent;
 }}
 QWidget#FloatPanelRow QToolButton[class="ghost"] {{
@@ -175,7 +177,7 @@ QToolButton[class="destructive"]:hover {{
 }}
 
 /* ===== 输入框 ===== */
-QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit#OCRFullText {{
     background-color: {t['background']};
     border: 1px solid {t['input']};
     border-radius: {r}px;
@@ -183,7 +185,7 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
     selection-background-color: {t['primary']};
     selection-color: {t['primary_foreground']};
 }}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus {{
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit#OCRFullText:focus {{
     border: 1px solid {t['ring']};
 }}
 QComboBox:hover, QSpinBox:hover {{

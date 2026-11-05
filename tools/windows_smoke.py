@@ -44,7 +44,6 @@ try:
     # 快照点查：overlay 自身被排除，应命中 target（窗口级）
     probe = snap.RegionDetector(ignored_hwnd=ignored)
     try:
-        probe._refresh_snapshot()
         hit = probe._lookup(point.x(), point.y())
         assert hit is not None, "快照未命中窗口"
         hwnd, rect = hit
@@ -64,7 +63,6 @@ try:
         stopped = time.monotonic()
         detector.shutdown()
         assert time.monotonic() - stopped < 0.25, "关闭吸附不应等待外部查询"
-        assert not detector._reply_timer.isActive()
         detector.deleteLater()
         from PySide6.QtCore import QCoreApplication, QEvent
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
@@ -73,57 +71,6 @@ finally:
     overlay.close()
     target.close()
 
-class _FakeUIA:
-    """模拟 UIA：按窗口返回固定控件矩形（物理坐标），验证缓存路径。"""
-    def __init__(self, rect):
-        self.seen = []
-        self.rect = rect
-    def window_rectangles(self, hwnd):
-        self.seen.append(hwnd)
-        return [QRect(self.rect)]
-    def close(self):
-        pass
-
-target.show()
-app.processEvents()
-hwnd = int(target.winId())
-window_rect = target.geometry()
-button_rect = QRect(window_rect.topLeft() + QPoint(30, 30), QSize(50, 40))
-native_window = physical(window_rect, dpr)
-fake = _FakeUIA(physical(button_rect, dpr))
-original_try, original_msaa = snap._try_init_uia, snap._try_init_msaa
-snap._try_init_uia = lambda: fake
-# 这里只验证整窗遍历缓存；点命中另由 tools/check_snap_hit.py 用假树覆盖。
-snap._try_init_msaa = lambda: None
-detector = snap.RegionDetector(only_window=False)
-# 保留真实 HWND 校验，只隔离桌面其他窗口及周期刷新对缓存用例的影响。
-detector._snapshot_timer.stop()
-detector._windows = [(hwnd, native_window)]
-results = []
-detector.regionDetected.connect(results.append)
-try:
-    key = (hwnd, native_window.getRect())
-    background_point = window_rect.bottomRight() - QPoint(20, 20)
-    detector.detect(background_point)
-    assert results == [window_rect], results
-    wait_until(lambda: key in detector._cache)
-    assert fake.seen == [hwnd], "必须先完成一次 UIA 查询，避免零调用的假通过"
-    request_id = detector._request_id
-    detector.detect(button_rect.center())
-    assert results[-1] == button_rect, results
-    signal_count = len(results)
-    for offset in range(10):
-        detector.detect(button_rect.topLeft() + QPoint(10 + offset, 10))
-    assert len(results) == signal_count, "同一控件内移动不应重复发布高亮"
-    detector.detect(background_point)
-    assert results[-1] == window_rect, results
-    assert detector._request_id == request_id and not detector._requests, "窗内移动不应派发新请求"
-    assert fake.seen == [hwnd], "缓存命中后不应再次调用 UIA"
-    print(f"PASS: per-window UIA cache, button/background transitions, one UIA query, DPR={dpr}")
-finally:
-    detector.shutdown()
-    snap._try_init_uia, snap._try_init_msaa = original_try, original_msaa
-    target.close()
 print("PASS: detector shutdown is non-blocking and QObject can be released")
 
 from PySide6.QtWidgets import QPushButton
@@ -134,8 +81,6 @@ button = QPushButton("x", target)
 button.setGeometry(40, 40, 16, 16)  # 标签页关闭按钮大小的小控件
 target.show()
 app.processEvents()
-original_uia = snap._try_init_uia
-snap._try_init_uia = lambda: None
 detector = snap.RegionDetector(only_window=False)
 try:
     # Qt GUI 线程可能已用 STA 初始化 COM；按正式路径在后台创建 MSAA，避免在 GUI 线程误测 MTA。
@@ -148,7 +93,6 @@ try:
     print(f"PASS: native background MSAA reaches a 16px button in {(time.monotonic() - started) * 1000:.1f}ms")
 finally:
     detector.shutdown()
-    snap._try_init_uia = original_uia
     target.close()
 
 import ctypes

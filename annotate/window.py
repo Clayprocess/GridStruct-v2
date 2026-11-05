@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, QPoint, QRect, Signal, QTimer, QEvent
 from .canvas import AnnotationCanvas
 from .toolbar import FloatPanel, shortcut_tool
 from .options import ToolOptions
-from ui import floating_window_type, MessageDialog, show_toast
+from ui import ask_confirmation, floating_window_type, MessageDialog, show_toast
 from ui.motion import animation
 from settings import get_settings
 from styles import tokens as T
@@ -17,12 +17,12 @@ from export import save_image
 from ocr import OCRController, OCRDocument, add_text_layer
 
 
-def _confirm_exit(parent):
-    """有未保存的标注时确认退出；勾选“不再提醒”后直接退出，可在设置里恢复。"""
+def _confirm_exit(parent, lost="未复制或保存的标注"):
+    """有未保存的标注或改过的识别文字时确认退出；勾选“不再提醒”后直接退出，可在设置里恢复。"""
     settings = get_settings()
     if not settings.value("capture/confirm_exit", True, type=bool):
         return True
-    dialog = MessageDialog(parent, "退出截图", "确认退出截图？未复制或保存的标注将丢失。",
+    dialog = MessageDialog(parent, "退出截图", f"确认退出截图？{lost}将丢失。",
                            confirm_text="退出", cancel_text="取消", checkbox_text="不再提醒")
     accepted = dialog.exec() == QDialog.Accepted
     if accepted and dialog.checkbox.isChecked():
@@ -130,8 +130,8 @@ class AnnotationWindow(QWidget):
 
     def _on_tool(self, tool_id):
         if self._text_layer is not None:
-            self._show_ocr_status("已切换到标注，识别结果仍可查看全文", True)
-        self._remove_text_layer()
+            self._remove_text_layer()
+            self._show_ocr_status("已切换到标注，全文仍可修改、复制", True)
         self._canvas.set_tool_by_id(tool_id)
         self.activateWindow()
         self._canvas.setFocus()
@@ -143,9 +143,20 @@ class AnnotationWindow(QWidget):
             self._canvas.scene().removeItem(self._text_layer)
             self._text_layer.deleteLater()
             self._text_layer = None
+        # 文字层没了就不能再和截图互相定位，卡片里的全文照旧可改、可复制。
+        self._toolbar.set_ocr_document(self._toolbar.ocr_document, False)
+
+    def _ocr_edited(self):
+        document = self._toolbar.ocr_document
+        return document is not None and document.draft is not None
 
     def _image_changed(self):
-        if self._ocr.running or self._ocr.document is not None:
+        if not self._ocr.running and self._ocr_edited():
+            # 改过的文字是用户自己核对出来的，标注后仍留着可复制；识别结果只对应标注前的截图，
+            # 不再定位，贴图、表格识别也不会复用它（它们按图像版本核对）。
+            self._remove_text_layer()
+            self._show_ocr_status("截图已有标注，全文不再对照截图定位，仍可修改、复制", True)
+        elif self._ocr.running or self._ocr.document is not None:
             self._ocr.invalidate("图像内容已变化，原识别结果已失效；请重新识别。")
 
     def _show_text_layer(self, results):
@@ -160,6 +171,8 @@ class AnnotationWindow(QWidget):
             self._text_layer = add_text_layer(self._canvas.scene(), results, self._mode,
                                               on_show_results=self._open_ocr_results)
             self._text_layer.selectionChanged.connect(self._select_ocr_text)
+        self._toolbar.set_ocr_document(results if isinstance(results, OCRDocument) else None,
+                                       self._text_layer is not None)
 
     def _open_ocr_results(self):
         # 同表格识别：复核窗口接手这张图，截图会话随即结束，桌面不再被截图窗口锁住。
@@ -203,9 +216,17 @@ class AnnotationWindow(QWidget):
                 self._canvas._undo.setClean()
             self._focus_canvas()
         elif action == "ocr":
+            if self._ocr_edited() and not ask_confirmation(
+                    self, "重新识别", "重新识别会按新结果重新整理全文，你改过的文字会丢掉。", confirm_text="重新识别"):
+                return
             self._ocr.start(self._render())
         elif action == "ocr_results":
             self._open_ocr_results()
+        elif action == "ocr_copy":
+            # 卡片里的“复制文字”：复制改过的全文并结束截图，不再发图片输出信号。
+            QApplication.clipboard().setText(self._toolbar.ocr_document.text())
+            show_toast("已复制文字")
+            self.close()
         elif action == "ocr_cancel":
             self._ocr.cancel()
         elif action == "table":
@@ -241,7 +262,12 @@ class AnnotationWindow(QWidget):
 
     def _request_cancel(self):
         self._canvas.finish_editing()
-        if self._canvas._undo.isClean() or _confirm_exit(self):
+        annotated, edited = not self._canvas._undo.isClean(), self._ocr_edited()
+        if not (annotated or edited):
+            self.close()
+            return
+        lost = "、".join(text for text, show in (("改过的识别文字", edited), ("未复制或保存的标注", annotated)) if show)
+        if _confirm_exit(self, lost):
             self.close()
 
     def eventFilter(self, obj, event):
@@ -256,6 +282,13 @@ class AnnotationWindow(QWidget):
             self._on_action("escape")
             event.accept()
             return True
+        if event.key() == Qt.Key_F8 and self._toolbar.ocr_document is not None:
+            self._toolbar.ocr_editor.next_pending()
+            event.accept()
+            return True
+        if obj is self._toolbar.ocr_editor:
+            # 在识别全文里打字：Enter 换行，字母、Shift+数字、Ctrl+Z、Ctrl+C 都归编辑框，不切工具、不撤销标注。
+            return False
         text = self._canvas.scene().focusItem()
         if (isinstance(text, QGraphicsTextItem) and text.textInteractionFlags() & Qt.TextEditable
                 and (obj is self._canvas or obj is self._canvas.viewport())):
