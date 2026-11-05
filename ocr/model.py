@@ -1,4 +1,4 @@
-"""识别证据、派生布局与人工校正共享同一图像版本。"""
+"""识别证据、派生版面与人工编辑的全文共享同一图像版本。"""
 
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
@@ -8,7 +8,7 @@ from uuid import uuid4
 from PySide6.QtCore import QObject, QRect, Signal
 from PySide6.QtGui import QImage, QPixmap
 
-from .layout import arrange_results, format_text
+from .layout import LAYOUTS, arrange_results, format_text
 
 
 @dataclass(frozen=True)
@@ -20,14 +20,8 @@ class OCRResult:
     paragraph: int = -1
     line: int = -1
     item_id: str = field(default_factory=lambda: uuid4().hex)
-    original_text: str | None = None
     polygon: tuple = ()
-    source_ids: tuple = ()
     raw_index: int = -1
-
-    def __post_init__(self):
-        if self.original_text is None:
-            object.__setattr__(self, "original_text", self.text)
 
 
 def _image_key(image):
@@ -39,7 +33,10 @@ def _image_key(image):
 
 
 class OCRDocument(QObject):
-    """拥有独立图像快照；原始证据、版面和人工编辑分开保存。"""
+    """拥有独立图像快照；原始证据、版面和人工编辑分开保存。
+
+    人工编辑只有一份全文（draft），不回写到每个识别框：原图文字层是透明的，改了也看不见（实测决定）。
+    """
     changed = Signal()
     focused = Signal(object)
 
@@ -47,13 +44,10 @@ class OCRDocument(QObject):
         super().__init__()
         self._image = image.toImage().copy() if isinstance(image, QPixmap) else image.copy() if image is not None else QImage()
         self.image_key = _image_key(self._image)
-        self._raw = tuple(replace(item, box=QRect(item.box), text=item.original_text, source_ids=()) for item in results)
+        self._raw = tuple(replace(item, box=QRect(item.box)) for item in results)
         self._layout = self._arrange()
-        self._corrections = {}
-        self._paragraphs = {}
+        self._mode = "paragraph"
         self._draft = None
-        self._revision = 0
-        self._draft_revision = 0
         self.focused_ids = ()
 
     @property
@@ -75,42 +69,16 @@ class OCRDocument(QObject):
 
     @property
     def results(self):
-        by_id = {item.item_id: item for item in self._layout}
-        grouped = {identifier: ids for ids in self._paragraphs for identifier in ids}
-        emitted, output = set(), []
-        for item in self._layout:
-            ids = grouped.get(item.item_id)
-            if ids is None:
-                output.append(replace(item, box=QRect(item.box), text=self._corrections.get(item.item_id, item.original_text)))
-            elif ids not in emitted:
-                emitted.add(ids)
-                members = [by_id[identifier] for identifier in ids]
-                box = QRect()
-                for member in members:
-                    box = box.united(member.box)
-                # 整段自由改写仅保留区域定位，不能伪造新文字到原行框的映射。
-                output.append(replace(members[0], box=box, text=self._paragraphs[ids],
-                                      original_text=format_text(members), polygon=(), source_ids=ids,
-                                      score=min(member.score for member in members)))
-        return output
+        return [replace(item, box=QRect(item.box)) for item in self._layout]
 
     def __iter__(self):
         return iter(self.results)
 
     def __len__(self):
-        return len(self.results)
+        return len(self._layout)
 
     def __bool__(self):
         return bool(self._layout)
-
-    def groups(self):
-        groups = {}
-        for item in self._layout:
-            groups.setdefault(item.paragraph, []).append(item.item_id)
-        return [tuple(ids) for ids in groups.values()]
-
-    def text(self):
-        return format_text(self.results)
 
     def matches(self, image):
         image = image.toImage() if isinstance(image, QPixmap) else image
@@ -124,76 +92,50 @@ class OCRDocument(QObject):
         self.focused_ids = ids
         self.focused.emit(ids)
 
-    def correct(self, ids, text):
-        ids = tuple(ids)
-        if not isinstance(text, str) or not ids or not set(ids) <= {item.item_id for item in self._layout}:
-            raise ValueError("校正条目或文字无效")
-        if len(ids) > 1 and ids not in self.groups():
-            raise ValueError("跨段合并请使用独立导出草稿")
-        previous = self.text()
-        if len(ids) == 1:
-            for group in tuple(self._paragraphs):
-                if ids[0] in group:
-                    del self._paragraphs[group]
-            self._corrections[ids[0]] = text
-        else:
-            self._paragraphs[ids] = text
-        self._notify(previous)
-
-    def reset_correction(self, ids):
-        ids = tuple(ids)
-        if not ids or not set(ids) <= {item.item_id for item in self._raw}:
-            raise ValueError("重置条目不属于当前识别结果")
-        previous = self.text()
-        for group in tuple(self._paragraphs):
-            if set(group).intersection(ids):
-                del self._paragraphs[group]
-        for identifier in ids:
-            self._corrections.pop(identifier, None)
-        self._notify(previous)
-
-    def relayout(self):
-        previous = self.text()
-        self._layout = self._arrange()
-        self._notify(previous)
-
-    def _notify(self, previous):
-        if self.text() != previous:
-            self._revision += 1
-        self.changed.emit()
+    @property
+    def layout(self):
+        return self._mode
 
     @property
     def draft(self):
+        """人工改过的全文；没改过为 None。"""
         return self._draft
 
-    @property
-    def draft_stale(self):
-        return self._draft is not None and self._draft_revision != self._revision
+    def text(self):
+        """复制、贴出去的文字：改过就是改过的全文，否则按当前排版整理识别结果。"""
+        return self._draft if self._draft is not None else format_text(self._layout, self._mode)
+
+    def set_layout(self, mode):
+        """换排版就是重新整理识别结果，手动改过的全文随之丢弃（界面先确认）。"""
+        if mode not in {key for key, _label, _tip in LAYOUTS}:
+            raise ValueError("未知排版")
+        if mode != self._mode or self._draft is not None:
+            self._mode, self._draft = mode, None
+            self.changed.emit()
 
     def set_draft(self, text):
         if not isinstance(text, str):
-            raise ValueError("导出草稿必须是文字")
-        if self._draft is None:
-            self._draft_revision = self._revision
-        self._draft = text
-        self.changed.emit()
+            raise ValueError("全文必须是文字")
+        # 改回和排版结果一模一样，就等于没改过。
+        draft = None if text == format_text(self._layout, self._mode) else text
+        if draft != self._draft:
+            self._draft = draft
+            self.changed.emit()
 
     def to_payload(self):
         return {
-            "version": 1, "image_key": self.image_key,
-            "raw": [{"id": item.item_id, "box": list(item.box.getRect()), "text": item.original_text,
+            "version": 2, "image_key": self.image_key,
+            "raw": [{"id": item.item_id, "box": list(item.box.getRect()), "text": item.text,
                      "score": item.score, "polygon": [list(point) for point in item.polygon],
                      "raw_index": item.raw_index} for item in self._raw],
             "layout": [{"id": item.item_id, "paragraph": item.paragraph, "line": item.line} for item in self._layout],
-            "corrections": dict(self._corrections),
-            "paragraphs": [{"ids": list(ids), "text": text} for ids, text in self._paragraphs.items()],
-            "draft": self._draft, "revision": self._revision, "draft_revision": self._draft_revision,
+            "mode": self._mode, "draft": self._draft,
         }
 
     @classmethod
     def from_payload(cls, payload, image):
         """持久化边界严格校验；失败由贴图恢复保留原记录并告知用户。"""
-        if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 1:
+        if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] not in (1, 2):
             raise ValueError("不支持的 OCR 数据版本")
         image = image.toImage() if isinstance(image, QPixmap) else image
         if image.isNull() or payload.get("image_key") != _image_key(image):
@@ -234,24 +176,40 @@ class OCRDocument(QObject):
         if used != {item.item_id for item in document._layout}:
             raise ValueError("OCR 布局遗漏可用条目")
         document._layout = arranged
-        corrections, paragraphs = payload.get("corrections"), payload.get("paragraphs")
-        if not isinstance(corrections, dict) or not set(corrections) <= used or any(not isinstance(text, str) for text in corrections.values()) or not isinstance(paragraphs, list):
-            raise ValueError("OCR 校正格式无效")
-        document._corrections = dict(corrections)
-        grouped = set()
-        for entry in paragraphs:
-            if not isinstance(entry, dict) or not isinstance(entry.get("ids"), list) or any(not isinstance(identifier, str) for identifier in entry["ids"]) or not isinstance(entry.get("text"), str):
-                raise ValueError("OCR 段落校正格式无效")
-            ids = tuple(entry["ids"])
-            if len(ids) < 2 or ids not in document.groups() or grouped.intersection(ids):
-                raise ValueError("OCR 段落校正引用无效")
-            grouped.update(ids)
-            document._paragraphs[ids] = entry["text"]
         draft = payload.get("draft")
-        revision, draft_revision = payload.get("revision"), payload.get("draft_revision")
         if draft is not None and not isinstance(draft, str):
-            raise ValueError("OCR 导出草稿格式无效")
-        if type(revision) is not int or type(draft_revision) is not int or not 0 <= draft_revision <= revision:
-            raise ValueError("OCR 校正版本无效")
-        document._draft, document._revision, document._draft_revision = draft, revision, draft_revision
+            raise ValueError("OCR 全文格式无效")
+        if payload["version"] == 1:
+            draft = _legacy_draft(document, payload, draft)
+            # 旧版全文是原样换行的；按它显示，切排版时才会提示丢掉修改。
+            if draft is not None:
+                document._mode = "lines"
+        else:
+            mode = payload.get("mode")
+            if mode not in {key for key, _label, _tip in LAYOUTS}:
+                raise ValueError("OCR 排版无效")
+            document._mode = mode
+        document._draft = draft
         return document
+
+
+def _legacy_draft(document, payload, draft):
+    """第 1 版逐行/逐段校正并进全文，旧贴图里改过的字不丢；没改过就按新排版重新整理。"""
+    corrections, paragraphs = payload.get("corrections"), payload.get("paragraphs")
+    if not isinstance(corrections, dict) or any(not isinstance(text, str) for text in corrections.values()) \
+            or not isinstance(paragraphs, list):
+        raise ValueError("OCR 校正格式无效")
+    if draft is not None or not corrections and not paragraphs:
+        return draft
+    items = [replace(item, text=corrections.get(item.item_id, item.text)) for item in document._layout]
+    for entry in paragraphs:
+        if not isinstance(entry, dict) or not isinstance(entry.get("ids"), list) or not isinstance(entry.get("text"), str):
+            raise ValueError("OCR 段落校正格式无效")
+        ids = set(entry["ids"])
+        members = [index for index, item in enumerate(items) if item.item_id in ids]
+        if members:
+            # 整段改写的文字放在段首那一条，段里其余条目不再重复输出。
+            items[members[0]] = replace(items[members[0]], text=entry["text"])
+            for index in reversed(members[1:]):
+                del items[index]
+    return format_text(items, "lines")

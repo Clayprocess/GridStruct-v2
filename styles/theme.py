@@ -175,7 +175,7 @@ QToolButton[class="destructive"]:hover {{
 }}
 
 /* ===== 输入框 ===== */
-QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit#OCRFullText {{
     background-color: {t['background']};
     border: 1px solid {t['input']};
     border-radius: {r}px;
@@ -183,7 +183,7 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
     selection-background-color: {t['primary']};
     selection-color: {t['primary_foreground']};
 }}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus {{
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit#OCRFullText:focus {{
     border: 1px solid {t['ring']};
 }}
 QComboBox:hover, QSpinBox:hover {{
