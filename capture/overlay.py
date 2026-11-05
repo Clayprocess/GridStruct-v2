@@ -1,8 +1,7 @@
 # 每屏保留原生截图，控制器共享全局逻辑选区，避免混合 DPI 跨窗重采样。
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor, QRegion
-from PySide6.QtCore import (Qt, QRect, QRectF, QPoint, QSize, Signal, QObject, QTimer, QEvent,
-                           Property, QPropertyAnimation, QEasingCurve)
+from PySide6.QtCore import Qt, QRect, QRectF, QPoint, QSize, Signal, QObject, QTimer, QEvent
 from styles import tokens as T
 from ui import floating_window_type, show_toast
 from settings import get_settings
@@ -42,10 +41,6 @@ class ScreenShotWindow(QObject):
         self._drag_mode = None
         self._drag_start = QPoint()
         self._pending_snap = QRect()
-        self._selection_progress = 1.0
-        self._selection_animation = QPropertyAnimation(self, b"selectionProgress", self)
-        self._selection_animation.setDuration(120)
-        self._selection_animation.setEasingCurve(QEasingCurve.OutCubic)
         self._sel_start = QRect()
         self._pointer_pos = self._manager.cursor_position()
         self._windows = []
@@ -60,15 +55,6 @@ class ScreenShotWindow(QObject):
     @property
     def capture(self):
         return self._shot
-
-    def _get_selection_progress(self):
-        return self._selection_progress
-
-    def _set_selection_progress(self, value):
-        self._selection_progress = value
-        self.update(QRegion(self._sel))
-
-    selectionProgress = Property(float, _get_selection_progress, _set_selection_progress)
 
     def _build_windows(self):
         self._windows = [_ScreenOverlay(self, frame) for frame in self._shot.frames]
@@ -89,7 +75,6 @@ class ScreenShotWindow(QObject):
         if self._closed:
             return
         self._closed = True
-        self._selection_animation.stop()
         QApplication.instance().removeEventFilter(self)
         self._manager.changed.disconnect(self._screens_changed)
         self._snap.shutdown()
@@ -111,8 +96,6 @@ class ScreenShotWindow(QObject):
         self._refreshing = True
         self._sel = QRect()
         self._pending_snap = QRect()
-        self._selection_animation.stop()
-        self._selection_progress = 1.0
         self.selectionChanged.emit(QRect())
         self._snap.shutdown()
         for window in self._windows:
@@ -186,7 +169,7 @@ class ScreenShotWindow(QObject):
     def _on_snap(self, rect):
         new_rect = QRect() if not self._sel.isNull() or self._drag_mode is not None else rect
         if new_rect != self._snap_rect:
-            dirty = self._border_region(self._snap_rect) | self._border_region(new_rect)
+            dirty = self._change_region(self._snap_rect, new_rect)
             self._snap_rect = QRect(new_rect)
             self.update(dirty)
 
@@ -197,10 +180,13 @@ class ScreenShotWindow(QObject):
         margin = _HANDLE // 2 + _HANDLE_SLOP + 2
         return QRegion(rect.adjusted(-margin, -margin, margin, margin)) - QRegion(rect.adjusted(margin, margin, -margin, -margin))
 
+    @classmethod
+    def _change_region(cls, old, new):
+        # 选区和吸附框内部都不压暗，矩形变化时异或区域也必须刷新，否则会残留旧遮罩。
+        return QRegion(old).xored(QRegion(new)) | cls._border_region(old) | cls._border_region(new)
+
     def _selection_region(self, previous):
-        # 内外遮罩随选区变化，异或区域也必须刷新，否则拖拽后会残留旧遮罩。
-        changed = QRegion(previous).xored(QRegion(self._sel))
-        return changed | self._border_region(previous) | self._border_region(self._sel)
+        return self._change_region(previous, self._sel)
 
     def _hover_region(self):
         region = QRegion()
@@ -224,12 +210,8 @@ class ScreenShotWindow(QObject):
             self._pipette_mode = False
             self.pipettePicked.emit(color.name())
             return
-        previous, dirty = QRect(self._sel), self._hover_region() | self._border_region(self._snap_rect)
-        if self._selection_progress < 1.0:
-            # 中断淡入时，旧选区内部也要清除尚未褪完的遮罩。
-            dirty |= QRegion(previous)
-        self._selection_animation.stop()
-        self._selection_progress = 1.0
+        # 按下后若改为手工框选，吸附框内提亮的部分要重新压暗。
+        previous, dirty = QRect(self._sel), self._hover_region() | self._change_region(self._snap_rect, QRect())
         self._pending_snap = QRect()
         self._pointer_pos = pos
         if not self._sel.isNull() and self.size_tip()[0].contains(pos):
@@ -271,7 +253,7 @@ class ScreenShotWindow(QObject):
             if (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
                 self.update(dirty | self._hover_region())
                 return
-            dirty |= self._border_region(self._snap_rect)
+            dirty |= self._change_region(self._snap_rect, QRect())
             self._pending_snap = QRect()
             self._snap_rect = QRect()
             self._drag_mode = "create"
@@ -317,9 +299,6 @@ class ScreenShotWindow(QObject):
                 self._pointer_pos = pos
                 self.update(dirty | self._selection_region(previous) | self._hover_region())
                 self.selectionChanged.emit(QRect(self._sel))
-                self._selection_animation.setStartValue(0.0)
-                self._selection_animation.setEndValue(1.0)
-                self._selection_animation.start()
                 return
             self.mouse_move(event)
         if self._drag_mode is None:
@@ -348,8 +327,6 @@ class ScreenShotWindow(QObject):
         if self._ended or self._closed or self._refreshing or self._sel.isEmpty():
             return False
         self._ended = True
-        self._selection_animation.stop()
-        self._selection_progress = 1.0
         self._frozen = self._keep_open
         self._snap.shutdown()
         for window in self._windows:
@@ -408,7 +385,7 @@ class ScreenShotWindow(QObject):
             self.update(dirty | self._selection_region(previous) | self._hover_region())
 
     def _set_selection(self, rect):
-        previous, dirty = QRect(self._sel), self._hover_region() | self._border_region(self._snap_rect)
+        previous, dirty = QRect(self._sel), self._hover_region() | self._change_region(self._snap_rect, QRect())
         self._sel = rect.intersected(self._vg)
         self._snap_rect = QRect()
         self.update(dirty | self._selection_region(previous) | self._hover_region())
@@ -563,42 +540,44 @@ class _ScreenOverlay(QWidget):
     def paintEvent(self, event):
         c = self.controller
         offset = self.frame.geometry.topLeft()
-        selected = c._sel.translated(-offset)
         with QPainter(self) as painter:
             painter.drawPixmap(0, 0, self.frame.pixmap)
-            if not c._sel.isNull():
-                painter.setClipRegion(QRegion(self.rect()) - QRegion(selected))
-                painter.fillRect(self.rect(), _DIM)
-                painter.setClipping(False)
-                if c._selection_progress < 1:
-                    mask = QColor(_DIM)
-                    mask.setAlphaF(mask.alphaF() * (1 - c._selection_progress))
-                    painter.fillRect(selected, mask)
-                painter.setRenderHint(QPainter.Antialiasing)
-                border = QPen(QColor(T.CAPTURE_ACCENT), T.CAPTURE_LINE_WIDTH)
+            # 同 V1/PixPin：选区和悬停吸附到的元素都不压暗。
+            lit = (c._sel if not c._sel.isNull() else c._snap_rect).translated(-offset)
+            painter.setClipRegion(QRegion(self.rect()) - QRegion(lit))
+            painter.fillRect(self.rect(), _DIM)
+            painter.setClipping(False)
+            if not lit.isNull():
+                # 同 V1：悬停吸附和拖出新选区时粗线画在外侧，不压住要截的内容；定下后细线收回内侧。
+                outside = c._sel.isNull() or c._drag_mode == "create"
+                width = T.CAPTURE_PREVIEW_LINE_WIDTH if outside else T.CAPTURE_LINE_WIDTH
+                half = width / 2
+                border = QPen(QColor(T.CAPTURE_ACCENT), width)
                 border.setJoinStyle(Qt.MiterJoin)
+                painter.setRenderHint(QPainter.Antialiasing)
                 painter.setPen(border)
-                inset = T.CAPTURE_LINE_WIDTH / 2
-                painter.drawRect(QRectF(selected).adjusted(inset, inset, -inset, -inset))
-                if not c._frozen:
+                if outside:
+                    # 吸附整屏或贴边时收回屏内，边框才看得见；按整个虚拟桌面收，跨屏处不出现接缝。
+                    bounds = QRectF(c._vg.translated(-offset)).adjusted(half, half, -half, -half)
+                    painter.drawRect(QRectF(lit).adjusted(-half, -half, half, half).intersected(bounds))
+                else:
+                    painter.drawRect(QRectF(lit).adjusted(half, half, -half, -half))
+            if not c._sel.isNull() and not c._frozen:
+                # 同 V1：拖动中隐藏手柄；尺寸提示照常显示，拖的时候正要看尺寸。
+                if c._drag_mode is None:
                     painter.setPen(QPen(QColor(T.CAPTURE_HANDLE_RING), 2))
                     painter.setBrush(QColor(T.CAPTURE_ACCENT))
                     for _, handle in c._handles():
                         painter.drawEllipse(QRectF(handle.translated(-offset)).adjusted(1, 1, -1, -1))
-                    painter.setPen(Qt.NoPen)
-                    painter.setRenderHint(QPainter.Antialiasing, False)
-                    tip, text = c.size_tip()
-                    tip.translate(-offset)
-                    if tip.intersects(self.rect()):
-                        painter.setBrush(QColor(*T.CAPTURE_TIP))
-                        painter.drawRoundedRect(tip, 6, 6)
-                        painter.setPen(QColor(T.DARK["foreground"]))
-                        painter.drawText(tip, Qt.AlignCenter, text)
-            else:
-                painter.fillRect(self.rect(), _DIM)
-                if not c._snap_rect.isNull():
-                    painter.setPen(QPen(QColor(T.CAPTURE_ACCENT), 2))
-                    painter.drawRect(c._snap_rect.translated(-offset).adjusted(1, 1, -1, -1))
+                painter.setPen(Qt.NoPen)
+                painter.setRenderHint(QPainter.Antialiasing, False)
+                tip, text = c.size_tip()
+                tip.translate(-offset)
+                if tip.intersects(self.rect()):
+                    painter.setBrush(QColor(*T.CAPTURE_TIP))
+                    painter.drawRoundedRect(tip, 6, 6)
+                    painter.setPen(QColor(T.DARK["foreground"]))
+                    painter.drawText(tip, Qt.AlignCenter, text)
             if c._guides and not c._frozen:
                 center = (c._sel.center() if not c._sel.isNull() else c._pointer_pos) - offset
                 painter.setPen(QPen(QColor(*T.CAPTURE_GUIDE), 1, Qt.DashLine))
