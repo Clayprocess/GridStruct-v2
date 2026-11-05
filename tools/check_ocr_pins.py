@@ -83,9 +83,7 @@ def main():
                 text_pin = pin.show_text_pin("旧文字贴图仍可恢复")
                 assert image_pin._document is document
                 assert image_pin._ocr_controller.document is document
-                document.correct((results[0].item_id,), "GridStruct OCR evidence")
-                document.set_draft("独立导出草稿")
-                document.correct((results[1].item_id,), "离线复核与导出")
+                document.set_draft("改过的全文")
                 image_pin.zoom(1.5)
                 assert image_pin._content.transform().m11() == 1.5
                 flush(app, 350)
@@ -93,7 +91,7 @@ def main():
                 saved_image = next(state for state in saved["pins"] if state["kind"] == "image")
                 restored_document = OCRDocument.from_payload(saved_image["ocr"], pixmap.toImage())
                 assert restored_document.text() == document.text()
-                assert restored_document.draft == "独立导出草稿" and restored_document.draft_stale
+                assert restored_document.draft == "改过的全文" and restored_document.layout == document.layout
                 for item in image_pin._text_layer.childItems():
                     result = next(result for result in document.results if result.item_id == item._ids[0])
                     assert item.toPlainText() == result.text
@@ -106,8 +104,8 @@ def main():
                     assert image_pin._content.itemAt(point) is item
                 source.deleteLater()
                 flush(app)
-                document.correct((results[1].item_id,), "来源关闭后继续校正")
-                assert "来源关闭后继续校正" in image_pin._document.text()
+                document.set_draft("来源关闭后继续修改")
+                assert image_pin._document.text() == "来源关闭后继续修改"
                 image_pin._recognize()
                 flush(app)
                 assert image_pin._ocr_controller._dialogs[-1]._document is document
@@ -120,7 +118,7 @@ def main():
                 restored_pin = next(window for window in pin._open_pins if window.kind == "image")
                 assert restored_pin._document.text() == document.text()
                 assert restored_pin._document.draft == document.draft
-                assert restored_pin._document.draft_stale == document.draft_stale
+                assert restored_pin._document.layout == document.layout
                 assert restored_pin._base.toImage() == pixmap.toImage()
                 assert restored_pin._scale == 1.5
                 assert infer.call_count == 0

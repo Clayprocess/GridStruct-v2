@@ -52,10 +52,10 @@ def main():
                     QTest.qWait(5)
                 assert [phase for phase, _ in phases] == expected, phases
                 document = controller.document
+                document.set_layout("lines")
                 assert document.text() == "GridStruct 123\nHello World", document.text()
                 assert all(len(item.polygon) == 4 for item in document.raw_results)
-                identifier = document.results[0].item_id
-                document.correct((identifier,), "GridStruct corrected")
+                document.set_draft("GridStruct corrected")
                 restored = OCRDocument.from_payload(document.to_payload(), pixmap.toImage())
                 assert restored.text() == document.text()
                 timings = {phase: round((stamp - start) * 1000, 3) for phase, stamp in phases}

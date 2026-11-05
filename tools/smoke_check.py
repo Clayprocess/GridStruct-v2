@@ -989,7 +989,6 @@ def drawing_interaction():
 def ocr_copy_text():
     from ocr import OCRResult, OCRResultDialog
     dialog = OCRResultDialog([OCRResult(QRect(), "plain text", 0.99)])
-    dialog._view_buttons["full"].setChecked(True)
     cursor = dialog._text.textCursor()
     cursor.select(QTextCursor.Document)
     dialog._text.setTextCursor(cursor)

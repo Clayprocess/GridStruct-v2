@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import (
     QPainter, QPixmap, QKeySequence, QUndoStack, QPen, QColor, QCursor, QTextCursor,
 )
-from PySide6.QtCore import Qt, QRect, QRectF, QPointF, Signal, QEvent
+from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QSize, Signal, QEvent
 from copy import copy
 
 from .items import MarkStyle, arrow_heads, SerialMarkItem, TextMarkItem, ArrowMarkItem
@@ -261,6 +261,11 @@ class AnnotationCanvas(QGraphicsView):
     def redo(self):
         self._finish_tool()
         self._undo.redo()
+
+    def minimumSizeHint(self):
+        # QAbstractScrollArea 默认最小 64×64：选区比这还矮（窄）时截图窗口被撑大，截图居中，
+        # 上下（左右）露出视图底色的白边，截图内容也跟着偏离原位（Clay 2026-11-05 实测）。
+        return QSize(1, 1)
 
     # ---------- 导出 ----------
 

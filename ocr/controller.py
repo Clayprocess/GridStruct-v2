@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import QApplication
 from .engine import OCREngine
 from .dialog import OCRResultDialog
+from .layout import saved_layout
 from .model import OCRDocument
 
 
@@ -270,7 +271,9 @@ class OCRController(QObject):
         if self._automatic:
             return
         from settings import get_settings
-        if get_settings().value("ocr/direct_copy", False, type=bool):
+        settings = get_settings()
+        if settings.value("ocr/direct_copy", False, type=bool):
+            self._document.set_layout(saved_layout(settings))
             QApplication.clipboard().setText(self._document.text())
             return
         if not self._layer_first:
