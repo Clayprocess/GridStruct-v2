@@ -184,6 +184,38 @@ def main():
             dialog._text.next_pending()
             assert adjacent.focused_ids == (adjacent.results[1].item_id,)
             dialog.deleteLater()
+            # 两处相同的字删掉第一处（Clay 审查 PR #47 复现）：剩下的归第二条，不再标低置信度、点原图第二条能定位。
+            for mode in ("lines", "paragraph", "single"):
+                twins = OCRDocument([OCRResult(QRect(10, 10, 90, 20), "100", .4),
+                                     OCRResult(QRect(10, 35, 90, 20), "100", .99)], image)
+                settings.setValue("ocr/layout", mode)
+                dialog = OCRResultDialog(twins)
+                assert twins.layout == mode
+                start, end, _item = dialog._text.spans[0]
+                if mode == "lines":
+                    end += 1
+                cursor = dialog._text.textCursor()
+                cursor.setPosition(start)
+                cursor.setPosition(end, QTextCursor.KeepAnchor)
+                dialog._text.setTextCursor(cursor)
+                QTest.keyClick(dialog._text, Qt.Key_Backspace)
+                assert dialog._text.toPlainText() == "100", (mode, dialog._text.toPlainText())
+                assert [(begin, stop, item.score) for begin, stop, item in dialog._text.spans] == [(0, 3, .99)], \
+                    (mode, dialog._text.spans)
+                assert dialog._text.pending_spans() == []
+                twins.focus((twins.results[1].item_id,))
+                assert twins.focused_ids == (twins.results[1].item_id,)
+                # 删掉第二处则第一条留在原处。
+                QTest.keyClick(dialog._text, Qt.Key_Z, Qt.ControlModifier)
+                assert dialog._text.toPlainText() == twins.recognized_text() and len(dialog._text.spans) == 2
+                start, end, _item = dialog._text.spans[1]
+                cursor.setPosition(start - (1 if mode == "lines" else 0))
+                cursor.setPosition(end, QTextCursor.KeepAnchor)
+                dialog._text.setTextCursor(cursor)
+                QTest.keyClick(dialog._text, Qt.Key_Delete)
+                assert [(begin, stop, item.score) for begin, stop, item in dialog._text.spans] == [(0, 3, .4)], \
+                    (mode, dialog._text.spans)
+                dialog.deleteLater()
             legacy = OCRResultDialog([OCRResult(QRect(0, 0, 50, 20), "legacy", .9)])
             assert legacy._preview.isHidden() and not legacy._to_table.isEnabled()
             legacy._copy_all()

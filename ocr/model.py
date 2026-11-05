@@ -1,6 +1,7 @@
 """识别证据、派生版面与人工编辑的全文共享同一图像版本。"""
 
 from dataclasses import dataclass, field, replace
+from difflib import SequenceMatcher
 from hashlib import sha256
 import math
 from uuid import uuid4
@@ -48,6 +49,8 @@ class OCRDocument(QObject):
         self._layout = self._arrange()
         self._mode = "paragraph"
         self._draft = None
+        # 改过的全文里每条识别文字的位置；None 表示还没算（读回的会话数据），用时按文字比对补上。
+        self._spans = None
         self.focused_ids = ()
 
     @property
@@ -109,22 +112,45 @@ class OCRDocument(QObject):
         """复制、贴出去的文字：改过就是改过的全文，否则按当前排版整理识别结果。"""
         return self._draft if self._draft is not None else self.recognized_text()
 
+    def spans(self):
+        """每条识别文字在当前全文里的位置 [(起, 止, 条目)]（Python 下标）；改过、删掉的那条不在里面。"""
+        if self._draft is None:
+            return map_spans(self.recognized_text(), self.recognized_text(), self.results)
+        if self._spans is None:
+            self._spans = map_spans(self._draft, self.recognized_text(), self.results)
+        return list(self._spans)
+
     def set_layout(self, mode):
         """换排版就是重新整理识别结果，手动改过的全文随之丢弃（界面先确认）。"""
         if mode not in {key for key, _label, _tip in LAYOUTS}:
             raise ValueError("未知排版")
         if mode != self._mode or self._draft is not None:
-            self._mode, self._draft = mode, None
+            self._mode, self._draft, self._spans = mode, None, None
             self.changed.emit()
 
-    def set_draft(self, text):
+    def set_draft(self, text, edit=None):
+        """edit = (起点, 删掉几个字, 新加几个字)，是编辑框报来的这一次改动（Python 下标）。
+
+        有它就按改动挪各条的位置：改动之前的不动，之后的整体平移，被改到的那条不再定位。
+        只看改前改后两份文字分不清删的是两处相同文字里的哪一处（Clay 审查 PR #47 时复现），
+        所以位置要跟着每一次改动走，只有读回的会话数据才退回按文字比对。
+        """
         if not isinstance(text, str):
             raise ValueError("全文必须是文字")
         # 改回和排版结果一模一样，就等于没改过。
         draft = None if text == self.recognized_text() else text
-        if draft != self._draft:
-            self._draft = draft
-            self.changed.emit()
+        if draft == self._draft:
+            return
+        old, spans = self.text(), self.spans()
+        self._draft, self._spans = draft, None
+        if draft is not None and edit is not None:
+            start, removed, added = edit
+            if 0 <= start and start + removed <= len(old) and len(text) - len(old) == added - removed \
+                    and text[:start] == old[:start] and text[start + added:] == old[start + removed:]:
+                shift = added - removed
+                self._spans = [(begin, end, item) if end <= start else (begin + shift, end + shift, item)
+                               for begin, end, item in spans if end <= start or begin >= start + removed]
+        self.changed.emit()
 
     def to_payload(self):
         return {
@@ -226,3 +252,37 @@ def _legacy_draft(document, payload, draft):
                 del items[index]
     corrected = format_text(items, "lines")
     return corrected if draft is None else corrected + _LEGACY_BOTH + draft
+
+
+def map_spans(text, original, results):
+    """按文字比对找出每条识别文字在全文里的位置 [(起, 止, 条目)]（Python 下标）。
+
+    original 是排版整理出的原文，条目在里面按阅读顺序依次出现，位置是确定的；再按改动把位置
+    映射到 text：只有整条落在没改过的片段里才保留，改过、删掉的那条不再定位。
+    两处相同的文字删了一处时分不清是哪处，这里只是兜底，编辑时以 set_draft 的逐次改动为准。
+    """
+    base, start = [], 0
+    for item in results:
+        needle = item.text.strip()
+        found = original.find(needle, start) if needle else -1
+        if found >= 0:
+            base.append((found, found + len(needle), item))
+            start = found + len(needle)
+    if text == original:
+        return base
+    # 改动通常集中在一处：先去掉相同的头尾，只对中间做比对，长文也不卡。
+    head = 0
+    while head < min(len(text), len(original)) and text[head] == original[head]:
+        head += 1
+    tail = 0
+    while tail < min(len(text), len(original)) - head and text[-1 - tail] == original[-1 - tail]:
+        tail += 1
+    blocks = [(0, 0, head), (len(original) - tail, len(text) - tail, tail)]
+    matcher = SequenceMatcher(None, original[head:len(original) - tail], text[head:len(text) - tail], autojunk=False)
+    blocks += [(a + head, b + head, size) for a, b, size in matcher.get_matching_blocks() if size]
+    kept = []
+    for begin, end, item in base:
+        block = next((block for block in blocks if block[0] <= begin and end <= block[0] + block[2]), None)
+        if block is not None:
+            kept.append((begin + block[1] - block[0], end + block[1] - block[0], item))
+    return kept

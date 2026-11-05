@@ -5,14 +5,13 @@
 低置信度的文字标波浪线，F8 逐处跳转。定位靠在全文里依次找回每条识别文字，改过的那条找不到就不再定位、不再标记。
 """
 
-from difflib import SequenceMatcher
-
 from PySide6.QtCore import QSignalBlocker, Signal, Slot
 from PySide6.QtGui import QColor, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QTextEdit
 from styles import tokens as T
 from ui import ask_confirmation
 from .layout import saved_layout
+from .model import map_spans
 
 # 这里只提示模型分数，不代表人工复核进度。
 PENDING_SCORE = .8
@@ -30,39 +29,20 @@ def _utf16(text):
     return offsets.__getitem__
 
 
-def find_spans(text, original, results):
-    """把每条识别文字在全文里的位置找出来，返回 [(起, 止, 条目)]（QTextDocument 位置）。
+def _index(text, unit):
+    """QTextDocument 位置（UTF-16）转回 Python 下标，超出末尾按末尾算。"""
+    total = 0
+    for index, ch in enumerate(text):
+        if total >= unit:
+            return index
+        total += 2 if ord(ch) > 0xFFFF else 1
+    return len(text)
 
-    original 是排版整理出的原文，条目在里面按阅读顺序依次出现，位置是确定的；再按改动把位置
-    映射到当前全文：只有整条落在没改过的片段里才保留，改过、删掉的那条不再定位。
-    不在全文里直接搜字，是因为重复的字（两处“100”）会被改过的那条占走。
-    """
-    base, start = [], 0
-    for item in results:
-        needle = item.text.strip()
-        found = original.find(needle, start) if needle else -1
-        if found >= 0:
-            base.append((found, found + len(needle), item))
-            start = found + len(needle)
-    if text != original:
-        # 改动通常集中在一处：先去掉相同的头尾，只对中间做比对，长文逐字输入也不卡。
-        head = 0
-        while head < min(len(text), len(original)) and text[head] == original[head]:
-            head += 1
-        tail = 0
-        while tail < min(len(text), len(original)) - head and text[-1 - tail] == original[-1 - tail]:
-            tail += 1
-        blocks = [(0, 0, head), (len(original) - tail, len(text) - tail, tail)]
-        matcher = SequenceMatcher(None, original[head:len(original) - tail], text[head:len(text) - tail], autojunk=False)
-        blocks += [(a + head, b + head, size) for a, b, size in matcher.get_matching_blocks() if size]
-        kept = []
-        for begin, end, item in base:
-            block = next((block for block in blocks if block[0] <= begin and end <= block[0] + block[2]), None)
-            if block is not None:
-                kept.append((begin + block[1] - block[0], end + block[1] - block[0], item))
-        base = kept
+
+def find_spans(text, original, results):
+    """按文字比对得到的位置换成 QTextDocument 位置；编辑框平时用文档跟着改动维护的位置。"""
     position = _utf16(text)
-    return [(position(begin), position(end), item) for begin, end, item in base]
+    return [(position(begin), position(end), item) for begin, end, item in map_spans(text, original, results)]
 
 
 def span_at(spans, position):
@@ -85,7 +65,10 @@ class OCRTextEdit(QTextEdit):
         self.spans = []
         # 两边互相定位时，别让对方的回应再反过来挪自己。
         self._syncing = False
-        self.textChanged.connect(self._edited)
+        # 从文档整篇重设文字时，中途清空、插入的那几下不是用户在改字。
+        self._loading = False
+        # 用 contentsChange 而不是 textChanged：要知道这一次改在哪里，见 OCRDocument.set_draft。
+        self.document().contentsChange.connect(self._contents_changed)
         self.cursorPositionChanged.connect(self._cursor_moved)
 
     @property
@@ -162,12 +145,14 @@ class OCRTextEdit(QTextEdit):
         text = self._document.text()
         if self.toPlainText() != text:
             position = self.textCursor().position()
+            self._loading = True
             with QSignalBlocker(self):
                 self.setPlainText(text)
                 self._format_blocks()
                 cursor = self.textCursor()
                 cursor.setPosition(min(position, len(self.toPlainText())))
                 self.setTextCursor(cursor)
+            self._loading = False
         self._update_marks()
 
     def _format_blocks(self):
@@ -182,14 +167,27 @@ class OCRTextEdit(QTextEdit):
         cursor.mergeBlockFormat(block)
         document.setUndoRedoEnabled(True)
 
-    def _edited(self):
-        if self._document is None:
+    def _contents_changed(self, position, removed, added):
+        if self._document is None or self._loading:
             return
-        self._document.set_draft(self.toPlainText())
-        self._update_marks()
+        old, text = self._document.text(), self.toPlainText()
+        # 换排版、别的窗口改字时整篇重设，以及只改段落格式，文字都和文档一致，不算一次修改。
+        if text == old:
+            return
+        start = _index(old, position)
+        before, after = old[start:_index(old, position + removed)], text[start:_index(text, position + added)]
+        # Qt 有时把没变的字也算进改动范围（比如第一次输入时报整篇），先去掉两头相同的部分。
+        head = 0
+        while head < min(len(before), len(after)) and before[head] == after[head]:
+            head += 1
+        tail = 0
+        while tail < min(len(before), len(after)) - head and before[-1 - tail] == after[-1 - tail]:
+            tail += 1
+        self._document.set_draft(text, (start + head, len(before) - head - tail, len(after) - head - tail))
 
     def _update_marks(self):
-        self.spans = find_spans(self.toPlainText(), self._document.recognized_text(), self._document.results)
+        position = _utf16(self.toPlainText())
+        self.spans = [(position(begin), position(end), item) for begin, end, item in self._document.spans()]
         self._paint_marks()
         self.marksChanged.emit()
 
