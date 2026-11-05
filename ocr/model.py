@@ -201,7 +201,9 @@ class OCRDocument(QObject):
             # 逐字位置是后加的可选字段：旧记录没有；格式不对就丢掉，表格分格会退回按字宽估算。
             if not isinstance(chars, list) or any(
                     not isinstance(item, list) or len(item) != 3 or not isinstance(item[0], str)
+                    or len(item[0]) != 1
                     or any(type(value) not in (int, float) or not math.isfinite(value) for value in item[1:])
+                    or item[1] >= item[2]
                     for item in chars):
                 chars = []
             identifiers.add(identifier)

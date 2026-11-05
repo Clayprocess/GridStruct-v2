@@ -7,6 +7,7 @@ v1 只允许同形网格重跑，这里网格随拖线实时变化，所以按�
 from bisect import bisect_right
 from dataclasses import replace
 from statistics import median
+from math import isfinite
 from unicodedata import east_asian_width
 
 from .model import CONFIRMED, CORRECTED, PENDING, CellCorrection, Rect, TableCell, TableDocument
@@ -59,7 +60,10 @@ def _char_spans(token):
     text = token.text
     glyphs = [index for index, ch in enumerate(text) if not ch.isspace()]
     if token.chars and len(token.chars) == len(glyphs) and all(
-            text[index] == ch for index, (ch, _, _) in zip(glyphs, token.chars)):
+            text[index] == ch and isfinite(left) and isfinite(right) and left < right
+            and token.box.left - 1 <= (left + right) / 2 <= token.box.right + 1
+            for index, (ch, left, right) in zip(glyphs, token.chars)) and all(
+                a[1] + a[2] <= b[1] + b[2] for a, b in zip(token.chars, token.chars[1:])):
         spans = [None] * len(text)
         for index, (_, left, right) in zip(glyphs, token.chars):
             spans[index] = (left, right)
@@ -84,7 +88,7 @@ def split_at_columns(token, grid):
 
     按中心点整条落格会让左列多吃、右列丢字，所以分格前沿列线把框切开：
     每个字按自己的中心归到列线某一侧。合并格内部的线两侧本是同一格，不切。
-    检测框只是略微压线、字都在一侧时原样返回，不算切开。
+    检测框只是略微压线、字都在一侧时按字的位置落格，不算切开。
     """
     row = grid.cell_at(token.box.center_x, token.box.center_y)[0]
     lines = grid.vertical_lines
@@ -97,17 +101,21 @@ def split_at_columns(token, grid):
     for ch, (left, right) in zip(token.text, _char_spans(token)):
         groups.setdefault(bisect_right(cuts, (left + right) / 2), []).append((ch, left, right))
     parts = []
-    for _, chars in sorted(groups.items()):
+    for group, chars in sorted(groups.items()):
         text = "".join(ch for ch, _, _ in chars).strip()
         glyphs = tuple((ch, left, right) for ch, left, right in chars if not ch.isspace())
         if not text:
             continue
-        left = round(min(left for _, left, _ in glyphs))
-        right = max(left + 1, round(max(right for _, _, right in glyphs)))
+        # 字框可能横跨切线；落格区域限制在已按字中心选定的列内，不能再次按框中心串列。
+        left = max(cuts[group - 1] if group else token.box.left,
+                   round(min(left for _, left, _ in glyphs)))
+        right = min(cuts[group] if group < len(cuts) else token.box.right,
+                    max(left + 1, round(max(right for _, _, right in glyphs))))
         parts.append((text, Rect(left, token.box.top, right, token.box.bottom), glyphs))
-    if len(parts) < 2:
+    if not parts:
         return (token,)
-    return tuple(replace(token, text=text, box=box, chars=glyphs, split=True) for text, box, glyphs in parts)
+    return tuple(replace(token, text=text, box=box, chars=glyphs, split=token.split or len(parts) > 1)
+                 for text, box, glyphs in parts)
 
 
 def build_document(tokens, grid):
@@ -130,9 +138,35 @@ def build_document(tokens, grid):
 
 def unreplaced_tokens(tokens, corrections):
     """排除人工区域内的原文，避免重新分格或确认时复活已替换文字。"""
-    return tuple(token for token in tokens if not any(
-        part.box.left <= token.box.center_x < part.box.right
-        and part.box.top <= token.box.center_y < part.box.bottom for part in corrections))
+    if not corrections:
+        return tokens
+    remaining = []
+    for token in tokens:
+        spans = _char_spans(token)
+        keep = [not any(part.box.left <= (left + right) / 2 < part.box.right
+                        and part.box.top <= token.box.center_y < part.box.bottom for part in corrections)
+                for left, right in spans]
+        if all(keep):
+            remaining.append(token)
+            continue
+        # 新列线会改变 token 分段；逐字排除旧人工区域，不能用新段的中心整段删留。
+        start = 0
+        while start < len(keep):
+            if not keep[start]:
+                start += 1
+                continue
+            end = start + 1
+            while end < len(keep) and keep[end]:
+                end += 1
+            text = token.text[start:end].strip()
+            chars = tuple((ch, *span) for ch, span in zip(token.text[start:end], spans[start:end]) if not ch.isspace())
+            if text:
+                left = max(token.box.left, round(min(left for _, left, _ in chars)))
+                right = min(token.box.right, max(left + 1, round(max(right for _, _, right in chars))))
+                remaining.append(replace(token, text=text, chars=chars,
+                                         box=Rect(left, token.box.top, right, token.box.bottom), split=True))
+            start = end
+    return tuple(remaining)
 
 
 def carry_over(base, recognized):
@@ -162,7 +196,9 @@ def carry_over(base, recognized):
             status = (CORRECTED if any(part.status == CORRECTED for part in corrections) else CONFIRMED) if corrections else ""
             if TableCell(tokens=remaining).needs_review:
                 status = PENDING
-            updated.append(replace(fresh, text=text, status=status, corrections=corrections))
+            # 保留原文证据供“改回原文”恢复复核状态；删除列线后的部分原文仍须提示切分。
+            evidence = tuple(replace(token, split=True) for token in fresh.tokens) if any(token.split for token in remaining) else fresh.tokens
+            updated.append(replace(fresh, text=text, tokens=evidence, status=status, corrections=corrections))
         cells.append(tuple(updated))
     return TableDocument(recognized.grid, tuple(cells))
 

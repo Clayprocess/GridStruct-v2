@@ -2,6 +2,7 @@
 # 模型随安装包发布（assets/models/，约 31MB），离线开箱即用。
 
 import os
+import math
 from threading import Lock
 from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtCore import QRectF
@@ -86,6 +87,8 @@ class OCREngine:
 
 def _chars(words):
     """RapidOCR 的逐字结果 ((字, 置信度, 四点框), ...) 转成 ((字, left, right), ...)，原图物理像素。"""
+    if not isinstance(words, (tuple, list)):
+        return ()
     chars = []
     for word in words:
         try:
@@ -93,7 +96,9 @@ def _chars(words):
             xs = [float(point[0]) for point in box]
         except (TypeError, ValueError, IndexError):
             return ()
-        if not isinstance(text, str) or not xs:
+        if not isinstance(text, str) or len(text) != 1 or not xs or not all(math.isfinite(x) for x in xs):
+            return ()
+        if min(xs) >= max(xs):
             return ()
         chars.append((text, min(xs), max(xs)))
     return tuple(chars)

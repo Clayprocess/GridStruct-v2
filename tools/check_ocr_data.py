@@ -191,8 +191,12 @@ def engine_geometry():
         assert len(document.raw_results) == 2 and len(document) == 1
         payload = document.to_payload()
         assert OCRDocument.from_payload(payload, image(1.5)).raw_results[0].chars == result[0].chars
-        payload["raw"][0]["chars"] = [["旋", "x", 1]]
-        assert OCRDocument.from_payload(payload, image(1.5)).raw_results[0].chars == ()
+        for bad in ([["旋", "x", 1]], [["旋", 90, 30]], [["旋", 30, float("nan")]], [["旋转", 30, 90]], None):
+            payload["raw"][0]["chars"] = bad
+            assert OCRDocument.from_payload(payload, image(1.5)).raw_results[0].chars == ()
+        from ocr.engine import _chars
+        assert _chars(None) == ()
+        assert _chars((("旋", .9, [[float("nan"), 0], [90, 0]]),)) == ()
     finally:
         engine._engine = previous
     print("PASS DATA: physical rotated polygon, logical DPR box, raw engine order and empty evidence")

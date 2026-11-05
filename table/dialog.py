@@ -890,8 +890,9 @@ def _column_name(index):
 
 
 def _cell_tip(cell):
-    if cell.status == PENDING and cell.split and not cell.low_confidence:
-        return "待复核：这格文字和相邻格被识别成了一整段，已沿表格线切开，核对后改字或点“确认并下一处”"
+    if cell.status == PENDING and cell.split:
+        confidence = f"；模型置信度 {cell.weighted_confidence:.0%}" if cell.low_confidence else ""
+        return f"待复核：这格文字和相邻格被识别成了一整段，已沿表格线切开{confidence}，核对后改字或点“确认并下一处”"
     if cell.status == PENDING:
         return f"待复核：模型置信度 {cell.weighted_confidence:.0%}，改字或点“确认并下一处”"
     if cell.status == CORRECTED:
