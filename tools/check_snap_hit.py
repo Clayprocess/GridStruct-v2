@@ -1,9 +1,11 @@
 """点命中吸附回归：不调用原生 MSAA，也不读取桌面。
 
-1. _Accessibility.hit_path 逐层 accHitTest 的路径、简单子元素、越界停止、引用释放；
-2. RegionDetector 把整窗遍历缓存和点命中路径合并成由内到外的层级链，
-   命中矩形内移动不再查询，慢窗口降级，滚轮能切到点命中补出的父层；
-3. 查询卡死时按超时收尾、拉黑该窗口，并把名额让给别的窗口。
+1. _Accessibility.hit_path 逐层 accHitTest 的路径、简单子元素、越界停止、引用释放，
+   窗口对象同一会话只取一次；
+2. RegionDetector 用常驻工作线程查询、信号回传：命中矩形内移动不再查询，
+   换控件时保留旧框直到新结果到达（不闪回外层），滚轮能切到父层，慢窗口降级；
+3. 静止悬停仍能细化懒加载控件；查询卡死时丢弃线程、拉黑窗口，新线程继续服务，丢弃迟到结果；
+4. 查询完成与 UI 超时检查交错时不崩溃、不误判卡死。
 用法：QT_QPA_PLATFORM=offscreen python tools/check_snap_hit.py
 """
 
@@ -11,6 +13,7 @@ from pathlib import Path
 import ctypes
 import sys
 import time
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QRect, QPoint
@@ -24,10 +27,14 @@ class FakeAccessible(snap._Accessibility):
     def __init__(self, objects):
         self._ctypes = ctypes
         self._iid = (ctypes.c_byte * 16)()
+        self._roots = {}
+        self._com_owned = False
         self.objects = objects
         self.released = []
-        self.acquired = [1]
+        self.acquired = []
         self.calls = 0
+        self.opened = 0
+        fake = self
 
         class User32:
             @staticmethod
@@ -37,13 +44,12 @@ class FakeAccessible(snap._Accessibility):
         class OleAcc:
             @staticmethod
             def AccessibleObjectFromWindow(_hwnd, _id, _iid, out):
+                fake.opened += 1
+                fake.acquired.append(1)
                 out._obj.value = 1
                 return 0
 
         self._user32, self._oleacc = User32(), OleAcc()
-
-    def close(self):
-        pass
 
     @staticmethod
     def _id(pointer):
@@ -86,21 +92,44 @@ class FakeAccessible(snap._Accessibility):
 WINDOW = QRect(0, 0, 800, 600)
 TOOLBAR = QRect(0, 0, 800, 40)
 TAB = QRect(10, 4, 120, 32)
-CLOSE = QRect(110, 12, 14, 14)  # 标签页关闭按钮：BFS 预算内常常到不了这一层
+CLOSE = QRect(110, 12, 14, 14)  # 标签页关闭按钮这类小控件
+NEXT_TAB = QRect(140, 4, 120, 32)
 BODY = QRect(0, 40, 800, 560)
 
 
 def tree():
-    return {1: (WINDOW, [2, 5]), 2: (TOOLBAR, [3]), 3: (TAB, [("item", 1, CLOSE)]), 5: (BODY, [])}
+    return {1: (WINDOW, [2, 5]), 2: (TOOLBAR, [3, 4]), 3: (TAB, [("item", 1, CLOSE)]),
+            4: (NEXT_TAB, []), 5: (BODY, [])}
+
+
+class FakeUser32:
+    @staticmethod
+    def IsWindow(_hwnd):
+        return True
+
+    IsWindowVisible = IsWindow
+
+
+def settle(app, detector):
+    """等工作线程空闲、信号送达。"""
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        app.processEvents()
+        worker = detector._worker
+        if worker is None or (worker._pending is None and worker.busy is None):
+            time.sleep(0.02)
+            app.processEvents()
+            return
 
 
 def check_hit_path():
     provider = FakeAccessible(tree())
     assert provider.hit_path(1, 115, 18) == [TOOLBAR, TAB, CLOSE]
-    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
-    provider = FakeAccessible(tree())
     assert provider.hit_path(1, 400, 300) == [BODY]
-    print("PASS: hit_path descends window → toolbar → tab → close button and releases every reference")
+    assert provider.opened == 1, "同一窗口的 IAccessible 应只取一次"
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    print("PASS: hit_path descends window → toolbar → tab → close button, reuses the window object, releases every reference")
 
 
 def check_detector():
@@ -108,76 +137,60 @@ def check_detector():
     from capture import ScreenManager
     manager = ScreenManager.instance()
     provider = FakeAccessible(tree())
-
-    class FakeUIA:
-        def window_rectangles(self, _hwnd):
-            return [WINDOW, TOOLBAR, TAB]  # 遍历只到标签页这一层
-
-        def close(self):
-            pass
-
-    class FakeUser32:
-        @staticmethod
-        def IsWindow(_hwnd):
-            return True
-
-        IsWindowVisible = IsWindow
-
-    original = (snap._IS_WIN, snap._try_init_uia, snap._try_init_msaa,
-                snap._win32_api, snap._snapshot_windows)
-    snap._try_init_uia, snap._try_init_msaa = FakeUIA, lambda: provider
-    # 走 Windows 构造路径：构造时就会刷新一次窗口快照。
-    snap._IS_WIN, snap._win32_api = True, FakeUser32
+    original = (snap._IS_WIN, snap._try_init_msaa, snap._win32_api, snap._snapshot_windows)
+    snap._IS_WIN, snap._win32_api, snap._try_init_msaa = True, FakeUser32, lambda: provider
     snap._snapshot_windows = lambda _ignored: [(7, WINDOW)]
     detector = snap.RegionDetector(only_window=False)
-    detector._snapshot_timer.stop()
     # 离屏平台单屏、原点 (0,0)、DPR 1：逻辑坐标即物理坐标。
     assert manager.logical_to_physical(QPoint(115, 18), manager.screen_at(QPoint(0, 0))) == QPoint(115, 18)
     results = []
     detector.regionDetected.connect(results.append)
-
-    def settle():
-        deadline = time.monotonic() + 3
-        while (detector._inflight or detector._point_inflight) and time.monotonic() < deadline:
-            app.processEvents()
-        app.processEvents()
-
     try:
         detector.detect(QPoint(115, 18))
-        settle()
+        assert results == [WINDOW], "刚进入窗口先框整个窗口"
+        settle(app, detector)
         assert results[-1] == CLOSE, results
         calls = provider.calls
         detector.detect(QPoint(117, 20))
-        settle()
+        settle(app, detector)
         assert provider.calls == calls, "命中矩形内移动不应再查询"
         detector.step_level(1)
         assert results[-1] == TAB, results
         detector.step_level(1)
         assert results[-1] == TOOLBAR, results
+        detector.step_level(-2)
+        assert results[-1] == CLOSE, results
+        count = len(results)
+        detector.detect(QPoint(200, 18))
+        assert len(results) == count, "等结果时应保留旧框，不先退回外层"
+        settle(app, detector)
+        assert results[count:] == [NEXT_TAB], results[count:]
         detector.detect(QPoint(400, 300))
-        settle()
+        settle(app, detector)
         assert results[-1] == BODY, results
+        assert WINDOW not in results[1:], "换控件时不应闪回整个窗口"
         key = (7, WINDOW.getRect())
         detector._hits.clear()
         original_hit = provider.hit_path
         provider.hit_path = lambda *a: (time.sleep(0.35), original_hit(*a))[1]
         detector.detect(QPoint(115, 18))
-        settle()
+        settle(app, detector)
         assert key in detector._slow, "超过 300ms 的窗口应降级"
+        assert results[-1] == WINDOW, "降级时应立即退回窗口框，不沿用旧控件"
         calls = provider.calls
         detector._hits.clear()
         detector.detect(QPoint(400, 300))
-        settle()
+        settle(app, detector)
         assert provider.calls == calls, "降级后的窗口不再点命中"
-        print("PASS: detector merges BFS cache with hit path, skips repeat queries, steps to parents, demotes slow windows")
+        assert results[-1] == WINDOW, results
+        print("PASS: detector keeps the old box while waiting, skips repeat queries, steps to parents, demotes slow windows")
     finally:
         detector.shutdown()
-        (snap._IS_WIN, snap._try_init_uia, snap._try_init_msaa,
-         snap._win32_api, snap._snapshot_windows) = original
+        snap._IS_WIN, snap._try_init_msaa, snap._win32_api, snap._snapshot_windows = original
 
 
 def check_hung_query():
-    """点命中卡死：超时后该窗口降级，迟到结果被丢弃，名额让给别的窗口。"""
+    """点命中卡死：丢弃那条线程并拉黑窗口，新线程服务别的窗口，迟到结果被丢弃。"""
     import threading
     app = QApplication.instance() or QApplication([])
     release = threading.Event()
@@ -194,58 +207,133 @@ def check_hung_query():
         def close(self):
             pass
 
-    class FakeUser32:
-        @staticmethod
-        def IsWindow(_hwnd):
-            return True
-
-        IsWindowVisible = IsWindow
-
-    class NoUIA:
-        def window_rectangles(self, _hwnd):
-            return []
-
-        def close(self):
-            pass
-
-    original = (snap._IS_WIN, snap._try_init_uia, snap._try_init_msaa, snap._win32_api,
-                snap._snapshot_windows, snap._HUNG_S)
+    original = (snap._IS_WIN, snap._try_init_msaa, snap._win32_api, snap._snapshot_windows, snap._HUNG_S)
     snap._IS_WIN, snap._win32_api, snap._HUNG_S = True, FakeUser32, 0.3
-    snap._try_init_uia, snap._try_init_msaa = NoUIA, Hanging
+    snap._try_init_msaa = Hanging
     snap._snapshot_windows = lambda _ignored: [(7, WINDOW), (8, other)]
     detector = snap.RegionDetector(only_window=False)
-    detector._snapshot_timer.stop()
+    results = []
+    detector.regionDetected.connect(results.append)
     try:
         detector.detect(QPoint(115, 18))
-        deadline = time.monotonic() + 2
-        while detector._point_inflight and time.monotonic() < deadline:
+        deadline = time.monotonic() + 1
+        while 7 not in seen and time.monotonic() < deadline:
             app.processEvents()
-        assert not detector._point_inflight, "卡死的点命中没有按超时收尾"
-        assert (7, WINDOW.getRect()) in detector._slow, "卡死窗口应降级为窗口吸附"
+        key = (7, WINDOW.getRect())
+        detector._hits[key] = (TAB, [TOOLBAR, TAB], time.monotonic() - snap._HIT_REUSE_S)
+        detector._show(key, 115, 18)
+        time.sleep(0.35)
+        hung = detector._worker
+        app.processEvents()
+        assert 7 in snap._hung_hwnds, "卡住超过阈值的窗口应改用窗口吸附"
+        assert detector._worker is None and snap._abandoned == 1
+        assert results[-1] == WINDOW
         detector.detect(QPoint(100, 650))
         deadline = time.monotonic() + 2
         while 8 not in seen and time.monotonic() < deadline:
             app.processEvents()
-        assert 8 in seen, "卡死线程不应永久占住名额"
-        assert 7 in snap._hung_hwnds
+        assert 8 in seen and detector._worker is not hung, "卡死线程不应占住后续查询"
         release.set()
         deadline = time.monotonic() + 2
-        while snap._abandoned["point"] and time.monotonic() < deadline:
+        while snap._abandoned and time.monotonic() < deadline:
             app.processEvents()
-        assert snap._abandoned["point"] == 0, "卡死线程返回后应归还计数"
+        assert snap._abandoned == 0, "卡死线程返回后应归还计数"
         app.processEvents()
-        print("PASS: hung point query times out, demotes its window, frees the slot and drops the late result")
+        assert TOOLBAR not in results, "被丢弃线程的迟到结果不应发布"
+        print("PASS: hung point query abandons its thread, demotes its window, serves other windows and drops the late result")
     finally:
         release.set()
         detector.shutdown()
         snap._hung_hwnds.discard(7)
-        (snap._IS_WIN, snap._try_init_uia, snap._try_init_msaa, snap._win32_api,
-         snap._snapshot_windows, snap._HUNG_S) = original
+        snap._IS_WIN, snap._try_init_msaa, snap._win32_api, snap._snapshot_windows, snap._HUNG_S = original
+
+
+def check_stationary_refinement():
+    """首查只得到外层，之后不再发鼠标事件，也应按缓存时限查询到内层。"""
+    from PySide6.QtTest import QTest
+    app = QApplication.instance() or QApplication([])
+    calls = []
+
+    class LazyProvider:
+        def hit_path(self, *_args):
+            calls.append(time.monotonic())
+            return [TOOLBAR] if len(calls) == 1 else [TOOLBAR, TAB, CLOSE]
+
+        def close(self):
+            pass
+
+    with patch.object(snap, "_IS_WIN", True), \
+            patch.object(snap, "_win32_api", FakeUser32), \
+            patch.object(snap, "_snapshot_windows", return_value=[(7, WINDOW)]), \
+            patch.object(snap, "_try_init_msaa", LazyProvider):
+        detector = snap.RegionDetector(only_window=False)
+        results = []
+        detector.regionDetected.connect(results.append)
+        try:
+            detector.detect(QPoint(115, 18))
+            settle(app, detector)
+            assert results[-1] == TOOLBAR
+            QTest.qWait(250)
+            assert len(calls) == 1, "缓存未到期不应重复查询"
+            QTest.qWait(1200)
+            settle(app, detector)
+            assert len(calls) >= 2 and results[-1] == CLOSE, \
+                f"静止悬停未细化：queries={len(calls)}, results={results}"
+            detector.shutdown()
+            count = len(calls)
+            QTest.qWait(1200)
+            assert len(calls) == count, "退出后不能继续定时查询"
+        finally:
+            detector.shutdown()
+    print("PASS: stationary hover refines a lazy accessibility tree and stops refreshing on shutdown")
+
+
+def check_completion_during_timeout_check():
+    """精确安排查询在 UI 读取超时时钟时结束，复现 busy 被清空的竞态。"""
+    import threading
+    app = QApplication.instance() or QApplication([])
+    entered, release = threading.Event(), threading.Event()
+
+    class Provider:
+        def hit_path(self, *_args):
+            entered.set()
+            release.wait(3)
+            return [TOOLBAR]
+
+        def close(self):
+            pass
+
+    with patch.object(snap, "_try_init_msaa", Provider):
+        detector = snap.RegionDetector(only_window=False)
+        key = (70, WINDOW.getRect())
+        detector._request(key, 70, 115, 18)
+        worker = detector._worker
+        assert entered.wait(1)
+        clock = time.monotonic
+
+        def complete():
+            release.set()
+            deadline = clock() + 1
+            while worker.busy is not None and clock() < deadline:
+                time.sleep(0.001)
+            assert worker.busy is None, "后台查询没有按预期完成"
+            return clock()
+
+        try:
+            with patch.object(snap.time, "monotonic", side_effect=complete):
+                detector._request(key, 70, 116, 18)
+            assert 70 not in snap._hung_hwnds, "已完成的查询不能被判为卡死"
+            settle(app, detector)
+        finally:
+            release.set()
+            detector.shutdown()
+    print("PASS: query completion during timeout checking neither crashes nor blacklists the window")
 
 
 if __name__ == "__main__":
     failures = []
-    for check in (check_hit_path, check_detector, check_hung_query):
+    for check in (check_hit_path, check_detector, check_hung_query, check_stationary_refinement,
+                  check_completion_during_timeout_check):
         try:
             check()
         except AssertionError as error:

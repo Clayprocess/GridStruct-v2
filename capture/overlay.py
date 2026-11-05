@@ -4,6 +4,7 @@ from PySide6.QtGui import QPainter, QPen, QColor, QCursor, QRegion
 from PySide6.QtCore import Qt, QRect, QRectF, QPoint, QSize, Signal, QObject, QTimer, QEvent
 from styles import tokens as T
 from ui import floating_window_type, show_toast
+from ui.motion import tween
 from settings import get_settings
 from annotate import shortcut_tool
 from .screen import ScreenManager, capture_virtual_desktop
@@ -37,7 +38,14 @@ class ScreenShotWindow(QObject):
         self._frozen = False
         self._guides = get_settings().value("capture_guides", True, type=bool)
         self._sel = QRect()
+        # _snap_rect 是吸附目标，_snap_shown 是正在画的框：切换元素时由旧框滑到新框。
         self._snap_rect = QRect()
+        self._snap_shown = QRect()
+        self._snap_from = QRect()
+        self._snap_anim = tween(self, T.MOTION_FAST)
+        self._snap_anim.setStartValue(0.0)
+        self._snap_anim.setEndValue(1.0)
+        self._snap_anim.valueChanged.connect(self._snap_step)
         self._drag_mode = None
         self._drag_start = QPoint()
         self._pending_snap = QRect()
@@ -56,7 +64,14 @@ class ScreenShotWindow(QObject):
     def capture(self):
         return self._shot
 
+    def dragging(self):
+        """正在拖出、移动或调整选区（按下后选区已经变化）。同 PixPin，这时不显示工具条。"""
+        return self._drag_mode is not None and self._sel != self._sel_start
+
     def _build_windows(self):
+        self._screen_region = QRegion()
+        for frame in self._shot.frames:
+            self._screen_region |= QRegion(frame.geometry)
         self._windows = [_ScreenOverlay(self, frame) for frame in self._shot.frames]
         self._snap = RegionDetector(
             ignored_hwnds={int(widget.winId()) for window in self._windows
@@ -75,6 +90,7 @@ class ScreenShotWindow(QObject):
         if self._closed:
             return
         self._closed = True
+        self._snap_anim.stop()
         QApplication.instance().removeEventFilter(self)
         self._manager.changed.disconnect(self._screens_changed)
         self._snap.shutdown()
@@ -96,6 +112,7 @@ class ScreenShotWindow(QObject):
         self._refreshing = True
         self._sel = QRect()
         self._pending_snap = QRect()
+        self._snap_anim.stop()
         self.selectionChanged.emit(QRect())
         self._snap.shutdown()
         for window in self._windows:
@@ -120,6 +137,7 @@ class ScreenShotWindow(QObject):
         self._vg = shot.geometry
         self._sel = QRect()
         self._snap_rect = QRect()
+        self._snap_shown = QRect()
         self._drag_mode = None
         self._frozen = False
         self._pointer_pos = self._manager.cursor_position()
@@ -169,9 +187,28 @@ class ScreenShotWindow(QObject):
     def _on_snap(self, rect):
         new_rect = QRect() if not self._sel.isNull() or self._drag_mode is not None else rect
         if new_rect != self._snap_rect:
-            dirty = self._change_region(self._snap_rect, new_rect)
-            self._snap_rect = QRect(new_rect)
-            self.update(dirty)
+            self._show_snap(new_rect, animate=True)
+
+    def _show_snap(self, rect, animate=False):
+        """同 PixPin 的选框切换动画：换元素时旧框滑到新框；出现、消失和按下时直接到位。"""
+        self._snap_rect = QRect(rect)
+        self._snap_anim.stop()
+        if animate and not self._snap_shown.isNull() and not rect.isNull():
+            self._snap_from = QRect(self._snap_shown)
+            self._snap_anim.start()
+        else:
+            self._move_snap(rect)
+
+    def _snap_step(self, t):
+        a, b = self._snap_from, self._snap_rect
+        self._move_snap(QRect(round(a.x() + (b.x() - a.x()) * t), round(a.y() + (b.y() - a.y()) * t),
+                              round(a.width() + (b.width() - a.width()) * t),
+                              round(a.height() + (b.height() - a.height()) * t)))
+
+    def _move_snap(self, rect):
+        # 吸附框内不压暗，框内外交换的区域都要重画。
+        old, self._snap_shown = self._snap_shown, QRect(rect)
+        self.update(QRegion(old).xored(QRegion(rect)) | self._border_region(old) | self._border_region(rect))
 
     @staticmethod
     def _border_region(rect):
@@ -180,13 +217,26 @@ class ScreenShotWindow(QObject):
         margin = _HANDLE // 2 + _HANDLE_SLOP + 2
         return QRegion(rect.adjusted(-margin, -margin, margin, margin)) - QRegion(rect.adjusted(margin, margin, -margin, -margin))
 
-    @classmethod
-    def _change_region(cls, old, new):
-        # 选区和吸附框内部都不压暗，矩形变化时异或区域也必须刷新，否则会残留旧遮罩。
-        return QRegion(old).xored(QRegion(new)) | cls._border_region(old) | cls._border_region(new)
-
     def _selection_region(self, previous):
-        return self._change_region(previous, self._sel)
+        # 内外遮罩随选区变化，异或区域也必须刷新，否则拖拽后会残留旧遮罩。
+        changed = QRegion(previous).xored(QRegion(self._sel))
+        return changed | self._border_region(previous) | self._border_region(self._sel)
+
+    def _preview_border_region(self, rect):
+        width = round(T.CAPTURE_PREVIEW_LINE_WIDTH)
+        inner = QRegion(rect)
+        border = QRegion(rect.adjusted(-width, -width, width, width)) - inner
+        x, y, w, h = rect.getRect()
+        # 只把落在真实屏幕覆盖之外的线段收回选区内；不能逐屏裁成矩形，
+        # 否则跨屏选区会多出接缝，虚拟包围框则会漏掉错位屏幕和逻辑空洞的边。
+        for strip, dx, dy in (
+            (QRect(x - width, y - width, width, h + 2 * width), width, 0),
+            (QRect(x + w, y - width, width, h + 2 * width), -width, 0),
+            (QRect(x - width, y - width, w + 2 * width, width), 0, width),
+            (QRect(x - width, y + h, w + 2 * width, width), 0, -width),
+        ):
+            border |= (QRegion(strip) - self._screen_region).translated(dx, dy) & inner
+        return border & self._screen_region
 
     def _hover_region(self):
         region = QRegion()
@@ -210,8 +260,7 @@ class ScreenShotWindow(QObject):
             self._pipette_mode = False
             self.pipettePicked.emit(color.name())
             return
-        # 按下后若改为手工框选，吸附框内提亮的部分要重新压暗。
-        previous, dirty = QRect(self._sel), self._hover_region() | self._change_region(self._snap_rect, QRect())
+        previous, dirty = QRect(self._sel), self._hover_region()
         self._pending_snap = QRect()
         self._pointer_pos = pos
         if not self._sel.isNull() and self.size_tip()[0].contains(pos):
@@ -226,10 +275,12 @@ class ScreenShotWindow(QObject):
         elif self._sel.isNull() and self._snap_rect.contains(pos):
             # 松开才区分单击采用和手工框选，避免按下时选区先跳到整个吸附框。
             self._pending_snap = QRect(self._snap_rect)
+            self._show_snap(self._snap_rect)
             self._drag_mode = None
         else:
             self._drag_mode = "create"
             self._sel = QRect(pos, pos)
+            self._show_snap(QRect())
         self._drag_start = pos
         self._sel_start = QRect(self._sel)
         self.update(dirty | self._selection_region(previous) | self._hover_region())
@@ -253,9 +304,8 @@ class ScreenShotWindow(QObject):
             if (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
                 self.update(dirty | self._hover_region())
                 return
-            dirty |= self._change_region(self._snap_rect, QRect())
             self._pending_snap = QRect()
-            self._snap_rect = QRect()
+            self._show_snap(QRect())
             self._drag_mode = "create"
         if self._drag_mode is None:
             cursor = self._hover_cursor(pos)
@@ -292,10 +342,10 @@ class ScreenShotWindow(QObject):
         if not self._pending_snap.isNull():
             pos = event.globalPosition().toPoint()
             if (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
-                previous, dirty = QRect(self._sel), self._hover_region() | self._border_region(self._snap_rect)
+                previous, dirty = QRect(self._sel), self._hover_region()
                 self._sel = QRect(self._pending_snap)
                 self._pending_snap = QRect()
-                self._snap_rect = QRect()
+                self._show_snap(QRect())
                 self._pointer_pos = pos
                 self.update(dirty | self._selection_region(previous) | self._hover_region())
                 self.selectionChanged.emit(QRect(self._sel))
@@ -306,10 +356,11 @@ class ScreenShotWindow(QObject):
         self.mouse_move(event)
         previous, dirty = QRect(self._sel), self._hover_region()
         self._drag_mode = None
+        pos = event.globalPosition().toPoint() if len(self._windows) == 1 else self._manager.cursor_position()
         if self._sel.width() < _MIN_SIZE or self._sel.height() < _MIN_SIZE:
             self._sel = QRect()
-        self._set_cursor(self._hover_cursor(event.globalPosition().toPoint() if len(self._windows) == 1
-                                            else self._manager.cursor_position()))
+            self._snap.redetect(pos)
+        self._set_cursor(self._hover_cursor(pos))
         self.update(dirty | self._selection_region(previous) | self._hover_region())
         self.selectionChanged.emit(QRect(self._sel))
 
@@ -385,9 +436,9 @@ class ScreenShotWindow(QObject):
             self.update(dirty | self._selection_region(previous) | self._hover_region())
 
     def _set_selection(self, rect):
-        previous, dirty = QRect(self._sel), self._hover_region() | self._change_region(self._snap_rect, QRect())
+        previous, dirty = QRect(self._sel), self._hover_region()
         self._sel = rect.intersected(self._vg)
-        self._snap_rect = QRect()
+        self._show_snap(QRect())
         self.update(dirty | self._selection_region(previous) | self._hover_region())
         self.selectionChanged.emit(QRect(self._sel))
 
@@ -543,24 +594,22 @@ class _ScreenOverlay(QWidget):
         with QPainter(self) as painter:
             painter.drawPixmap(0, 0, self.frame.pixmap)
             # 同 V1/PixPin：选区和悬停吸附到的元素都不压暗。
-            lit = (c._sel if not c._sel.isNull() else c._snap_rect).translated(-offset)
+            lit = (c._sel if not c._sel.isNull() else c._snap_shown).translated(-offset)
             painter.setClipRegion(QRegion(self.rect()) - QRegion(lit))
             painter.fillRect(self.rect(), _DIM)
             painter.setClipping(False)
             if not lit.isNull():
                 # 同 V1：悬停吸附和拖出新选区时粗线画在外侧，不压住要截的内容；定下后细线收回内侧。
                 outside = c._sel.isNull() or c._drag_mode == "create"
-                width = T.CAPTURE_PREVIEW_LINE_WIDTH if outside else T.CAPTURE_LINE_WIDTH
-                half = width / 2
-                border = QPen(QColor(T.CAPTURE_ACCENT), width)
-                border.setJoinStyle(Qt.MiterJoin)
-                painter.setRenderHint(QPainter.Antialiasing)
-                painter.setPen(border)
                 if outside:
-                    # 吸附整屏或贴边时收回屏内，边框才看得见；按整个虚拟桌面收，跨屏处不出现接缝。
-                    bounds = QRectF(c._vg.translated(-offset)).adjusted(half, half, -half, -half)
-                    painter.drawRect(QRectF(lit).adjusted(-half, -half, half, half).intersected(bounds))
+                    for part in c._preview_border_region(lit.translated(offset)).translated(-offset):
+                        painter.fillRect(part, QColor(T.CAPTURE_ACCENT))
                 else:
+                    half = T.CAPTURE_LINE_WIDTH / 2
+                    border = QPen(QColor(T.CAPTURE_ACCENT), T.CAPTURE_LINE_WIDTH)
+                    border.setJoinStyle(Qt.MiterJoin)
+                    painter.setRenderHint(QPainter.Antialiasing)
+                    painter.setPen(border)
                     painter.drawRect(QRectF(lit).adjusted(half, half, -half, -half))
             if not c._sel.isNull() and not c._frozen:
                 # 同 V1：拖动中隐藏手柄；尺寸提示照常显示，拖的时候正要看尺寸。

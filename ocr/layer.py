@@ -13,7 +13,7 @@ class _SelectableTextItem(QGraphicsTextItem):
 
     def __init__(self, result, layer):
         super().__init__(result.text, layer)
-        self._ids = result.source_ids or (result.item_id,)
+        self._ids = (result.item_id,)
         self._layer = layer
         self._hovered = False
         self._focused = False
@@ -144,12 +144,13 @@ class _TextLayer(QGraphicsObject):
         self.document = document
         self.mode = mode
         self.on_show_results = on_show_results
-        self._focused_ids = document.focused_ids
-        self._items = []
         self.setZValue(1000)
-        self.document.changed.connect(self._rebuild)
+        # 识别结果的文字不会再变（改字只进全文），文字层建一次就够。
+        # 自定义图元要留 Python 引用，否则包装对象被回收，重写的 paint 和事件随之失效。
+        self._items = [_SelectableTextItem(result, self) for result in document.results
+                       if result.text and not result.box.isEmpty()]
         self.document.focused.connect(self._focus)
-        self._rebuild()
+        self._focus(document.focused_ids)
 
     def boundingRect(self):
         return self.childrenBoundingRect()
@@ -157,24 +158,8 @@ class _TextLayer(QGraphicsObject):
     def paint(self, painter, option, widget=None):
         pass
 
-    @Slot()
-    def _rebuild(self):
-        self.prepareGeometryChange()
-        # Qt 对象销毁自动断开文档信号，层释放后文档仍能供别的窗口使用。
-        for item in self.childItems():
-            item.setVisible(False)
-            item.setParentItem(None)
-            if item.scene() is not None:
-                item.scene().removeItem(item)
-            item.deleteLater()
-        self.selectionChanged.emit(self, "")
-        self._items = [_SelectableTextItem(result, self) for result in self.document.results
-                       if result.text and not result.box.isEmpty()]
-        self._focus(self._focused_ids)
-
     @Slot(object)
     def _focus(self, ids):
-        self._focused_ids = tuple(ids)
         selected = set(ids)
         for item in self.childItems():
             item._focused = bool(selected.intersection(item._ids))

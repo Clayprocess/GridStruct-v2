@@ -8,18 +8,19 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import (
     QPainter, QPixmap, QKeySequence, QUndoStack, QPen, QColor, QCursor, QTextCursor,
 )
-from PySide6.QtCore import Qt, QRect, QRectF, QPointF, Signal, QEvent
+from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QSize, Signal, QEvent
 from copy import copy
 
 from .items import MarkStyle, arrow_heads, SerialMarkItem, TextMarkItem, ArrowMarkItem
 from .tools import create_tool
 from .tools import TOOL_CLASSES, TextTool
-from .commands import (RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand,
+from .commands import (AddMarkCommand, RemoveMarkCommand, MoveMarksCommand, SerialIndexCommand,
                        ArrowCommentCommand, ArrowCurveCommand, StyleMarksCommand)
 from .pipette import PipettePopup
 from styles import tokens as T
 from settings import get_settings
 
+_TOOL_ONLY_STYLE = ("wheel_enabled", "serial_start", "serial_global", "serial_auto_renumber")
 _REMEMBERED_STYLE = ("color", "width", "font_size", "font_family",
                      "serial_start", "serial_global", "serial_auto_renumber", "serial_type", "serial_size",
                      "fill_mode", "round_radius", "arrow_type", "arrow_size", "arrow_start", "arrow_end",
@@ -55,6 +56,7 @@ class AnnotationCanvas(QGraphicsView):
         self._moving = None
         self._move_start = None
         self._selection_style = None
+        self._fresh_mark = None
         self._drawing = False
         self._brush_pos = None
         self._comment_edit = None
@@ -67,7 +69,7 @@ class AnnotationCanvas(QGraphicsView):
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
         self._scene.selectionChanged.connect(self._selection_changed)
-        self._undo.indexChanged.connect(self._selection_changed)
+        self._undo.indexChanged.connect(self._undo_index_changed)
 
         bg = QGraphicsPixmapItem(pixmap)
         # QGraphicsPixmapItem 已按 pixmap 的 DPR 使用逻辑尺寸。
@@ -169,12 +171,21 @@ class AnnotationCanvas(QGraphicsView):
     def _selected_marks(self):
         return [item for item in self._scene.selectedItems() if hasattr(item, "style_keys")]
 
+    def _undo_index_changed(self, index):
+        command = self._undo.command(index - 1) if index > 0 else None
+        if isinstance(command, AddMarkCommand) and command.fresh:
+            command.fresh = False
+            self._fresh_mark = command._item
+        self._selection_changed()
+
     def _selection_changed(self, *args):
         selected = self._selected_marks()
+        if selected != [self._fresh_mark]:
+            self._fresh_mark = None
         self._selection_style = copy(selected[0].style) if selected else None
         if selected:
             defaults = self.styles[selected[0].tool_id]
-            for key in ("wheel_enabled", "serial_start", "serial_global", "serial_auto_renumber"):
+            for key in _TOOL_ONLY_STYLE:
                 setattr(self._selection_style, key, getattr(defaults, key))
         self.optionsChanged.emit(self.options_tool_id)
 
@@ -183,7 +194,7 @@ class AnnotationCanvas(QGraphicsView):
         if not selected:
             return True
         # 混选只开放共同属性，避免某些图形悄悄保持原值。
-        if key in ("wheel_enabled", "serial_start", "serial_global", "serial_auto_renumber"):
+        if key in _TOOL_ONLY_STYLE:
             return True
         return all(key in item.style_keys for item in selected)
 
@@ -193,7 +204,9 @@ class AnnotationCanvas(QGraphicsView):
 
     def update_style(self, key, value):
         selected = self._selected_marks()
-        if selected and key not in ("wheel_enabled", "serial_start", "serial_global", "serial_auto_renumber"):
+        old_preview = self._brush_preview_rect() if key in ("eraser_size", "mosaic_size", "mosaic_shape") else None
+        if selected and key not in _TOOL_ONLY_STYLE:
+            fresh = self._fresh_mark
             changes = {}
             for item in selected:
                 if key not in item.style_keys or getattr(item.style, key) == value:
@@ -206,37 +219,46 @@ class AnnotationCanvas(QGraphicsView):
             if changes:
                 self._finish_tool()
                 self._undo.push(StyleMarksCommand(changes))
-            return
-        style = self.styles[self.options_tool_id] if selected else self._style
-        old_preview = self._brush_preview_rect() if key in ("eraser_size", "mosaic_size", "mosaic_shape") else None
+            # 刚画完的标注会自动选中，这时改样式是在调手里这支笔：同时记成工具的当前样式，
+            # 否则下一笔或换工具会跳回旧颜色。Ctrl 点选的旧标注仍只改它自己。
+            if fresh is not None and selected == [fresh] and key in fresh.style_keys:
+                self._remember_style(fresh.tool_id, key, value)
+        else:
+            tool_id = self.options_tool_id
+            style = self.styles[tool_id] if selected else self._style
+            self._remember_style(tool_id, key, value, style)
+            if key == "serial_start":
+                self._scene.setProperty("serial_next", value)
+                if style.serial_global:
+                    QApplication.instance().setProperty("serial_counter", value)
+            elif key == "serial_auto_renumber":
+                self._scene.setProperty("serial_auto_renumber", value)
+            if isinstance(self._tool, TextTool):
+                self._tool.restyle()
+        if old_preview is not None:
+            self.viewport().update(old_preview.united(self._brush_preview_rect()))
+        self._selection_changed()
+
+    def _remember_style(self, tool_id, key, value, style=None):
+        """改工具的默认样式（下一笔用的样式）并写入配置；tool_id 为空时只改内存。"""
+        style = style or self.styles[tool_id]
         setattr(style, key, value)
         if key == "arrow_type":
             style.arrow_start, style.arrow_end = arrow_heads(value)
-        if old_preview is not None:
-            self.viewport().update(old_preview.united(self._brush_preview_rect()))
-        if key in _REMEMBERED_STYLE and self.options_tool_id:
+        if key in _REMEMBERED_STYLE and tool_id:
             for name in ((key, "arrow_start", "arrow_end") if key == "arrow_type" else (key,)):
                 stored = getattr(style, name)
                 if isinstance(stored, QColor):
                     stored = stored.name(QColor.HexArgb)
-                self._settings.setValue(f"annotation/{self.options_tool_id}/{name}", stored)
+                self._settings.setValue(f"annotation/{tool_id}/{name}", stored)
         # 同 PixPin：默认所有工具共用一个颜色，高亮单独记色，因为它要的是浅色。
-        if (key == "color" and self.options_tool_id != "highlight"
+        if (key == "color" and tool_id != "highlight"
                 and self._settings.value("same_tool_color", True, type=bool)):
-            for name, style in self.styles.items():
+            for name, other in self.styles.items():
                 if name == "highlight":
                     continue
-                style.color = QColor(value)
+                other.color = QColor(value)
                 self._settings.setValue(f"annotation/{name}/color", value.name(QColor.HexArgb))
-        if key == "serial_start":
-            self._scene.setProperty("serial_next", value)
-            if style.serial_global:
-                QApplication.instance().setProperty("serial_counter", value)
-        elif key == "serial_auto_renumber":
-            self._scene.setProperty("serial_auto_renumber", value)
-        if isinstance(self._tool, TextTool):
-            self._tool.restyle()
-        self._selection_changed()
 
     def adjust_serial(self, delta):
         for item in self._scene.selectedItems():
@@ -261,6 +283,11 @@ class AnnotationCanvas(QGraphicsView):
     def redo(self):
         self._finish_tool()
         self._undo.redo()
+
+    def minimumSizeHint(self):
+        # QAbstractScrollArea 默认最小 64×64：选区比这还矮（窄）时截图窗口被撑大，截图居中，
+        # 上下（左右）露出视图底色的白边，截图内容也跟着偏离原位（Clay 2026-11-05 实测）。
+        return QSize(1, 1)
 
     # ---------- 导出 ----------
 
