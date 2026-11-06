@@ -482,7 +482,8 @@ class _Accessibility:
         self._roots = {}
         # 上次点命中最深的完整对象，留给 ancestors() 补祖先：(对象, x, y, 窗口矩形, 缓存键, 路径)
         self._deep = None
-        # (hwnd, 点命中路径) -> 补全后的路径：鼠标停住时的重查不再重新走一遍父链。
+        # (hwnd, 点命中路径) -> (补全后的路径, 是否走完)：鼠标停住时的重查不再重新走一遍父链；
+        # 中途失败的只当已知祖先先用着，下次还会重试补全。
         self._walks = {}
 
     def _call(self, pointer, index, argtypes, *args):
@@ -580,15 +581,14 @@ class _Accessibility:
                     break
                 found.append(rect)
         except OSError:
-            complete = False  # 某层取父对象失败：先用已经补到的祖先，下次再重试，不缓存。
+            complete = False  # 某层取父对象失败：先用已经补到的祖先，下次再重试。
         finally:
             if current is not node:
                 self._release(current)
             self._drop_deep()
         unique = dict.fromkeys(r.getRect() for r in found + rects)
         full = sorted((QRect(*r) for r in unique), key=lambda r: r.width() * r.height(), reverse=True)
-        if complete:
-            self._walks[key] = full
+        self._walks[key] = (full, complete)
         return full
 
     def hit_path(self, hwnd, x, y):
@@ -632,11 +632,12 @@ class _Accessibility:
                     break
             if descended:
                 key = (hwnd, tuple(r.getRect() for r in rects))
-                if key in self._walks:
-                    # 补过父链的元素直接给完整路径，静止刷新时不会先退回短路径。
-                    rects = self._walks[key]
-                else:
+                walk = self._walks.get(key)
+                if walk is None or not walk[1]:
                     self._deep, accessible = (accessible, x, y, root_rect, key, list(rects)), root
+                if walk is not None:
+                    # 补过父链的元素直接给已知的完整路径，静止刷新时不会先退回短路径、丢掉滚轮选中的层。
+                    rects = walk[0]
         except OSError:
             # 某层不支持命中或定位：保留已经得到的外层路径。窗口对象本身失效（窗口已关）就丢掉缓存。
             if accessible is root and not rects:

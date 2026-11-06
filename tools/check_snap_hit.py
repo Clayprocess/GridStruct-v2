@@ -27,7 +27,7 @@ class FakeAccessible(snap._Accessibility):
     """objects: {id: (rect, [子对象 id 或 ("item", 子元素编号, rect)])}，1 是窗口对象。
     deepest=True 模拟 Chrome：accHitTest 跳过中间层，直接返回最深的对象；
     也可给 {对象 id: 它命中时直接返回的对象 id}，只让某一层跳层。
-    broken: accLocation 会失败（抛 OSError）的对象 id。parent_failures: 前几次 get_accParent 失败。"""
+    broken: accLocation 会失败（抛 OSError）的对象 id。failing_parents: 这些对象各有一次 get_accParent 失败。"""
 
     def __init__(self, objects, deepest=False, broken=()):
         self._ctypes = ctypes
@@ -45,7 +45,7 @@ class FakeAccessible(snap._Accessibility):
         self.acquired = []
         self.calls = 0
         self.parent_calls = 0
-        self.parent_failures = 0
+        self.failing_parents = []
         self.opened = 0
         fake = self
 
@@ -95,8 +95,8 @@ class FakeAccessible(snap._Accessibility):
             return 0
         if index == 7:  # get_accParent
             self.parent_calls += 1
-            if self.parent_failures:
-                self.parent_failures -= 1
+            if node in self.failing_parents:
+                self.failing_parents.remove(node)
                 raise OSError(-2147467259, "E_FAIL")
             parent = self.parents.get(node)
             args[0]._obj.value = None if parent is None else 1000 + parent
@@ -198,7 +198,7 @@ def check_hit_path():
     assert provider.ancestors(lambda: False) == full
     # 取父对象偶发失败：这次先用已有路径，不缓存，下次重试能补全。
     provider = FakeAccessible(page(), deepest=True)
-    provider.parent_failures = 1
+    provider.failing_parents = [9]
     assert full_path(provider, 220, 155) == [TEXT]
     assert full_path(provider, 220, 155) == full, "补链失败后应重试"
     provider.close()
@@ -267,7 +267,26 @@ def check_two_phase():
         assert results[-1] == WINDOW, ("补链完成不应改变已选层级", results)
         detector.step_level(-1)
         assert results[-1] == BODY, results
-        print("PASS: completing the chain keeps the level the wheel already selected")
+        detector.shutdown()
+        # 补链中途失败，滚轮选中单元格；静止到期自动重试时仍选中单元格，不能先退成整窗。
+        provider = FakeAccessible(page(), deepest=True)
+        provider.failing_parents = [8]
+        detector, results = start()
+        detector.detect(QPoint(220, 155))
+        settle(app, detector)
+        assert detector._chain == [TEXT, CELL, WINDOW], detector._chain
+        detector.step_level(1)
+        assert results[-1] == CELL, results
+        count = len(results)
+        deadline = time.monotonic() + snap._HIT_REUSE_S + 1
+        while len(detector._chain) < 6 and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        settle(app, detector)
+        assert len(detector._chain) == 6, detector._chain
+        assert set(results[count:]) <= {CELL}, ("自动重试不应改变已选层级", results[count:])
+        assert results[-1] == CELL, results
+        print("PASS: completing the chain keeps the level the wheel already selected, also across a retried walk")
     finally:
         for detector in detectors:
             detector.shutdown()
