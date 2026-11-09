@@ -42,3 +42,17 @@
 
 - 新窗口/对话框必须在明暗两套主题下离屏渲染截图自查（参考 `tools/render_check.py` 的写法）。
 - 不引入新依赖先打招呼。PySide6 / onnxruntime 之外的新包要说明理由。
+
+## 状态归属（改这些流程前先看）
+
+各模块自己管自己的状态，不引入统一的状态机框架。下面这些状态只能经由列出的入口切换，不要另加布尔开关绕过：
+
+| 状态 | 位置 | 唯一入口 |
+| --- | --- | --- |
+| 截图会话阶段 `Phase`（空闲/框选/标注/待开长截图/长截图） | `capture/flow.py` | `ScreenshotFlow` 内部赋值 `self._phase`；`start()` 只在 `IDLE` 时开始 |
+| 结束一张截图前的确认 | `annotate/window.py` | `AnnotationWindow.confirm_discard()`：Esc、关闭、托盘退出、改做长截图都走它 |
+| OCR 任务状态 `OCRState` | `ocr/controller.py` | `OCRController._set_state()` / `_enter_stage()`；界面用 `.waiting` / `.retryable`，不手写状态名清单 |
+| 表格网格拖线预览 | `table/review.py` | `TableReview.set_grid(final=False)` 预览；被打断时由 `_settle()` 按松开提交 |
+| 设置保存 | `settings/dialog.py` | `SettingsDialog._save()`：快捷键、开机自启、配置文件任何一步失败都整体回滚 |
+
+中途打断（按住鼠标时切工具、翻页、退出）和写入失败是最容易丢数据的地方：新增流程时先写能复现打断/失败的离屏脚本（`tools/check_*.py`）。
