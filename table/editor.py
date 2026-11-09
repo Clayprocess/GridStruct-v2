@@ -82,7 +82,10 @@ class GridCanvas(QWidget):
 
     def set_tool(self, tool):
         self.tool = tool
-        self._dragging = None
+        if self._dragging is not None:
+            # 拖线时按快捷键换工具：这次拖动按松开提交，不留半截编辑。
+            self._dragging = None
+            self.gridChanged.emit(self.grid, True)
         self._set_hovered(None)
         self.setCursor(Qt.CrossCursor if tool in (ADD_HORIZONTAL, ADD_VERTICAL) else Qt.ArrowCursor)
 

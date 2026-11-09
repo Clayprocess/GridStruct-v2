@@ -72,6 +72,7 @@ class _PageState:
     error: str = ""
     queued: bool = False
     regions: list | None = None  # 等着按新框重新分析的区域
+    restore: list | None = None  # 与 regions 同时有值：改框前的表格，重新分析失败时原样恢复
 
     @property
     def table(self):
@@ -337,7 +338,7 @@ class TableDialog(BaseDialog):
             # 只重算了改过的框，按顺序填回占位，没改的表连同改字一起保留。
             filled = iter(results)
             state.tables = [next(filled, table) if table.review is None else table for table in state.tables]
-            state.regions = None
+            state.regions = state.restore = None
         state.tokens = tokens
         if index == self._index and not self._regions_mode:
             if keep_view:
@@ -363,13 +364,14 @@ class TableDialog(BaseDialog):
         index = self._index if page is None else page
         state = self._states[index]
         if state.regions is not None:
-            # 改框后的重新分析失败：撤掉还没结果的框，已有的表不受影响。
+            # 改框后的重新分析失败：整页回到改框前（被挪动的表连同改字一起回来），
+            # 没动过的表是同一个对象，失败前正在改的字也在。
             current = state.table
-            keep_view = _ready(current)
-            state.tables = [table for table in state.tables if table.review is not None]
-            # 撤掉的占位可能排在当前表前面，按对象找回它的新位置。
+            keep_view = _ready(current) and any(table is current for table in state.restore)
+            state.tables = state.restore
+            # 当前表在恢复后的列表里位置可能变了，按对象找回。
             state.current = next((number for number, table in enumerate(state.tables) if table is current), 0)
-            state.regions = None
+            state.regions = state.restore = None
             if index == self._index and not self._regions_mode:
                 if keep_view:
                     # 用户可能正在当前表里改字：只更新标签，不重建界面销毁输入框。
@@ -378,7 +380,7 @@ class TableDialog(BaseDialog):
                 else:
                     self._save_position()
                     self._show_table()
-                self._status.setText(f"{self._page_prefix()}重新分析失败：{message}")
+                self._status.setText(f"{self._page_prefix()}重新分析失败，已恢复改框前的表格：{message}")
             return
         state.error = message
         if index == self._index:
@@ -613,10 +615,12 @@ class TableDialog(BaseDialog):
                 table = _TableState(rect)
                 pending.append(rect)
             tables.append(table)
+        previous = state.tables
         state.tables = tables
         state.current = next((index for index, table in enumerate(tables) if table is current), 0)
         if pending:
             state.regions = pending
+            state.restore = previous
             state.queued = False
             state.stage = STAGES["structure"]
             self.analysisRequested.emit()
@@ -840,6 +844,8 @@ class TableDialog(BaseDialog):
         filename = f"表格_{QDateTime.currentDateTime().toString('yyyy-MM-dd_HH-mm-ss')}.xlsx"
         # 多张表时不给 CSV：一个 CSV 只装得下一张表。
         filters = EXPORT_FILTERS if len(sheets) == 1 else MULTI_EXPORT_FILTERS
+        # 选保存位置时后台可能又分析完几页；提示必须和上面定下的导出内容同一时刻算。
+        note = self._pending_note(sheets)
         path, chosen = QFileDialog.getSaveFileName(self, "导出表格", str(Path(directory) / filename), filters)
         if not path:
             return
@@ -856,7 +862,7 @@ class TableDialog(BaseDialog):
         settings.setValue("table/export_dir", str(Path(path).parent))
         count = f" {len(sheets)} 张表" if len(sheets) > 1 else ""
         # 同截图保存：不动剪贴板，提示里可点复制路径。
-        show_toast(f"已导出{count}" + self._pending_note(sheets),
+        show_toast(f"已导出{count}" + note,
                    ("复制路径", lambda: QApplication.clipboard().setText(path)))
 
     # ---- 缩放（ui.zoom 的预览接口）----

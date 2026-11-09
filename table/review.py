@@ -225,6 +225,14 @@ class TableReview:
     def can_redo(self):
         return bool(self._redo)
 
+    def _settle(self):
+        """拖线中途被打断（切工具、翻页、换表时没收到松开）：先把预览按松开记下。
+        否则后续改字落在预览上，下一次拖线又从拖动前的旧状态算起，把改字盖掉。"""
+        if self._base is not None:
+            if self.document != self._base:
+                self._record(self._base)
+            self._base = None
+
     def set_grid(self, grid, *, final=True):
         if self._base is None:
             self._base = self.document
@@ -235,6 +243,7 @@ class TableReview:
             self._base = None
 
     def edit(self, row, column, text):
+        self._settle()
         cell = self.document.cell(row, column)
         if text == cell.text:
             return
@@ -244,6 +253,7 @@ class TableReview:
         self.document = self.document.with_cell(row, column, replace(cell, text=text, status=status, corrections=()))
 
     def confirm(self, row, column):
+        self._settle()
         cell = self.document.cell(row, column)
         if cell.status != PENDING:
             return False
@@ -260,10 +270,12 @@ class TableReview:
                 for column, cell in enumerate(values) if cell.status == PENDING]
 
     def undo(self):
+        self._settle()
         self._redo.append(self.document)
         self.document = self._undo.pop()
 
     def redo(self):
+        self._settle()
         self._undo.append(self.document)
         self.document = self._redo.pop()
 
