@@ -277,7 +277,7 @@ class SettingsDialog(BaseDialog):
         page.group("标注").check(self._same_color, "高亮笔保留自己的颜色。")
         self._confirm_exit = QCheckBox("退出截图时，如有未保存的标注先确认")
         self._confirm_exit.setChecked(self._s.value("capture/confirm_exit", True, type=bool))
-        page.group("退出").check(self._confirm_exit, "按 Esc 或点关闭时生效；没有标注时直接退出。")
+        page.group("退出").check(self._confirm_exit, "按 Esc、点关闭、托盘退出或改做长截图时生效；没有标注时直接退出。")
         return page
 
     # ---------- 保存 ----------

@@ -578,6 +578,10 @@ class FloatPanel(QWidget):
             action.setIcon(tinted_icon(icon_name, t["popover_foreground"], _ICON_SIZE))
         self.update()  # 卡片背景色也在 paintEvent 里取自主题，需重绘
 
+    def hide_action(self, action_id: str) -> None:
+        """当前场景用不上的操作按钮（如贴图标注时的长截图）直接不显示，免得点了没反应。"""
+        self._buttons[action_id].hide()
+
     def set_undo_enabled(self, enabled: bool) -> None:
         self._buttons["undo"].setEnabled(enabled)
 

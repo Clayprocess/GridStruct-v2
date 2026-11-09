@@ -1,6 +1,8 @@
 # 截图流程编排：截图 -> 框选 -> 工具条 -> 复制/确认。
 # P0-A 垂直切片拥有者。标注工具的具体实现后续挂到 FloatPanel.toolSelected 上。
 
+from enum import Enum, auto
+
 from PySide6.QtCore import QObject, QRect, QTimer
 from PySide6.QtWidgets import QApplication
 
@@ -8,6 +10,15 @@ from .screen import capture_virtual_desktop
 from .overlay import ScreenShotWindow
 from annotate import AnnotationWindow, FloatPanel
 from ui import show_message, show_toast
+
+
+class Phase(Enum):
+    """一次截图会话所处的阶段；只在 ScreenshotFlow 里切换，同一时刻只有一个。"""
+    IDLE = auto()              # 没有会话，热键/托盘可以开始新截图
+    SELECTING = auto()         # 遮罩上框选，工具条预建
+    ANNOTATING = auto()        # 标注窗口打开（普通截图或长截图结果）
+    LONGSHOT_PENDING = auto()  # 已决定做长截图：等选区确认，或等旧标注窗口从桌面消失
+    LONGSHOT = auto()          # 长截图会话（框选或控制条）在跑
 
 
 class ScreenshotFlow(QObject):
@@ -24,7 +35,7 @@ class ScreenshotFlow(QObject):
         self._longshot = None
         self._hotkeys = hotkeys
         self._longshot_escape = None
-        self._longshot_requested = False
+        self._phase = Phase.IDLE
         self._pending_longshot_region = QRect()
         self._longshot_timer = QTimer(self)
         self._longshot_timer.setSingleShot(True)
@@ -32,7 +43,7 @@ class ScreenshotFlow(QObject):
         self._longshot_timer.timeout.connect(self.start_pending_longshot)
 
     def start(self):
-        if self._win is not None or self._ann is not None or self._longshot_requested or (self._longshot is not None and self._longshot.is_active):
+        if self._phase is not Phase.IDLE:
             return  # 已有会话在跑
         try:
             self._shot = capture_virtual_desktop()
@@ -44,6 +55,7 @@ class ScreenshotFlow(QObject):
         self._win.selectionChanged.connect(self._on_selection)
         self._win.actionRequested.connect(self._trigger_action)
         self._win.cancelled.connect(self._cleanup)
+        self._phase = Phase.SELECTING
         self._win.show()
         # 工具条有二十多个按钮和图标，现场创建要几十毫秒；以前在刚拖出选区时创建，拖动会卡一下。
         # 遮罩先画出来，再趁用户还没开始拖时建好；人的反应时间远大于这 100ms。
@@ -87,48 +99,57 @@ class ScreenshotFlow(QObject):
             self._win.close()
             return
         if action == "longshot":
-            self._longshot_requested = True
+            # confirm() 同步发出 regionSelected，_on_region 按这个阶段改走长截图。
+            self._phase = Phase.LONGSHOT_PENDING
             if not self._win.confirm():
-                self._longshot_requested = False
+                self._phase = Phase.SELECTING
             return
         if self._win.confirm():
             self._ann.trigger_action(action)
 
     def start_longshot(self, region=None):
         """托盘、工具条和热键共享同一个长截图会话。"""
-        if self._longshot_requested or (self._longshot is not None and self._longshot.is_active):
-            return
         if region is not None:
+            # 标注窗口里点“长截图”（已按 Esc 的规则确认过）。
+            if self._phase is not Phase.ANNOTATING:
+                return
             self._cleanup()
-            self._longshot_requested = True
+            self._phase = Phase.LONGSHOT_PENDING
             self._pending_longshot_region = QRect(region)
             # 等桌面合成器移除旧标注窗口后，长截图才能取得干净的首帧。
             self._longshot_timer.start()
             return
-        if self._ann is not None:
-            return
-        if self._win is not None:
+        if self._phase is Phase.SELECTING:
             self._trigger_action("longshot")
-            return
-        self._get_longshot().start()
+        elif self._phase is Phase.IDLE:
+            self._phase = Phase.LONGSHOT
+            self._get_longshot().start()
+            self._settle_longshot()
 
     def start_pending_longshot(self):
         """延迟的用户启动入口；捕获异常在这一公开操作边界提示。"""
         from ui import show_message
-        self._longshot_requested = False
         try:
             capture = capture_virtual_desktop()
         except (RuntimeError, OSError) as exc:
+            self._phase = Phase.IDLE
             show_message(None, "无法开始长截图", str(exc))
             return
+        self._phase = Phase.LONGSHOT
         self._get_longshot().start_region(capture, self._pending_longshot_region)
+        self._settle_longshot()
+
+    def _settle_longshot(self):
+        # 长截图启动失败（截不到屏、控制条无法排除）时不会发 closed，按它的实际状态落定。
+        if not self._longshot.is_active:
+            self._phase = Phase.IDLE
 
     def _get_longshot(self):
         if self._longshot is None:
             from .longshot import LongShotFlow
             self._longshot = LongShotFlow(self._app, self._on_longshot_result)
             self._longshot.controlsShown.connect(self._register_longshot_escape)
-            self._longshot.closed.connect(self._release_longshot_escape)
+            self._longshot.closed.connect(self._longshot_closed)
         return self._longshot
 
     def _register_longshot_escape(self):
@@ -146,10 +167,13 @@ class ScreenshotFlow(QObject):
         else:
             self._longshot.cancel()
 
-    def _release_longshot_escape(self):
+    def _longshot_closed(self):
         if self._longshot_escape is not None:
             self._hotkeys.release(self._longshot_escape)
             self._longshot_escape = None
+        # 交付结果时先关长截图再开标注窗口，_on_longshot_result 随后把阶段改成 ANNOTATING。
+        if self._phase is Phase.LONGSHOT:
+            self._phase = Phase.IDLE
 
     def _on_longshot_result(self, pixmap):
         mode = self._app.property("theme_mode") or self._mode
@@ -158,6 +182,7 @@ class ScreenshotFlow(QObject):
         self._ann.finished.connect(self._on_finished)
         self._ann.cancelled.connect(self._cleanup)
         self._ann.longshotRequested.connect(self.start_longshot)
+        self._phase = Phase.ANNOTATING
         self._ann.show()
         self._ann.raise_()
         self._ann.activateWindow()
@@ -166,10 +191,11 @@ class ScreenshotFlow(QObject):
 
     def _on_region(self, rect: QRect):
         capture = self._win.capture
-        if self._longshot_requested:
-            self._longshot_requested = False
+        if self._phase is Phase.LONGSHOT_PENDING:
             self._cleanup()
+            self._phase = Phase.LONGSHOT
             self._get_longshot().start_region(capture, rect)
+            self._settle_longshot()
             return
         cropped = capture.crop(rect)
         crosses_screens = sum(frame.geometry.intersects(rect) for frame in capture.frames) > 1
@@ -190,6 +216,7 @@ class ScreenshotFlow(QObject):
         self._ann.finished.connect(self._on_finished)
         self._ann.cancelled.connect(self._cleanup)
         self._ann.longshotRequested.connect(self.start_longshot)
+        self._phase = Phase.ANNOTATING
         self._ann.show()
         self._ann.raise_()
         self._ann.activateWindow()
@@ -201,7 +228,6 @@ class ScreenshotFlow(QObject):
 
     def cancel(self):
         self._longshot_timer.stop()
-        self._longshot_requested = False
         self._cleanup()
         if self._longshot is not None:
             self._longshot.cancel()
@@ -212,6 +238,9 @@ class ScreenshotFlow(QObject):
         window, self._win = self._win, None
         panel, self._panel = self._panel, None
         self._shot = None
+        if self._phase is not Phase.LONGSHOT:
+            # 长截图在跑时这里只收掉截图会话残留的窗口，阶段等长截图 closed 再回到空闲。
+            self._phase = Phase.IDLE
         if annotation is not None:
             annotation.close()
         if window is not None:
