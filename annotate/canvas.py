@@ -237,6 +237,10 @@ class AnnotationCanvas(QGraphicsView):
                 self._undo.push(SerialIndexCommand(item, item.index + delta))
 
     def finish_editing(self):
+        if self._drawing:
+            # 按住鼠标时按 Esc/Enter：正在画的这一笔先提交，退出确认才知道有未保存的标注。
+            self._end_stroke()
+            return True
         if self._comment_edit is not None:
             self._finish_comment()
             return True

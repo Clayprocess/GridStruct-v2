@@ -87,6 +87,24 @@ def check_longshot_confirm(app):
     flush(app)
 
 
+def check_escape_while_drawing(app):
+    # 第一笔还没松开就按 Esc：这一笔算未保存的标注，要确认；取消后它留在撤销栈里。
+    window = open_window(app)
+    viewport = window._canvas.viewport()
+    window.select_tool("rect")
+    mouse(viewport, QEvent.MouseButtonPress, QPoint(20, 20), Qt.LeftButton)
+    mouse(viewport, QEvent.MouseMove, QPoint(120, 90), Qt.LeftButton)
+    with patch("annotate.window._confirm_exit", return_value=False) as confirm:
+        window.trigger_action("escape")
+        assert confirm.called, "画第一笔时按 Esc 直接关掉了截图，没有确认"
+    assert window.isVisible() and window._canvas._undo.count() == 1
+    mouse(viewport, QEvent.MouseButtonRelease, QPoint(120, 90), Qt.NoButton)
+    flush(app)
+    assert window._canvas._undo.count() == 1, "松开鼠标不该再多一笔"
+    window.close()
+    flush(app)
+
+
 def check_pin_annotation(app):
     import pin
     with patch("pin._auto_recognize"):
@@ -245,6 +263,7 @@ def main():
             patch("settings.storage.data_directory", return_value=Path(folder)):
         try:
             check_longshot_confirm(app)
+            check_escape_while_drawing(app)
             check_pin_annotation(app)
             check_exit_confirm(app)
             check_switch_while_drawing(app)
@@ -252,6 +271,7 @@ def main():
         finally:
             app.aboutToQuit.emit()
     print("PASS: Esc / tray exit / longshot share one confirm rule for unsaved annotations")
+    print("PASS: Esc while the first stroke is still held counts that stroke as unsaved")
     print("PASS: pin annotation hides the longshot button")
     print("PASS: switching tools mid-stroke commits the stroke, no stray item, no error")
     print("PASS: session phases: select -> longshot -> annotate -> longshot again -> idle; failed start never sticks")
