@@ -53,6 +53,36 @@ def check_drag_interrupted():
     assert review.document.rows[1][1] == "丁改" and review.document.grid.vertical_lines == (0, 38, 80)
 
 
+def check_redo_while_dragging(app):
+    from table.dialog import TableDialog
+    from table.model import GridSpec
+    from table.pages import ImagePage
+    pages = [ImagePage(blank(), label=f"第 {index + 1} 页") for index in range(2)]
+    dialog = TableDialog(pages)
+    dialog.show()
+    for page in range(2):
+        dialog.apply_analysis((), (result(QRect(0, 0, 100, 40), f"p{page + 1}"),), page=page)
+    app.processEvents()
+    review = dialog._review
+    before = review.document
+    review.edit(0, 0, "改过")
+    dialog._undo()
+    assert dialog._redo_button.isEnabled()
+    # 拖线没松开就翻页，回来再按重做：拖线按松开记下，它是新改动，重做随之失效。
+    dialog._grid_changed(GridSpec((0, 40), (0, 80)), False)
+    dialog.show_page(1)
+    dialog.show_page(0)
+    assert dialog._review is review
+    dialog._redo()
+    assert review.document.grid.vertical_lines == (0, 80), "被打断的拖线应保留"
+    assert not dialog._redo_button.isEnabled() and dialog._undo_button.isEnabled()
+    # 撤销一次正好回到拖线前，撤销栈里没有多出来的记录。
+    dialog._undo()
+    assert review.document == before and not review.can_undo, review.document
+    dialog.close()
+    app.processEvents()
+
+
 def check_canvas_tool_switch(app):
     from table.editor import GridCanvas, SELECT, ADD_VERTICAL
     from table.model import GridSpec
@@ -127,12 +157,14 @@ def main():
             patch("settings.storage.data_directory", return_value=Path(folder)):
         try:
             check_drag_interrupted()
+            check_redo_while_dragging(app)
             check_canvas_tool_switch(app)
             check_export_note_snapshot(app)
             check_regions_failure_restores(app)
         finally:
             app.aboutToQuit.emit()
     print("PASS: an interrupted line drag never resurrects the pre-drag state over later edits")
+    print("PASS: redo while a line drag is unfinished commits the drag, no error, no extra undo step")
     print("PASS: export note is computed from the same snapshot as the exported content")
     print("PASS: failed re-analysis after editing a frame restores the previous table and its edits")
 

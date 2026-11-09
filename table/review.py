@@ -276,6 +276,9 @@ class TableReview:
 
     def redo(self):
         self._settle()
+        if not self._redo:
+            # 被打断的拖线算一次新改动，已清空重做；这次 Ctrl+Y 只把拖线记下。
+            return
         self._undo.append(self.document)
         self.document = self._redo.pop()
 
