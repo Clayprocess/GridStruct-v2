@@ -249,6 +249,8 @@ class SettingsDialog(BaseDialog):
             self._autostart.setToolTip("仅 Windows 支持")
         else:
             self._autostart.setChecked(_read_autostart())
+        # 保存失败时把注册表恢复成打开设置时的样子。
+        self._original_autostart = self._autostart.isChecked()
         page.group("启动").check(self._autostart)
         return page
 
@@ -350,6 +352,11 @@ class SettingsDialog(BaseDialog):
         for name, edit in self._hotkeys.items():
             edit.setKeySequence(QKeySequence(HOTKEY_DEFAULTS[name], QKeySequence.PortableText))
 
+    def _restore_hotkeys(self, previous):
+        """保存失败时换回原快捷键；恢复不了就返回要补在提示里的说明。"""
+        problem = self._apply_hotkeys(previous) if self._apply_hotkeys is not None else None
+        return f"\n原快捷键恢复失败：{problem}，请重新设置快捷键。" if problem else ""
+
     def _hotkey_texts(self):
         return {name: edit.keySequence().toString(QKeySequence.PortableText) for name, edit in self._hotkeys.items()}
 
@@ -390,6 +397,7 @@ class SettingsDialog(BaseDialog):
     # ---------- 保存 ----------
 
     def _save(self):
+        """快捷键、开机自启先生效再写配置；任何一步失败，已生效的部分都恢复原样，不留“提示失败却改了一半”。"""
         if not self._check_hotkeys():
             self._nav.setCurrentRow(4)
             show_message(self, "热键无效", self._hotkey_error.text())
@@ -409,34 +417,47 @@ class SettingsDialog(BaseDialog):
             self._nav.setCurrentRow(4)
             show_message(self, "快捷键冲突", problem)
             return
-        if sys.platform == "win32":
+        autostart = sys.platform == "win32"
+        if autostart:
             try:
                 _write_autostart(self._autostart.isChecked())
             except OSError as exc:
-                # 自启写入失败不能留下尚未保存的新热键。
-                problem = self._apply_hotkeys(previous_hotkeys) if self._apply_hotkeys is not None else None
-                message = f"开机自启设置失败：{exc}"
-                if problem:
-                    message += f"\n原快捷键恢复失败：{problem}，请重新设置快捷键。"
-                show_message(self, "无法保存设置", message)
+                show_message(self, "无法保存设置",
+                             f"开机自启设置失败：{exc}" + self._restore_hotkeys(previous_hotkeys))
                 return
-        for name, text in texts.items():
-            self._s.setValue(f"hotkey/{name}", text)
-        self._s.setValue("theme", self._theme.currentData())
-        self._s.setValue("language", self._language.currentData())
-        self._s.setValue("screenshot_dir", self._shot_dir.text())
-        self._s.setValue("image_format", self._img_fmt.currentText())
-        self._s.setValue("snap_only_window", self._snap_only.isChecked())
-        self._s.setValue("capture_guides", self._guides.isChecked())
-        self._s.setValue("same_tool_color", self._same_color.isChecked())
-        self._s.setValue("ocr/direct_copy", self._ocr_copy.isChecked())
-        self._s.setValue("ocr/auto_pin", self._ocr_pin.isChecked())
-        self._s.setValue("capture/confirm_exit", self._confirm_exit.isChecked())
-        if sys.platform == "win32":
-            self._s.setValue("autostart", self._autostart.isChecked())
+        values = {f"hotkey/{name}": text for name, text in texts.items()}
+        values.update({
+            "theme": self._theme.currentData(),
+            "language": self._language.currentData(),
+            "screenshot_dir": self._shot_dir.text(),
+            "image_format": self._img_fmt.currentText(),
+            "snap_only_window": self._snap_only.isChecked(),
+            "capture_guides": self._guides.isChecked(),
+            "same_tool_color": self._same_color.isChecked(),
+            "ocr/direct_copy": self._ocr_copy.isChecked(),
+            "ocr/auto_pin": self._ocr_pin.isChecked(),
+            "capture/confirm_exit": self._confirm_exit.isChecked(),
+        })
+        if autostart:
+            values["autostart"] = self._autostart.isChecked()
+        before = {key: self._s.value(key) for key in values if self._s.contains(key)}
+        for key, value in values.items():
+            self._s.setValue(key, value)
         self._s.sync()
         if self._s.status() != QSettings.NoError:
-            show_message(self, "无法保存设置", "配置目录不可写，请将应用解压到有写入权限的目录。")
+            # 没写进磁盘：内存里的配置、已注册的快捷键、注册表里的自启都回到打开设置前。
+            for key in values:
+                if key in before:
+                    self._s.setValue(key, before[key])
+                else:
+                    self._s.remove(key)
+            message = "配置目录不可写，请将应用解压到有写入权限的目录。" + self._restore_hotkeys(previous_hotkeys)
+            if autostart and self._original_autostart != self._autostart.isChecked():
+                try:
+                    _write_autostart(self._original_autostart)
+                except OSError as exc:
+                    message += f"\n开机自启未能恢复：{exc}，请重新设置。"
+            show_message(self, "无法保存设置", message)
             return
         self.accept()
         if self._language.currentData() != self._original_language:
