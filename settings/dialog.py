@@ -35,17 +35,17 @@ def check_updates(parent=None):
             show_message(parent, "无法打开发布页", "系统未能打开浏览器，请检查默认浏览器设置后重试。")
 
 
-def _read_autostart() -> bool:
-    """读开机自启（Windows）。注册表无值视为关闭。"""
+def _read_autostart():
+    """读开机自启（Windows）：注册表里原样的（命令, 类型），无值视为关闭返回 None。
+    保留原值而不是开关：自启可能指向另一个目录的版本，保存失败回滚时要原样写回。"""
     if sys.platform != "win32":
-        return False
+        return None
     import winreg
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
-            winreg.QueryValueEx(k, _AUTOSTART_VALUE)
-        return True
+            return winreg.QueryValueEx(k, _AUTOSTART_VALUE)
     except OSError:
-        return False
+        return None
 
 
 def _write_autostart(enabled: bool):
@@ -60,6 +60,17 @@ def _write_autostart(enabled: bool):
                 winreg.DeleteValue(k, _AUTOSTART_VALUE)
             except FileNotFoundError:
                 pass  # 已关闭时再次保存，无需创建值。
+
+
+def _restore_autostart(entry):
+    """保存失败时把自启原样写回：entry 是打开设置时读到的（命令, 类型），空表示原来没开。"""
+    if not entry:
+        _write_autostart(False)
+        return
+    import winreg
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_KEY,
+                           0, winreg.KEY_SET_VALUE) as k:
+        winreg.SetValueEx(k, _AUTOSTART_VALUE, 0, entry[1], entry[0])
 
 
 def _autostart_command() -> str:
@@ -248,9 +259,9 @@ class SettingsDialog(BaseDialog):
             self._autostart.setEnabled(False)
             self._autostart.setToolTip("仅 Windows 支持")
         else:
-            self._autostart.setChecked(_read_autostart())
-        # 保存失败时把注册表恢复成打开设置时的样子。
-        self._original_autostart = self._autostart.isChecked()
+            # 保存失败时把注册表恢复成打开设置时的样子。
+            self._original_autostart = _read_autostart()
+            self._autostart.setChecked(bool(self._original_autostart))
         page.group("启动").check(self._autostart)
         return page
 
@@ -452,9 +463,9 @@ class SettingsDialog(BaseDialog):
                 else:
                     self._s.remove(key)
             message = "配置目录不可写，请将应用解压到有写入权限的目录。" + self._restore_hotkeys(previous_hotkeys)
-            if autostart and self._original_autostart != self._autostart.isChecked():
+            if autostart:
                 try:
-                    _write_autostart(self._original_autostart)
+                    _restore_autostart(self._original_autostart)
                 except OSError as exc:
                     message += f"\n开机自启未能恢复：{exc}，请重新设置。"
             show_message(self, "无法保存设置", message)
