@@ -17,13 +17,22 @@ from export import save_image
 from ocr import OCRController, OCRDocument, add_text_layer
 
 
-def _confirm_exit(parent, lost="未复制或保存的标注"):
-    """有未保存的标注或改过的识别文字时确认退出；勾选“不再提醒”后直接退出，可在设置里恢复。"""
+# 开着的标注窗口：托盘退出前逐个按 Esc 的规则确认。
+_open_windows = []
+
+
+def confirm_discard_all():
+    """托盘退出前调用；任何一个标注窗口取消，就不退出。"""
+    return all(window.confirm_discard("退出 GridStruct-V2", "退出") for window in list(_open_windows))
+
+
+def _confirm_exit(parent, lost="未复制或保存的标注", question="退出截图", confirm_text="退出"):
+    """有未保存的标注或改过的识别文字时确认；勾选“不再提醒”后直接通过，可在设置里恢复。"""
     settings = get_settings()
     if not settings.value("capture/confirm_exit", True, type=bool):
         return True
-    dialog = MessageDialog(parent, "退出截图", f"确认退出截图？{lost}将丢失。",
-                           confirm_text="退出", cancel_text="取消", checkbox_text="不再提醒")
+    dialog = MessageDialog(parent, question, f"确认{question}？{lost}将丢失。",
+                           confirm_text=confirm_text, cancel_text="取消", checkbox_text="不再提醒")
     accepted = dialog.exec() == QDialog.Accepted
     if accepted and dialog.checkbox.isChecked():
         settings.setValue("capture/confirm_exit", False)
@@ -38,7 +47,7 @@ class AnnotationWindow(QWidget):
 
     def __init__(self, pixmap: QPixmap, pos: QPoint, theme_mode: str = "light", *,
                  scrollable: bool = False, capture_region: QRect | None = None,
-                 toolbar_pos: QPoint | None = None):
+                 toolbar_pos: QPoint | None = None, longshot: bool = True):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | floating_window_type())
         self._mode = theme_mode
         self._capture_position = QPoint(pos)
@@ -67,6 +76,9 @@ class AnnotationWindow(QWidget):
         self._toolbar.set_copy_text_selected(False)
         # 框选阶段拖动过工具条，进入标注后留在同一位置。
         self._toolbar.set_manual_position(toolbar_pos)
+        if not longshot:
+            # 贴图上标注：贴图不对应屏幕上可滚动的区域，长截图无从谈起。
+            self._toolbar.hide_action("longshot")
         self._options = ToolOptions(self._canvas)
         self._toolbar.set_options_widget(self._options)
         self._toolbar.toolSelected.connect(self._on_tool)
@@ -82,6 +94,7 @@ class AnnotationWindow(QWidget):
         self._position_toolbar()
         self._toolbar.show()
         QApplication.instance().installEventFilter(self)
+        _open_windows.append(self)
         if scrollable:
             # 等窗口布局完成后再定位，避免 QGraphicsView 首次显示时自动居中。
             QTimer.singleShot(0, self, self._scroll_to_start)
@@ -237,7 +250,9 @@ class AnnotationWindow(QWidget):
             open_table(pixmap, document.results if document is not None and document.matches(pixmap) else None)
             self.close()
         elif action == "longshot":
-            self.longshotRequested.emit(QRect(self._capture_region))
+            # 改做长截图会关掉当前截图，和 Esc 同一条确认规则。
+            if self.confirm_discard("改做长截图", "开始长截图"):
+                self.longshotRequested.emit(QRect(self._capture_region))
         elif action == "pin":
             from pin import show_pin
             pixmap = self._render()
@@ -261,14 +276,18 @@ class AnnotationWindow(QWidget):
         self._canvas.restore_focus()
 
     def _request_cancel(self):
+        if self.confirm_discard():
+            self.close()
+
+    def confirm_discard(self, question="退出截图", confirm_text="退出"):
+        """会丢掉这张截图的结束方式（Esc、关闭、托盘退出、改做长截图）都先经过这里：
+        有未复制/保存的标注或改过的识别文字时确认，没有就直接通过。"""
         self._canvas.finish_editing()
         annotated, edited = not self._canvas._undo.isClean(), self._ocr_edited()
         if not (annotated or edited):
-            self.close()
-            return
+            return True
         lost = "、".join(text for text, show in (("改过的识别文字", edited), ("未复制或保存的标注", annotated)) if show)
-        if _confirm_exit(self, lost):
-            self.close()
+        return _confirm_exit(self, lost, question, confirm_text)
 
     def eventFilter(self, obj, event):
         if event.type() != QEvent.KeyPress or not isinstance(obj, QWidget):
@@ -332,6 +351,8 @@ class AnnotationWindow(QWidget):
 
     def closeEvent(self, event):
         QApplication.instance().removeEventFilter(self)
+        if self in _open_windows:
+            _open_windows.remove(self)
         self._ocr.cancel()
         self._canvas.clear_tool()
         self._toolbar.close()

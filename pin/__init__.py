@@ -71,7 +71,7 @@ def _annotate(window):
     from annotate import AnnotationWindow
     mode = QApplication.instance().property("theme_mode") or "light"
     # 标注窗口按原图 100% 打开，放在贴图内容的位置上。
-    annotation = AnnotationWindow(window._base, window._content.mapToGlobal(QPoint(0, 0)), mode)
+    annotation = AnnotationWindow(window._base, window._content.mapToGlobal(QPoint(0, 0)), mode, longshot=False)
     annotation.finished.connect(lambda pixmap: _replace_pin(window, pixmap))
     annotation.cancelled.connect(window.show)
     # 标注窗口没有父对象，必须有人持有 Python 引用，否则会被回收。

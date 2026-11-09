@@ -25,6 +25,7 @@ from styles import tokens as T
 from ui import app_icon, tinted_icon, show_desktop_check, show_message
 from ui.motion import enable_menu_effects
 from tray import create_tray, GlobalHotkey, HOTKEY_DEFAULTS, parse_hotkey
+from annotate import confirm_discard_all
 from capture import ScreenshotFlow, ScreenManager
 
 from pin import show_pin_from_clipboard, restore_pins, save_pins, shutdown_pins, disable_click_through
@@ -87,7 +88,8 @@ def main() -> int:
         tray_icon.setIcon(app_icon(mode))
 
     def _exit():
-        if shutdown_pins():
+        # 贴图标注、长截图结果标注不盖住任务栏，托盘可点：先按 Esc 的规则确认未保存的标注。
+        if confirm_discard_all() and shutdown_pins():
             flow.cancel()
             app.quit()
 

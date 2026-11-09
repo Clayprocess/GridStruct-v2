@@ -85,6 +85,7 @@ class AnnotationCanvas(QGraphicsView):
         """返回 False 表示该工具未实现（调用方打日志）。"""
         if tool_id not in self.styles:
             return False
+        self._end_stroke()
         self._clear_brush_preview()
         self._finish_tool()
         self._style = self.styles[tool_id]
@@ -104,6 +105,7 @@ class AnnotationCanvas(QGraphicsView):
         return True
 
     def clear_tool(self):
+        self._end_stroke()
         self._finish_tool()
         self._clear_brush_preview()
         self._tool = None
@@ -235,6 +237,10 @@ class AnnotationCanvas(QGraphicsView):
                 self._undo.push(SerialIndexCommand(item, item.index + delta))
 
     def finish_editing(self):
+        if self._drawing:
+            # 按住鼠标时按 Esc/Enter：正在画的这一笔先提交，退出确认才知道有未保存的标注。
+            self._end_stroke()
+            return True
         if self._comment_edit is not None:
             self._finish_comment()
             return True
@@ -274,6 +280,15 @@ class AnnotationCanvas(QGraphicsView):
         for item in selected:
             item.setSelected(True)
         return pm
+
+    def _end_stroke(self):
+        """按住鼠标时切工具（Shift+数字）或清工具：这一笔按松开提交。
+        否则旧笔留在画面里却不进撤销栈，新工具还会收到没按下过的拖动。"""
+        if not self._drawing:
+            return
+        self._drawing = False
+        position = self.mapToScene(self.viewport().mapFromGlobal(QCursor.pos()))
+        self._tool.on_release(position, self._undo)
 
     def _finish_tool(self):
         self._finish_comment()
