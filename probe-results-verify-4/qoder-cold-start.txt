@@ -1,0 +1,7 @@
+idle=59.0s
+foreground 134078 covered False
+after settings covered False
+===== cold run 16:17:21 =====
+qoder cn.exe 点数 160，首次 69.0ms，命中中位 3.1ms（最大 69.0），含补父链中位 3.1ms，超过 300ms 的命中 0 次，一次性大批量 0 次，平均层数 3.6
+  最内层大小：最小 (249, 1392)，中位 (2560, 1392)
+restored
