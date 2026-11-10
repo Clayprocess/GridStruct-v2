@@ -1,4 +1,5 @@
 """截图里的识别卡片：全文可改、与截图双向定位、按键归属、改过再标注、复制文字，及工具条圆角与明暗截图。
+另有 OCR 状态契约：9 种 OCRState 的取值、stateChanged 收到的文本，以及截图工具条和贴图对每种状态的表现。
 
 不跑 OCR 模型、不用用户截图：合成图 + 手写识别结果，经 adopt_document 交给截图窗口。
 """
@@ -55,6 +56,59 @@ def open_window(app, pixmap, at=QPoint(200, 120), mode="light"):
     assert window._ocr.adopt_document(document, window._render())
     flush(app)
     return window, document
+
+
+# OCR 状态契约：改 OCRState 或界面判断前先改这张表，改完这里仍要通过。
+# 值是旧版就在用的字符串（stateChanged、诊断日志、旧比较都依赖它）；waiting 显示转圈和“取消”，retryable 显示“重试”。
+STATE_CONTRACT = {
+    "idle": (False, False),
+    "queued": (True, False),
+    "loading": (True, False),
+    "recognizing": (True, False),
+    "completed": (False, False),
+    "empty": (False, False),
+    "failed": (False, True),
+    "timeout": (False, True),
+    "cancelled": (False, True),
+}
+
+
+def check_state_contract(app):
+    from ocr import OCRState
+    import pin
+    assert [state.value for state in OCRState] == list(STATE_CONTRACT), \
+        f"OCRState 增删或改名了，先更新 STATE_CONTRACT 和各界面：{[state.value for state in OCRState]}"
+    for state in OCRState:
+        assert str(state) == f"{state}" == state.value == state, f"{state!r} 的文本不再是原来的值"
+        assert (state.waiting, state.retryable) == STATE_CONTRACT[state.value], f"{state.value} 的界面分类变了"
+
+    window, _ = open_window(app, sample())
+    toolbar = window._toolbar
+    received = []
+    window._ocr.stateChanged.connect(received.append)
+    with patch("pin._auto_recognize"):
+        pinned = pin.show_pin(sample())
+    flush(app)
+    pinned._ensure_ocr_controller()
+    durations = []
+    pinned._show_hud = lambda _text, duration=T.PIN_HUD_MS: durations.append(duration)
+    for value, (waiting, retryable) in STATE_CONTRACT.items():
+        state = OCRState(value)
+        # 走控制器的真实出口：stateChanged 给旧接收方，statusChanged 驱动工具条和贴图。
+        window._ocr._set_state(state, f"状态 {value}")
+        pinned._ocr_controller._set_state(state, f"状态 {value}")
+        flush(app)
+        signal = received[-1]
+        assert type(signal) is str and signal == value, f"stateChanged(str) 收到的不是原来的文本：{signal!r}"
+        shown = (not toolbar._ocr_spinner.isHidden(), not toolbar._ocr_buttons["ocr_cancel"].isHidden(),
+                 not toolbar._ocr_buttons["ocr"].isHidden())
+        assert shown == (waiting, waiting, retryable), f"{value}：工具条（转圈, 取消, 重试）显示为 {shown}"
+        assert (durations[-1] == 0) == waiting, f"{value}：贴图提示应在等待时常驻、结束后淡出"
+    window._ocr._set_state(OCRState.IDLE, "")
+    window.close()
+    pinned._allow_close = True
+    pinned.close()
+    flush(app)
 
 
 def check_card(app):
@@ -225,6 +279,7 @@ def main():
     apply_theme(app, "light")
     with TemporaryDirectory() as folder, patch("settings.storage.data_directory", return_value=Path(folder)):
         try:
+            check_state_contract(app)
             check_card(app)
             check_short(app)
             check_flip(app)
@@ -233,6 +288,7 @@ def main():
         finally:
             # 没进事件循环不会发 aboutToQuit，手动让 OCR 服务线程收尾，否则进程退出时 Qt 中止（退出码 134）。
             app.aboutToQuit.emit()
+    print("PASS: OCR state contract: 9 states keep their text, stateChanged stays str, toolbar/pin show waiting/retry per state")
     print("PASS: card shows editable full text, layout/pending/F8, locate both ways with the screenshot")
     print("PASS: typing keys stay in the text box, Esc/re-OCR/re-layout confirm when edited, copy text ends capture")
     print("PASS: edited text survives annotating (no locate), unedited is invalidated; flips above when no room")

@@ -280,8 +280,9 @@ class AnnotationWindow(QWidget):
             self.close()
 
     def confirm_discard(self, question="退出截图", confirm_text="退出"):
-        """会丢掉这张截图的结束方式（Esc、关闭、托盘退出、改做长截图）都先经过这里：
-        有未复制/保存的标注或改过的识别文字时确认，没有就直接通过。"""
+        """用户主动丢弃这张截图（Esc、工具条关闭/取消、托盘退出、改做长截图）先经过这里：
+        有未复制/保存的标注或改过的识别文字时确认，没有就直接通过。
+        复制、贴图、转表格等已把内容交出去的出口直接 close()，不经过这里。"""
         self._canvas.finish_editing()
         annotated, edited = not self._canvas._undo.isClean(), self._ocr_edited()
         if not (annotated or edited):
