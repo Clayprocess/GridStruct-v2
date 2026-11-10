@@ -354,6 +354,7 @@ def _win32_api():
         "GetWindowLongW": ([wintypes.HWND, ctypes.c_int], ctypes.c_long),
         "ScreenToClient": ([wintypes.HWND, ctypes.POINTER(wintypes.POINT)], wintypes.BOOL),
         "ChildWindowFromPointEx": ([wintypes.HWND, wintypes.POINT, wintypes.UINT], wintypes.HWND),
+        "EnumChildWindows": ([wintypes.HWND, ctypes.c_void_p, wintypes.LPARAM], wintypes.BOOL),
         "SendMessageTimeoutW": ([wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
                                 wintypes.LPARAM, wintypes.UINT, wintypes.UINT,
                                 ctypes.POINTER(ctypes.c_size_t)], ctypes.c_ssize_t),
@@ -491,6 +492,10 @@ _BIG_FETCH = 100
 _UIA_PROCESSES = frozenset({"excel.exe", "winword.exe", "zoom.exe"})
 # Windows 11 任务栏是 XAML 画的，MSAA 取不到单个图标，UIA 能取到每个按钮。
 _UIA_CLASSES = frozenset({"Shell_TrayWnd", "Shell_SecondaryTrayWnd"})
+# UIA 一次点查询最多看的节点数（含鼠标的分支都往下试，要有上限）。
+_UIA_VISITS = 64
+# 取到 0 个子元素的节点，过这么久再取一次。
+_UIA_EMPTY_RETRY_S = 0.5
 
 
 def _valid_rect(rect, x, y, minimum=8):
@@ -639,8 +644,32 @@ class _Accessibility:
                 self._uia_path(hwnd, *point)
 
     def _wake(self, hwnd):
-        """取一次客户区名字：Chromium/Electron 收到无障碍查询才打开完整的树（同 PixPin），每个窗口一次。"""
+        """取一次客户区名字：Chromium/Electron 收到无障碍查询才打开完整的树（同 PixPin），每个窗口一次。
+
+        网页内容的树挂在子窗口 Chrome_RenderWidgetHostHWND 上，只问顶层窗口时 Electron 程序（Qoder）
+        常常不建网页的树；UIA 的 ElementFromPoint 能取到正是因为它问到了这个子窗口（2026-11 真机第三轮），
+        所以子窗口也各问一次。
+        """
         self._woken.add(hwnd)
+        for target in [hwnd] + self._render_widgets(hwnd):
+            self._read_name(target)
+
+    def _render_widgets(self, hwnd):
+        """窗口下的 Chromium 网页内容子窗口（最多 8 个）。"""
+        ctypes = self._ctypes
+        from ctypes import wintypes
+        found = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def collect(child, _param):
+            if self._class(child) == "Chrome_RenderWidgetHostHWND":
+                found.append(child)
+            return len(found) < 8
+
+        self._user32.EnumChildWindows(hwnd, collect, 0)
+        return found
+
+    def _read_name(self, hwnd):
         ctypes = self._ctypes
         client = ctypes.c_void_p()
         if self._oleacc.AccessibleObjectFromWindow(hwnd, 0xFFFFFFFC, ctypes.byref(self._iid),
@@ -818,18 +847,20 @@ def _shallow(rects, window_rect):
 
 
 class _UiaTree:
-    """UIA 逐层找含鼠标的子元素，子元素和矩形每个节点只取一次。
+    """UIA 逐层找含鼠标的子元素，子元素、矩形和控件类型每个节点只取一次。
 
     不用 ElementFromPoint：它按屏幕找最上层窗口，截图时会命中我们自己的遮罩。
     截图期间画面是冻结的，取过的子元素在整个会话里都有效；Excel 表格区一次取回所有可见单元格的矩形。
     虚表（UIAutomationClient.h）：IUIAutomation ElementFromHandle 6、CreateCacheRequest 20、
     CreateTrueCondition 21；CacheRequest AddProperty 3；Element FindAllBuildCache 8、
-    CachedBoundingRectangle 75；ElementArray Length 3、GetElement 4。
+    CachedControlType 53、CachedBoundingRectangle 75；ElementArray Length 3、GetElement 4。
     """
 
     _CLSID = "ff48dba4-60ef-4201-aa87-54103eef594e"
     _IID = "30cbe57d-d9d0-452a-ab13-7ac5ac4825ee"
-    _BOUNDING_RECTANGLE = 30001
+    _BOUNDING_RECTANGLE, _CONTROL_TYPE = 30001, 30003
+    # 控件类型 Custom 50025、Group 50026、Window 50032、Pane 50033：没有子元素时算空容器。
+    _CONTAINERS = frozenset({50025, 50026, 50032, 50033})
     _CHILDREN = 2  # TreeScope_Children
 
     def __init__(self, call, release, ole32):
@@ -842,22 +873,43 @@ class _UiaTree:
         self._request, self._condition = ctypes.c_void_p(), ctypes.c_void_p()
         call(self._automation, 20, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(self._request))
         call(self._request, 3, [ctypes.c_int], self._BOUNDING_RECTANGLE)
+        call(self._request, 3, [ctypes.c_int], self._CONTROL_TYPE)
         call(self._automation, 21, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(self._condition))
         self._roots = {}  # hwnd -> 窗口元素
         self._children = {}  # 元素地址 -> [(子元素, 矩形)]
+        self._empty_at = {}  # 元素地址 -> 上次取到 0 个子元素的时间
+        self._types = {}  # 元素地址 -> 控件类型
 
     def path(self, hwnd, x, y):
-        """由外到内返回含鼠标的元素矩形；同一层有多个含鼠标的子元素时取最小的。"""
+        """由外到内返回含鼠标的元素矩形，取最内层最小的一条路径。"""
         self.big_fetch = False
-        node, rects = self._root(hwnd), []
-        for _ in range(_Accessibility._MAX_DEPTH):
-            inside = [(child, rect) for child, rect in self._kids(node) if rect.contains(x, y)
-                      and rect.width() >= _MIN_ELEMENT and rect.height() >= _MIN_ELEMENT]
-            if not inside:
-                break
-            node, rect = min(inside, key=lambda item: _area(item[1]))
-            rects.append(rect)
-        return rects
+        self._budget = _UIA_VISITS
+        return self._best(self._root(hwnd), x, y, _Accessibility._MAX_DEPTH)[0]
+
+    def _best(self, node, x, y, depth):
+        """node 之下含鼠标的最深一串矩形，以及它是否落在实际控件上。
+
+        同一层有多个含鼠标的子元素时先走最小的；走到底只是没有子元素的空容器（窗格/分组）时，
+        换同层其他含鼠标的子元素往下试：任务栏上有盖在图标上方的空整组容器，图标在另一个和
+        任务栏等宽的子元素下面（2026-11 真机第三轮）；Chromium 也有和内容等大的空子窗口。
+        按钮、滚动条这类实际控件即使没有子元素也直接用。都只到空容器时取最内层最小的那条。
+        最多看 _UIA_VISITS 个节点，防止大树上走太久。
+        """
+        if depth <= 0 or self._budget <= 0:
+            return [], False
+        self._budget -= 1
+        inside = sorted(((child, rect) for child, rect in self._kids(node) if rect.contains(x, y)
+                         and rect.width() >= _MIN_ELEMENT and rect.height() >= _MIN_ELEMENT),
+                        key=lambda item: _area(item[1]))
+        fallback = []
+        for child, rect in inside:
+            below, solid = self._best(child, x, y, depth - 1)
+            found = [rect] + below
+            if solid or (not below and self._types.get(child.value) not in self._CONTAINERS):
+                return found, True
+            if not fallback or _area(found[-1]) < _area(fallback[-1]):
+                fallback = found
+        return fallback, False
 
     def _root(self, hwnd):
         element = self._roots.get(hwnd)
@@ -869,9 +921,20 @@ class _UiaTree:
         return element
 
     def _kids(self, node):
+        """node 的 [(子元素, 矩形)]；取过的直接用，取到 0 个的过 _UIA_EMPTY_RETRY_S 再取。
+
+        Chromium/Electron 被唤醒后是异步建树的，刚唤醒时取到的空子元素不能一直当真。
+        """
         kids = self._children.get(node.value)
-        if kids is not None:
+        if kids or (kids is not None and time.monotonic() - self._empty_at[node.value] < _UIA_EMPTY_RETRY_S):
             return kids
+        kids = self._children[node.value] = self._fetch(node)
+        if not kids:
+            self._empty_at[node.value] = time.monotonic()
+        self.big_fetch |= len(kids) >= _BIG_FETCH
+        return kids
+
+    def _fetch(self, node):
         from ctypes import wintypes
         found, kids = ctypes.c_void_p(), []
         self._call(node, 8, [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
@@ -886,14 +949,18 @@ class _UiaTree:
                 kids.append((element, None))
                 self._call(element, 75, [ctypes.POINTER(wintypes.RECT)], ctypes.byref(rc))
                 kids[-1] = (element, QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top))
+                kind = ctypes.c_int()
+                try:
+                    self._call(element, 53, [ctypes.POINTER(ctypes.c_int)], ctypes.byref(kind))  # CachedControlType
+                except OSError:
+                    pass  # 取不到类型就当实际控件，不影响矩形
+                self._types[element.value] = kind.value
         except OSError:
             for element, _rect in kids:
                 self._release(element)
             raise
         finally:
             self._release(found)
-        self._children[node.value] = kids
-        self.big_fetch |= len(kids) >= _BIG_FETCH
         return kids
 
     def close(self):

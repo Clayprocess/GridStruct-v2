@@ -51,7 +51,8 @@ def main():
                     kids = uia._kids(node)
                     inside = [(c, r) for c, r in kids if r.contains(x, y)]
                     empty = sum(1 for _c, r in kids if r.isEmpty())
-                    print(f"  第 {depth} 层：子元素 {len(kids)} 个，空矩形 {empty} 个，含该点 {[r.getRect() for _c, r in inside]}")
+                    print(f"  第 {depth} 层：子元素 {len(kids)} 个，空矩形 {empty} 个，"
+                          f"含该点 {[(r.getRect(), uia._types.get(c.value)) for c, r in inside]}（矩形, 控件类型）")
                     if not inside:
                         break
                     node = min(inside, key=lambda item: item[1].width() * item[1].height())[0]

@@ -43,6 +43,7 @@ class FakeAccessible(snap._Accessibility):
         self._uia = FakeUiaTree({})  # 默认 UIA 什么也取不到
         self.browser_hwnds = set(browsers)
         self.uia_hwnds = set(uia)
+        self.widgets = {}  # hwnd -> Chromium 网页内容子窗口
         self.cold = cold
         self.name_calls = 0
         self._com_owned = False
@@ -76,6 +77,9 @@ class FakeAccessible(snap._Accessibility):
 
     def _is_browser(self, hwnd):
         return hwnd in self.browser_hwnds
+
+    def _render_widgets(self, hwnd):
+        return self.widgets.get(hwnd, [])
 
     def _uses_uia(self, hwnd):
         return hwnd in self.uia_hwnds
@@ -579,24 +583,59 @@ def check_completion_during_timeout_check():
 
 
 class FakeUiaTree(snap._UiaTree):
-    """tree: {节点: [(子节点, 矩形)]}，记录每个节点取子元素的次数。"""
+    """tree: {节点: [(子节点, 矩形)]}，记录每个节点取子元素的次数。types: {节点: 控件类型}，默认按钮。"""
 
-    def __init__(self, tree):
+    def __init__(self, tree, types=None):
         self.tree, self.fetched, self.closed, self.big_fetch = tree, [], False, False
-        self._children = {}
+        self._children, self._empty_at, self._types = {}, {}, dict(types or {})
 
     def _root(self, _hwnd):
         return SimpleNamespace(value="window")
 
-    def _kids(self, node):
-        if node.value not in self._children:
-            self.fetched.append(node.value)
-            self._children[node.value] = [(SimpleNamespace(value=name), rect) for name, rect in self.tree.get(node.value, [])]
-            self.big_fetch |= len(self._children[node.value]) >= snap._BIG_FETCH
-        return self._children[node.value]
+    def _fetch(self, node):
+        self.fetched.append(node.value)
+        for name, _rect in self.tree.get(node.value, []):
+            self._types.setdefault(name, 50000)
+        return [(SimpleNamespace(value=name), rect) for name, rect in self.tree.get(node.value, [])]
 
     def close(self):
         self.closed = True
+
+
+def check_uia_dead_ends():
+    """最小的含鼠标子元素是空容器时换路：任务栏图标在等宽的子元素下面；Chromium 刚唤醒取到的空结果会重取。"""
+    pane, button = 50033, 50000
+    bar, legacy, bridge = QRect(0, 1392, 2560, 48), QRect(55, 1392, 220, 48), QRect(0, 1392, 2560, 48)
+    icon, tray_icon = QRect(116, 1392, 44, 48), QRect(2400, 1392, 24, 48)
+    tree = {"window": [("bar", bar), ("legacy", legacy), ("tray", QRect(2271, 1392, 289, 48))],
+            "bar": [("bridge", bridge)],
+            "bridge": [("icon", icon), ("tray_icon", tray_icon)]}
+    types = {"bar": pane, "legacy": pane, "tray": pane, "bridge": pane}
+    uia = FakeUiaTree(tree, types)
+    assert uia.path(1, 138, 1416) == [bar, bridge, icon], uia.path(1, 138, 1416)
+    assert uia.path(1, 2410, 1416) == [bar, bridge, tray_icon], uia.path(1, 2410, 1416)
+    assert uia.path(1, 60, 1416) == [legacy], "都只到空容器时取最小的"
+    # 实际控件即使没有子元素也直接用，不去翻同层更大的分支（Excel 滚动条压在表格上）。
+    uia = FakeUiaTree({"window": [("grid", QRect(0, 0, 800, 500)), ("scroll", QRect(780, 0, 20, 500))],
+                       "grid": [("cell", QRect(720, 0, 80, 20))]})
+    assert uia.path(1, 790, 10) == [QRect(780, 0, 20, 500)]
+    assert "grid" not in uia.fetched, uia.fetched
+    # 节点数有上限：很宽的一层全是含鼠标的空容器时不会全部走一遍。
+    wide = {"window": [(f"p{i}", QRect(0, 0, 100 + i, 100)) for i in range(200)]}
+    uia = FakeUiaTree(wide, {f"p{i}": pane for i in range(200)})
+    assert uia.path(1, 50, 50) == [QRect(0, 0, 100, 100)]
+    assert len(uia.fetched) == snap._UIA_VISITS, len(uia.fetched)
+    # Chromium 唤醒后异步建树：取到 0 个子元素的节点过一会儿再取。
+    tree = {"window": [("web", QRect(0, 0, 800, 600))]}
+    uia = FakeUiaTree(tree, {"web": pane})
+    assert uia.path(1, 20, 60) == [QRect(0, 0, 800, 600)]
+    tree["web"] = [("button", QRect(10, 50, 30, 30))]
+    assert uia.path(1, 20, 60) == [QRect(0, 0, 800, 600)], "刚取过的空结果先照用"
+    uia._empty_at["web"] -= snap._UIA_EMPTY_RETRY_S
+    assert uia.path(1, 20, 60) == [QRect(0, 0, 800, 600), QRect(10, 50, 30, 30)]
+    assert uia.fetched.count("web") == 2 and uia.fetched.count("window") == 1, uia.fetched
+    print("PASS: UIA descent backs out of empty containers (taskbar groups), keeps leaf controls, "
+          "is bounded, and refetches empty children after a delay")
 
 
 def check_uia():
@@ -659,6 +698,14 @@ def check_uia():
     assert provider.name_calls == 1, provider.name_calls
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    # Qoder：顶层窗口和网页内容子窗口都唤醒一次。
+    provider = FakeAccessible(page(), browsers={1})
+    provider.widgets = {1: [7, 8]}
+    provider.warm(1, None)
+    provider.hit_path(1, 220, 155)
+    assert provider.name_calls == 3, provider.name_calls
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
     print("PASS: UIA path descends to the smallest element containing the point, caches children, falls back to MSAA; "
           "taskbar routes to UIA, unlisted Electron windows are woken and treated as browsers")
 
@@ -703,7 +750,7 @@ def check_warm():
 if __name__ == "__main__":
     failures = []
     for check in (check_hit_path, check_two_phase, check_detector, check_hung_query, check_stationary_refinement,
-                  check_completion_during_timeout_check, check_warm, check_uia):
+                  check_completion_during_timeout_check, check_warm, check_uia, check_uia_dead_ends):
         try:
             check()
         except AssertionError as error:
