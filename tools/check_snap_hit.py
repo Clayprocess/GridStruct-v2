@@ -27,14 +27,19 @@ class FakeAccessible(snap._Accessibility):
     """objects: {id: (rect, [子对象 id 或 ("item", 子元素编号, rect)])}，1 是窗口对象。
     deepest=True 模拟 Chrome：accHitTest 跳过中间层，直接返回最深的对象；
     也可给 {对象 id: 它命中时直接返回的对象 id}，只让某一层跳层。
-    broken: accLocation 会失败（抛 OSError）的对象 id。failing_parents: 这些对象各有一次 get_accParent 失败。"""
+    broken: accLocation 会失败（抛 OSError）的对象 id。failing_parents: 这些对象各有一次 get_accParent 失败。
+    browsers: 算作浏览器类程序的窗口 hwnd。cold: 前几次在非窗口对象上的 accHitTest 只返回自己（树还没建好）。"""
 
-    def __init__(self, objects, deepest=False, broken=()):
+    def __init__(self, objects, deepest=False, broken=(), browsers=(), cold=0):
         self._ctypes = ctypes
         self._iid = (ctypes.c_byte * 16)()
         self._roots = {}
         self._deep = None
         self._walks = {}
+        self._browsers = {}
+        self.browser_hwnds = set(browsers)
+        self.cold = cold
+        self.name_calls = 0
         self._com_owned = False
         self.objects = objects
         self.deepest = deepest
@@ -64,6 +69,9 @@ class FakeAccessible(snap._Accessibility):
 
         self._user32, self._oleacc = User32(), OleAcc()
 
+    def _is_browser(self, hwnd):
+        return hwnd in self.browser_hwnds
+
     @staticmethod
     def _id(pointer):
         return pointer.value if isinstance(pointer, ctypes.c_void_p) else pointer
@@ -73,6 +81,10 @@ class FakeAccessible(snap._Accessibility):
         if index == 24:  # accHitTest
             self.calls += 1
             x, y, variant = args[0], args[1], args[2]._obj
+            if self.cold and node != 1:
+                self.cold -= 1
+                variant.vt, variant.value.lVal = snap._Accessibility._VT_I4, 0
+                return 0
             for child in self.objects[node][1]:
                 if isinstance(child, tuple):
                     if child[2].contains(x, y):
@@ -102,6 +114,9 @@ class FakeAccessible(snap._Accessibility):
             args[0]._obj.value = None if parent is None else 1000 + parent
             if parent is not None:
                 self.acquired.append(1000 + parent)
+            return 0
+        if index == 10:  # get_accName
+            self.name_calls += 1
             return 0
         if index == 0:  # QueryInterface
             args[1]._obj.value = node - 1000
@@ -147,11 +162,27 @@ def page():
 
 
 class FakeUser32:
+    cursor = (0, 0)
+    foreground = 0
+
     @staticmethod
     def IsWindow(_hwnd):
         return True
 
     IsWindowVisible = IsWindow
+
+    @classmethod
+    def GetCursorPos(cls, point):
+        point._obj.x, point._obj.y = cls.cursor
+        return 1
+
+    @classmethod
+    def GetForegroundWindow(cls):
+        return cls.foreground
+
+    @staticmethod
+    def GetAncestor(hwnd, _flags):
+        return hwnd
 
 
 def settle(app, detector):
@@ -215,6 +246,30 @@ def check_hit_path():
     provider = FakeAccessible(page(), deepest=True, broken={9})
     for _ in range(20):
         full_path(provider, 220, 155)
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    # 浏览器类程序第一次命中只给大容器（树还没建好）：同一点再查一次，取更小的。
+    provider = FakeAccessible(page(), browsers={1}, cold=1)
+    assert provider.hit_path(1, 220, 155) == [BODY, TABLE, ROW, CELL, TEXT]
+    provider = FakeAccessible(page(), cold=1)
+    assert provider.hit_path(1, 220, 155) == [BODY], "非浏览器不做二次命中"
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    provider = FakeAccessible(page(), browsers={1})
+    calls = provider.calls
+    assert provider.hit_path(1, 220, 155) == [BODY, TABLE, ROW, CELL, TEXT]
+    assert provider.calls == calls + 12, "浏览器每次命中查两遍"
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    # 预热：建好窗口对象；浏览器再取一次客户区名字唤醒无障碍树。
+    provider = FakeAccessible(page())
+    provider.warm(1)
+    assert provider.opened == 1 and provider.name_calls == 0
+    provider = FakeAccessible(page(), browsers={1})
+    provider.warm(1)
+    assert provider.opened == 2 and provider.name_calls == 1, (provider.opened, provider.name_calls)
+    provider.hit_path(1, 220, 155)
+    assert provider.opened == 2, "预热过的窗口对象应复用"
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
     print("PASS: hit_path descends window → toolbar → tab → close button; ancestors() recovers skipped table/row, "
@@ -368,6 +423,9 @@ def check_hung_query():
         def ancestors(self, _interrupted):
             return None
 
+        def warm(self, _hwnd):
+            pass
+
         def close(self):
             pass
 
@@ -426,6 +484,9 @@ def check_stationary_refinement():
         def ancestors(self, _interrupted):
             return None
 
+        def warm(self, _hwnd):
+            pass
+
         def close(self):
             pass
 
@@ -470,6 +531,9 @@ def check_completion_during_timeout_check():
         def ancestors(self, _interrupted):
             return None
 
+        def warm(self, _hwnd):
+            pass
+
         def close(self):
             pass
 
@@ -500,10 +564,47 @@ def check_completion_during_timeout_check():
     print("PASS: query completion during timeout checking neither crashes nor blacklists the window")
 
 
+def check_warm():
+    """截图开始就在工作线程里预热鼠标下和前台窗口的无障碍对象；只吸附窗口时不开线程。"""
+    app = QApplication.instance() or QApplication([])
+    other = QRect(900, 0, 100, 100)
+    windows = [(7, WINDOW), (8, other)]
+    original = (FakeUser32.cursor, FakeUser32.foreground)
+    try:
+        FakeUser32.cursor, FakeUser32.foreground = (400, 300), 0
+        assert snap._warm_targets(FakeUser32, windows) == [7]
+        FakeUser32.foreground = 8
+        assert snap._warm_targets(FakeUser32, windows) == [7, 8]
+        FakeUser32.foreground = 99  # 自身遮罩等不在快照里的窗口不预热
+        assert snap._warm_targets(FakeUser32, windows) == [7]
+        FakeUser32.foreground = 0
+        provider = FakeAccessible(tree())
+        with patch.object(snap, "_IS_WIN", True), patch.object(snap, "_win32_api", FakeUser32), \
+                patch.object(snap, "_try_init_msaa", lambda: provider), \
+                patch.object(snap, "_snapshot_windows", lambda _ignored: windows):
+            detector = snap.RegionDetector(only_window=True)
+            assert detector._worker is None
+            detector.shutdown()
+            detector = snap.RegionDetector(only_window=False)
+            try:
+                deadline = time.monotonic() + 3
+                while provider.opened == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert provider.opened == 1 and provider.calls == 0, "应在首次悬停前建好窗口对象"
+                detector.detect(QPoint(115, 18))
+                settle(app, detector)
+                assert provider.opened == 1, "悬停复用预热的对象"
+            finally:
+                detector.shutdown()
+    finally:
+        FakeUser32.cursor, FakeUser32.foreground = original
+    print("PASS: capture start prewarms the window under the cursor and the foreground window")
+
+
 if __name__ == "__main__":
     failures = []
     for check in (check_hit_path, check_two_phase, check_detector, check_hung_query, check_stationary_refinement,
-                  check_completion_during_timeout_check):
+                  check_completion_during_timeout_check, check_warm):
         try:
             check()
         except AssertionError as error:

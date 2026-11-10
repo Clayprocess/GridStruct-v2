@@ -1,4 +1,5 @@
 # 每屏保留原生截图，控制器共享全局逻辑选区，避免混合 DPI 跨窗重采样。
+import time
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor, QRegion
 from PySide6.QtCore import Qt, QRect, QRectF, QPoint, QSize, Signal, QObject, QTimer, QEvent
@@ -16,6 +17,8 @@ _HANDLE = T.CAPTURE_HANDLE_SIZE
 _HANDLE_SLOP = 3
 _RESIZE_CURSORS = (Qt.SizeFDiagCursor, Qt.SizeVerCursor, Qt.SizeBDiagCursor, Qt.SizeHorCursor)
 _MIN_SIZE = 4
+# 滚轮切层级的防抖间隔（同 PixPin 50ms）。
+_WHEEL_GAP_S = 0.05
 _DIM = QColor(*T.CAPTURE_MASK)
 
 
@@ -47,6 +50,7 @@ class ScreenShotWindow(QObject):
         self._snap_anim.valueChanged.connect(self._snap_step)
         self._drag_mode = None
         self._drag_start = QPoint()
+        self._wheel_at = 0.0  # 上一个滚轮事件的时刻，用于层级切换防抖
         self._pending_snap = QRect()
         self._sel_start = QRect()
         self._pointer_pos = self._manager.cursor_position()
@@ -470,8 +474,12 @@ class ScreenShotWindow(QObject):
 
     def wheel(self, event):
         # 同 PixPin：未框选时滚轮在吸附到的元素和它的父/子元素之间切换。
-        if self._sel.isNull() and self._drag_mode is None:
-            self._snap.step_level(1 if event.angleDelta().y() > 0 else -1)
+        # 触控板、无级滚轮滑一下会连发很多事件：距上一个滚轮事件不到 50ms 的不再切层，一次滑动只切一层。
+        now = time.monotonic()
+        quiet, self._wheel_at = now - self._wheel_at >= _WHEEL_GAP_S, now
+        delta = event.angleDelta().y()
+        if quiet and delta and self._sel.isNull() and self._drag_mode is None:
+            self._snap.step_level(1 if delta > 0 else -1)
 
     def _handles(self):
         """8 手柄：返回 [(index, QRect)]，index 0..7 从左上顺时针。"""

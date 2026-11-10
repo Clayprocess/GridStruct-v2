@@ -21,6 +21,7 @@ class Detector(QObject):
         super().__init__()
         self.result = QRect()
         self.requests = []
+        self.steps = []
 
     def redetect(self, pos):
         self.requests.append(QPoint(pos))
@@ -28,6 +29,9 @@ class Detector(QObject):
 
     def shutdown(self):
         pass
+
+    def step_level(self, delta):
+        self.steps.append(delta)
 
 
 def controller(rects, dprs):
@@ -187,9 +191,36 @@ def check_handles():
     print("PASS: create/move/resize hide handles, preserve size tip, and restore handles on release")
 
 
+def check_wheel():
+    """一次触控板滑动（事件间隔不到 50ms）只切一层；停顿后再滚才切下一层；横向滚动不切。"""
+    c = controller([QRect(0, 0, 600, 400)], [1])
+    clock = [100.0]
+
+    def wheel(dy, after):
+        clock[0] += after
+        c.wheel(SimpleNamespace(angleDelta=lambda: QPoint(0, dy)))
+
+    try:
+        with patch("capture.overlay.time.monotonic", lambda: clock[0]):
+            for _ in range(8):
+                wheel(15, 0.012)
+            assert c._snap.steps == [1], c._snap.steps
+            wheel(120, 0.2)
+            wheel(-120, 0.2)
+            wheel(0, 0.2)
+            assert c._snap.steps == [1, 1, -1], c._snap.steps
+            c._sel = QRect(10, 10, 100, 100)
+            wheel(120, 0.2)
+            assert c._snap.steps == [1, 1, -1], "已有选区时滚轮不切层级"
+    finally:
+        c.close()
+    print("PASS: wheel steps one snap level per gesture, ignores horizontal scroll and active selections")
+
+
 if __name__ == "__main__":
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
     check_edges()
     check_repaint()
     check_handles()
+    check_wheel()

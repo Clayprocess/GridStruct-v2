@@ -10,7 +10,9 @@
 #   4. 最内层矩形仍包含鼠标时不再查询；换控件时保留旧框直到新结果到达，
 #      避免先退回外层容器再跳到新控件；
 #   5. 单次点命中（不含补祖先）超过 300ms 的窗口本次截图只用窗口矩形；
-#      卡住超过 2s 的线程丢弃、换新线程，那个窗口冷却 30s 后再试。
+#      卡住超过 2s 的线程丢弃、换新线程，那个窗口冷却 30s 后再试；
+#   6. 截图一开始就为鼠标下和前台窗口建好 IAccessible，浏览器类程序再“戳”一下客户区，
+#      Chromium 收到无障碍查询才建完整的树；浏览器第一次点命中常给大容器，同一点再查一次取小的。
 # 非 Windows 平台返回空（Linux 开发机不断）。
 
 import ctypes
@@ -52,7 +54,8 @@ def _result_channel():
 class _Worker:
     """一次截图会话一条线程；只引用结果转发器，不引用 detector，旧会话可以立即销毁。"""
 
-    def __init__(self, results):
+    def __init__(self, results, warm=()):
+        self._warm = tuple(warm)
         self._cond = Condition()
         self._pending = None
         self._current = None
@@ -97,6 +100,17 @@ class _Worker:
         global _abandoned
         provider = _try_init_msaa()
         try:
+            for hwnd in self._warm if provider is not None else ():
+                with self._cond:
+                    if self._stopped:
+                        return
+                    self.busy = (hwnd, time.monotonic())
+                try:
+                    provider.warm(hwnd)
+                except OSError as error:
+                    print(f"[GridStruct-V2] 预热无障碍对象失败：{error}", flush=True)
+                with self._cond:
+                    self.busy = None
             while True:
                 with self._cond:
                     while self._pending is None and not self._stopped:
@@ -167,6 +181,9 @@ class RegionDetector(QObject):
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setTimerType(Qt.PreciseTimer)
         self._refresh_timer.timeout.connect(self._refresh_hover)
+        if _IS_WIN and not only_window and _abandoned < _MAX_ABANDONED:
+            # 第一次悬停前就在工作线程里建好对象，首个框不用再等 AccessibleObjectFromWindow。
+            self._worker = _Worker(self._channel, _warm_targets(self._window_api, self._windows))
 
     def _refresh_hover(self):
         self.detect(self._last)
@@ -323,6 +340,9 @@ def _win32_api():
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     signatures = {
         "WindowFromPoint": ([wintypes.POINT], wintypes.HWND),
+        "GetCursorPos": ([ctypes.POINTER(wintypes.POINT)], wintypes.BOOL),
+        "GetForegroundWindow": ([], wintypes.HWND),
+        "GetWindowThreadProcessId": ([wintypes.HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD),
         "GetAncestor": ([wintypes.HWND, wintypes.UINT], wintypes.HWND),
         "GetWindowRect": ([wintypes.HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
         "IsWindow": ([wintypes.HWND], wintypes.BOOL),
@@ -357,8 +377,8 @@ def _usable_window(user32, dwm, hwnd, ignored_hwnd):
     if (not hwnd or excluded or not user32.IsWindow(hwnd)
             or not user32.IsWindowVisible(hwnd) or user32.IsHungAppWindow(hwnd)):
         return False
-    exstyle = user32.GetWindowLongW(hwnd, -20)
-    if exstyle & 0x80020 == 0x80020:
+    # 同 PixPin：鼠标穿透（WS_EX_TRANSPARENT）的窗口点不到，也不吸附。
+    if user32.GetWindowLongW(hwnd, -20) & 0x20:
         return False
     cloaked = wintypes.DWORD()
     result = dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
@@ -420,9 +440,22 @@ def _window_at(user32, x, y, ignored_hwnd):
     if target:
         result = ctypes.c_size_t()
         # 只发送无副作用的 WM_NULL，提前隔离尚未被系统标记 hung 的窗口。
-        if not user32.SendMessageTimeoutW(target, 0, 0, 0, 2, 100, ctypes.byref(result)):
+        if not user32.SendMessageTimeoutW(target, 0, 0, 0, 2, _PROBE_MS, ctypes.byref(result)):
             return None, covered
     return target, covered or target != root
+
+
+def _warm_targets(user32, windows):
+    """截图开始时要预热的窗口：鼠标下的窗口在前，再加前台窗口；只取快照里的（自身遮罩已排除）。"""
+    from ctypes import wintypes
+    known = {hwnd for hwnd, _rect in windows}
+    point = wintypes.POINT()
+    under = None
+    if user32.GetCursorPos(ctypes.byref(point)):
+        under = next((hwnd for hwnd, rect in windows if rect.contains(point.x, point.y)), None)
+    foreground = user32.GetForegroundWindow()
+    foreground = user32.GetAncestor(foreground, 2) if foreground else None
+    return [hwnd for hwnd in dict.fromkeys((under, foreground)) if hwnd in known]
 
 
 # 控件最小边长（物理像素）：任务栏、托盘、标签页关闭按钮这类小图标也要能框到。
@@ -435,6 +468,17 @@ _HIT_REUSE_S = 1.0
 _HUNG_S = 2.0
 _HUNG_COOLDOWN_S = 30.0
 _MAX_ABANDONED = 2
+# 跨进程前用 WM_NULL 探活的等待（同 PixPin 50ms），没响应的窗口不做 COM 调用。
+_PROBE_MS = 50
+# 浏览器及 Chromium/Electron 内核程序（进程名小写）：首次点命中常给大容器，需要唤醒和二次命中。
+_BROWSERS = frozenset({
+    "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe", "chromium.exe",
+    "arc.exe", "360se.exe", "360chrome.exe", "360chromex.exe", "qqbrowser.exe", "sogouexplorer.exe",
+    "2345explorer.exe", "liebao.exe", "maxthon.exe", "quark.exe", "msedgewebview2.exe",
+    "code.exe", "cursor.exe", "windsurf.exe", "feishu.exe", "lark.exe", "dingtalk.exe", "qq.exe",
+    "wxwork.exe", "slack.exe", "discord.exe", "notion.exe", "obsidian.exe", "typora.exe",
+    "postman.exe", "figma.exe", "ms-teams.exe", "teams.exe", "spotify.exe", "yuque.exe",
+})
 
 
 def _valid_rect(rect, x, y, minimum=8):
@@ -485,6 +529,7 @@ class _Accessibility:
         # (hwnd, 点命中路径) -> (补全后的路径, 是否走完)：鼠标停住时的重查不再重新走一遍父链；
         # 中途失败的只当已知祖先先用着，下次还会重试补全。
         self._walks = {}
+        self._browsers = {}  # hwnd -> 是否浏览器类程序
 
     def _call(self, pointer, index, argtypes, *args):
         ctypes = self._ctypes
@@ -514,7 +559,7 @@ class _Accessibility:
         ctypes = self._ctypes
         result = ctypes.c_size_t()
         # 跨进程 COM 遇到无响应窗口会一直卡住线程，先用无副作用的 WM_NULL 探一下。
-        if not self._user32.SendMessageTimeoutW(hwnd, 0, 0, 0, 2, 100, ctypes.byref(result)):
+        if not self._user32.SendMessageTimeoutW(hwnd, 0, 0, 0, 2, _PROBE_MS, ctypes.byref(result)):
             return None
         root = ctypes.c_void_p()
         if self._oleacc.AccessibleObjectFromWindow(hwnd, 0, ctypes.byref(self._iid), ctypes.byref(root)) < 0 or not root:
@@ -525,6 +570,32 @@ class _Accessibility:
             self._release(root)
             return None
         return entry
+
+    def _is_browser(self, hwnd):
+        known = self._browsers.get(hwnd)
+        if known is None:
+            known = self._browsers[hwnd] = _process_name(self._user32, hwnd) in _BROWSERS
+        return known
+
+    def warm(self, hwnd):
+        """建好窗口对象；浏览器类程序再取一次客户区名字，Chromium 由此打开完整无障碍树（同 PixPin）。"""
+        if self._root(hwnd) is None or not self._is_browser(hwnd):
+            return
+        ctypes = self._ctypes
+        client = ctypes.c_void_p()
+        if self._oleacc.AccessibleObjectFromWindow(hwnd, 0xFFFFFFFC, ctypes.byref(self._iid),
+                                                   ctypes.byref(client)) < 0 or not client:
+            return
+        name = ctypes.c_void_p()
+        try:
+            self._call(client, 10, [_Variant, ctypes.POINTER(ctypes.c_void_p)],
+                       _Variant(vt=self._VT_I4), ctypes.byref(name))
+        finally:
+            if name:
+                oleaut32 = ctypes.WinDLL("oleaut32")
+                oleaut32.SysFreeString.argtypes, oleaut32.SysFreeString.restype = [ctypes.c_void_p], None
+                oleaut32.SysFreeString(name)
+            self._release(client)
 
     def _location(self, accessible, child):
         ctypes = self._ctypes
@@ -591,17 +662,10 @@ class _Accessibility:
         self._walks[key] = (full, complete)
         return full
 
-    def hit_path(self, hwnd, x, y):
-        """由外到内返回 accHitTest 逐层命中的控件矩形（物理像素），跳过的层由 ancestors() 补。"""
+    def _descend(self, root, x, y):
+        """从窗口对象逐层 accHitTest。返回 (最深的完整对象或 None, 路径, 是否出错)，对象由调用方释放。"""
         ctypes = self._ctypes
-        self._drop_deep()
-        entry = self._root(hwnd)
-        if entry is None:
-            return []
-        root, root_rect = entry
-        accessible = root
-        rects = []
-        descended = False  # 是否下钻到过完整对象（不只是简单子元素）
+        accessible, rects = root, []
         try:
             for _ in range(self._MAX_DEPTH):
                 variant = _Variant()
@@ -621,7 +685,7 @@ class _Accessibility:
                         break
                     if accessible is not root:
                         self._release(accessible)
-                    accessible, descended = child, True
+                    accessible = child
                     rects.append(rect)
                 elif variant.vt == self._VT_I4 and variant.value.lVal != 0:
                     rect = self._location(accessible, variant.value.lVal)
@@ -630,22 +694,71 @@ class _Accessibility:
                     break
                 else:
                     break
-            if descended:
-                key = (hwnd, tuple(r.getRect() for r in rects))
-                walk = self._walks.get(key)
-                if walk is None or not walk[1]:
-                    self._deep, accessible = (accessible, x, y, root_rect, key, list(rects)), root
-                if walk is not None:
-                    # 补过父链的元素直接给已知的完整路径，静止刷新时不会先退回短路径、丢掉滚轮选中的层。
-                    rects = walk[0]
         except OSError:
-            # 某层不支持命中或定位：保留已经得到的外层路径。窗口对象本身失效（窗口已关）就丢掉缓存。
-            if accessible is root and not rects:
-                self._release(self._roots.pop(hwnd)[0])
-        finally:
+            # 某层不支持命中或定位：保留已经得到的外层路径。
             if accessible is not root:
                 self._release(accessible)
+            return None, rects, True
+        return (None if accessible is root else accessible), rects, False
+
+    def hit_path(self, hwnd, x, y):
+        """由外到内返回 accHitTest 逐层命中的控件矩形（物理像素），跳过的层由 ancestors() 补。"""
+        self._drop_deep()
+        entry = self._root(hwnd)
+        if entry is None:
+            return []
+        root, root_rect = entry
+        deep, rects, failed = self._descend(root, x, y)
+        if failed and not rects:
+            # 窗口对象本身失效（窗口已关）：丢掉缓存，下次重建。
+            self._release(self._roots.pop(hwnd)[0])
+            return rects
+        if not failed and self._is_browser(hwnd):
+            # 同 PixPin：浏览器第一次命中常给大容器，同一点再查一次，取更小且含鼠标的。
+            again, rects_again, failed_again = self._descend(root, x, y)
+            if not failed_again and rects_again and (not rects or _area(rects_again[-1]) < _area(rects[-1])):
+                deep, again, rects = again, deep, rects_again
+            if again is not None:
+                self._release(again)
+        if deep is not None:
+            key = (hwnd, tuple(r.getRect() for r in rects))
+            walk = self._walks.get(key)
+            if walk is None or not walk[1]:
+                self._deep, deep = (deep, x, y, root_rect, key, list(rects)), None
+            if walk is not None:
+                # 补过父链的元素直接给已知的完整路径，静止刷新时不会先退回短路径、丢掉滚轮选中的层。
+                rects = walk[0]
+            if deep is not None:
+                self._release(deep)
         return rects
+
+
+def _area(rect):
+    return rect.width() * rect.height()
+
+
+def _process_name(user32, hwnd):
+    """窗口所属进程的文件名（小写）；取不到返回空串。"""
+    from ctypes import wintypes
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                     ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(1024)
+        path = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+            return ""
+        return path.value.rsplit("\\", 1)[-1].lower()
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _try_init_msaa():

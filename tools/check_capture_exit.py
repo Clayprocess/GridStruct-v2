@@ -50,6 +50,9 @@ def run_case(action):
         def ancestors(self, _interrupted):
             return None
 
+        def warm(self, _hwnd):
+            pass
+
         def close(self):
             self.record.append(threading.get_ident())
 
@@ -79,7 +82,8 @@ def run_case(action):
         isolated.enter_context(patch("capture.flow.capture_virtual_desktop", return_value=shot))
         isolated.enter_context(patch.object(snap, "_IS_WIN", True))
         isolated.enter_context(patch.object(snap, "_win32_api", return_value=SimpleNamespace(
-            IsWindow=lambda _hwnd: True, IsWindowVisible=lambda _hwnd: True)))
+            IsWindow=lambda _hwnd: True, IsWindowVisible=lambda _hwnd: True,
+            GetCursorPos=lambda _point: 0, GetForegroundWindow=lambda: 0)))
         isolated.enter_context(patch.object(snap, "_snapshot_windows", return_value=[(7, window_rect)]))
         isolated.enter_context(patch.object(snap, "_try_init_msaa", side_effect=Provider))
         flow = ScreenshotFlow(app)
