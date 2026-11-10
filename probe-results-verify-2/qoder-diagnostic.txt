@@ -1,0 +1,5 @@
+qoder cn.exe [Chrome_WidgetWin_1] 点数 160
+  MSAA：命中中位 3.0ms，补父链中位 41.8ms，平均层数 2+9，最小元素面积中位 3563520.0
+  UIA ：命中中位 2.5ms，含父链中位 15.9ms，平均层数 19.0，最小元素面积中位 3097920.0
+  UIA 最内层控件类型：{'Button': 7, 'Group': 148, 'Text': 2, 'Hyperlink': 2, 'Image': 1}
+qoder cn.exe [Chrome_WidgetWin_1]：没有可测的点（窗口被挡住？）
