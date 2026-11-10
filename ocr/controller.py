@@ -1,6 +1,7 @@
 """串行后台 OCR 服务与可取消的窗口任务。"""
 
 from dataclasses import dataclass
+from enum import Enum
 from threading import Event
 from time import monotonic
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
@@ -11,12 +12,42 @@ from .layout import saved_layout
 from .model import OCRDocument
 
 
+class OCRState(str, Enum):
+    """一次识别任务所处的状态，只由 OCRController 切换。
+
+    值仍是原来的英文字符串：旧的字符串比较、stateChanged 收到的文本和验收脚本都照常可用。
+    """
+    IDLE = "idle"                # 没有任务，或结果已作废
+    QUEUED = "queued"            # 排队等后台 OCR 服务
+    LOADING = "loading"          # 首次加载本地模型
+    RECOGNIZING = "recognizing"  # 正在识别
+    COMPLETED = "completed"      # 有结果
+    EMPTY = "empty"              # 识别完但没有文字
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+
+    def __str__(self):
+        # Python 3.12 起 f-string 会写成 "OCRState.QUEUED"；诊断日志等文本仍要原来的值。
+        return self.value
+
+    @property
+    def waiting(self):
+        """还在等结果：界面显示转圈和“取消”。"""
+        return self in (OCRState.QUEUED, OCRState.LOADING, OCRState.RECOGNIZING)
+
+    @property
+    def retryable(self):
+        """没拿到结果、可以点“重试”。"""
+        return self in (OCRState.FAILED, OCRState.TIMEOUT, OCRState.CANCELLED)
+
+
 @dataclass
 class _Request:
     image: object
     cancelled: Event
     started_at: float = 0
-    stage: str = "queued"
+    stage: OCRState = OCRState.QUEUED
 
 
 class _Worker(QObject):
@@ -88,9 +119,8 @@ def _get_service():
 
 # 冷加载、推理、排队各给 60 秒：办公电脑首次加载模型常被杀毒扫描拖慢，分开计时不误判。
 _STAGE_BUDGET_MS = 60000
-_STAGE_TEXT = {"queued": "排队中：等待本地 OCR 服务", "loading": "首次加载本地模型",
-               "recognizing": "正在本地识别文字"}
-WAITING_STATES = frozenset(_STAGE_TEXT)
+_STAGE_TEXT = {OCRState.QUEUED: "排队中：等待本地 OCR 服务", OCRState.LOADING: "首次加载本地模型",
+               OCRState.RECOGNIZING: "正在本地识别文字"}
 
 
 def _write_diagnostic(reason, request):
@@ -131,7 +161,7 @@ class OCRController(QObject):
         self._layer_first = layer_first
         self._results = []
         self._document = None
-        self._state = "idle"
+        self._state = OCRState.IDLE
         self._request = None
         self._pixmap = None
         self._dialogs = []
@@ -170,7 +200,7 @@ class OCRController(QObject):
         """automatic：贴图后自动识别，不替用户改剪贴板、不弹复核窗口。"""
         if pixmap.isNull():
             self.invalidate("没有可识别的图片")
-            self._set_state("failed", "识别失败：没有可识别的图片")
+            self._set_state(OCRState.FAILED, "识别失败：没有可识别的图片")
             return
         if self.running:
             self.cancel()
@@ -185,10 +215,12 @@ class OCRController(QObject):
         self.destroyed.connect(lambda _=None, flag=request.cancelled: flag.set())
         active = self._service.active
         self._behind_cancelled = active is not None and active.cancelled.is_set()
-        self._enter_stage("queued")
+        self._enter_stage(OCRState.QUEUED)
         self._service.requested.emit(request)
 
     def _enter_stage(self, stage):
+        # 引擎在后台线程按字符串报阶段（"loading"/"recognizing"）。
+        stage = OCRState(stage)
         self._request.stage = stage
         self._stage_started = monotonic()
         self._timer.start(_STAGE_BUDGET_MS)
@@ -202,7 +234,7 @@ class OCRController(QObject):
             return
         stage = self._request.stage
         text = _STAGE_TEXT[stage]
-        if stage == "queued" and self._behind_cancelled:
+        if stage is OCRState.QUEUED and self._behind_cancelled:
             text = "排队中：前一次已取消的推理仍在结束"
         seconds = int(monotonic() - self._stage_started)
         self.statusChanged.emit(f"{text}…" + (f" 已等待 {seconds} 秒" if seconds >= 3 else ""), False)
@@ -221,7 +253,7 @@ class OCRController(QObject):
         self._end_wait()
         message = ("已取消识别，可重新识别；运行中的推理将在后台结束"
                    if started else "已取消排队，可重新识别")
-        self._set_state("cancelled", message)
+        self._set_state(OCRState.CANCELLED, message)
         self.cancelled.emit()
 
     def _end_wait(self):
@@ -233,16 +265,16 @@ class OCRController(QObject):
         request = self._request
         request.cancelled.set()
         self._end_wait()
-        if request.stage == "queued":
+        if request.stage is OCRState.QUEUED:
             reason = "等待本地 OCR 服务超过 60 秒"
-        elif request.stage == "loading":
+        elif request.stage is OCRState.LOADING:
             reason = "加载本地模型超过 60 秒"
         else:
             reason = "识别超过 60 秒"
         path = _write_diagnostic(reason, request)
         note = f"，诊断信息已存到 user-data/logs/{path.name}" if path is not None else ""
         message = f"{reason}，本次已停止等待。可点“重试”{note}；多次超时请重启程序。"
-        self._set_state("timeout", message)
+        self._set_state(OCRState.TIMEOUT, message)
         self.failed.emit(message)
 
     @Slot(object, object, str)
@@ -255,7 +287,7 @@ class OCRController(QObject):
             return
         self._end_wait()
         if error:
-            self._set_state("failed", f"识别失败：{error}")
+            self._set_state(OCRState.FAILED, f"识别失败：{error}")
             self.failed.emit(error)
             return
         self._document = OCRDocument(results, request.image)
@@ -265,9 +297,9 @@ class OCRController(QObject):
         if self._document is None:
             return
         if not self._document:
-            self._set_state("empty", "未检测到文字，可调整选区后重新识别")
+            self._set_state(OCRState.EMPTY, "未检测到文字，可调整选区后重新识别")
             return
-        self._set_state("completed", f"已识别 {len(self._document)} 处文字：可在原图滑选，Ctrl+C 复制", True)
+        self._set_state(OCRState.COMPLETED, f"已识别 {len(self._document)} 处文字：可在原图滑选，Ctrl+C 复制", True)
         if self._automatic:
             return
         from settings import get_settings
@@ -312,7 +344,7 @@ class OCRController(QObject):
         """同图转移结果，无需重新识别。"""
         if not document.matches(pixmap):
             self.cancel()
-            self._set_state("idle", "图像不匹配，未复用旧 OCR；已改的文字仍保留，请重新识别")
+            self._set_state(OCRState.IDLE, "图像不匹配，未复用旧 OCR；已改的文字仍保留，请重新识别")
             return False
         self.cancel()
         self._pixmap = pixmap.copy()
@@ -322,9 +354,9 @@ class OCRController(QObject):
         if self._document is None:
             return False
         if document:
-            self._set_state("completed", "已恢复识别文字：可在原图滑选、Ctrl+C 复制", True)
+            self._set_state(OCRState.COMPLETED, "已恢复识别文字：可在原图滑选、Ctrl+C 复制", True)
         else:
-            self._set_state("empty", "未检测到文字，可调整选区后重新识别")
+            self._set_state(OCRState.EMPTY, "未检测到文字，可调整选区后重新识别")
         return True
 
     def invalidate(self, message="图像已改变，请重新识别文字"):
@@ -332,4 +364,4 @@ class OCRController(QObject):
         self._document = None
         self._results = []
         self.recognized.emit([])
-        self._set_state("idle", message)
+        self._set_state(OCRState.IDLE, message)

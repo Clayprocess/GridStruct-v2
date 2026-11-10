@@ -478,14 +478,12 @@ class FloatPanel(QWidget):
 
     # ---- 对外接口 ----
 
-    def set_ocr_status(self, message: str, has_results: bool, state: str):
-        """识别文字层本身透明，持续反馈让用户知道结果已可操作。"""
-        from ocr.controller import WAITING_STATES
-        waiting = state in WAITING_STATES
+    def set_ocr_status(self, message: str, has_results: bool, state):
+        """识别文字层本身透明，持续反馈让用户知道结果已可操作。state 为 ocr.OCRState。"""
         self._ocr_message = message
-        self._ocr_spinner.setVisible(waiting)
-        self._ocr_buttons["ocr_cancel"].setVisible(waiting)
-        self._ocr_buttons["ocr"].setVisible(state in ("failed", "timeout", "cancelled"))
+        self._ocr_spinner.setVisible(state.waiting)
+        self._ocr_buttons["ocr_cancel"].setVisible(state.waiting)
+        self._ocr_buttons["ocr"].setVisible(state.retryable)
         self._update_ocr_card()
         self._ocr_feedback.show()
 

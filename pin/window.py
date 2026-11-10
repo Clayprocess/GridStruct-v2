@@ -25,8 +25,6 @@ _TEXT_PADDING = 12
 _TEXT_MIN_WIDTH = 160
 _TEXT_MAX_WIDTH = 480
 _TEXT_MAX_HEIGHT = 360
-# OCR 进行中提示常驻，结束后按较长时长淡出，方便读完结果说明。
-_OCR_FINAL_STATES = {"idle", "completed", "empty", "failed", "timeout", "cancelled"}
 
 
 def _theme():
@@ -540,7 +538,8 @@ class PinWindow(_PinBase):
         self._ocr_status = message + ("；右键查看识别全文" if has_results else "")
         # 提示淡出后，最近一次 OCR 状态仍可悬停查看。
         self._content.setToolTip(f"{self._ocr_status}\n{self._HINT}")
-        running = self._ocr_controller is not None and self._ocr_controller.state not in _OCR_FINAL_STATES
+        # OCR 进行中提示常驻，结束后按较长时长淡出，方便读完结果说明。
+        running = self._ocr_controller is not None and self._ocr_controller.state.waiting
         self._show_hud(self._ocr_status, 0 if running else T.PIN_HUD_MS * 3)
 
     def _set_document(self, document):

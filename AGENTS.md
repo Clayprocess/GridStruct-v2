@@ -42,3 +42,17 @@
 
 - 新窗口/对话框必须在明暗两套主题下离屏渲染截图自查（参考 `tools/render_check.py` 的写法）。
 - 不引入新依赖先打招呼。PySide6 / onnxruntime 之外的新包要说明理由。
+
+## 状态归属（改这些流程前先看）
+
+各模块自己管自己的状态，不引入统一的状态机框架。下面这些状态只能经由列出的入口切换，不要另加布尔开关绕过：
+
+| 状态 | 位置 | 唯一入口 |
+| --- | --- | --- |
+| 截图会话阶段 `Phase`（空闲/框选/标注/待开长截图/长截图） | `capture/flow.py` | `ScreenshotFlow` 内部赋值 `self._phase`；`start()` 只在 `IDLE` 时开始 |
+| 结束一张截图前的确认 | `annotate/window.py` | `AnnotationWindow.confirm_discard()`：用户主动丢弃截图的入口（Esc、工具条关闭/取消、托盘退出、改做长截图）走它；有未保存标注或改过的识别文字才弹确认，设置里关掉“退出确认”则直接通过。程序内部直接 `close()` 不确认：复制、贴图、转表格、打开识别复核这类已把内容交出去的出口，以及 `ScreenshotFlow._cleanup()` / `cancel()` 收尾（托盘退出时已先确认过）。新增会丢内容的结束方式要先调用它，不要直接 `close()` |
+| OCR 任务状态 `OCRState` | `ocr/controller.py` | `OCRController._set_state()` / `_enter_stage()`；界面用 `.waiting` / `.retryable`，不手写状态名清单。9 种状态的取值、`stateChanged(str)` 文本和工具条/贴图表现见 `tools/check_ocr_capture_card.py` 的 `STATE_CONTRACT` |
+| 表格网格拖线预览 | `table/review.py` | `TableReview.set_grid(final=False)` 预览；被打断时由 `_settle()` 按松开提交 |
+| 设置保存 | `settings/dialog.py` | `SettingsDialog._save()`：快捷键、开机自启、配置文件任何一步失败，都尽力把已生效的部分恢复到打开设置时（自启按注册表原值写回）。恢复本身也可能失败（例如原快捷键被别的程序占了），这时不会重试，只在“无法保存设置”的提示里写明哪一项没恢复、请用户重设 |
+
+中途打断（按住鼠标时切工具、翻页、退出）和写入失败是最容易丢数据的地方：新增流程时先写能复现打断/失败的离屏脚本（`tools/check_*.py`）。
