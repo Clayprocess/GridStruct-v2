@@ -1,0 +1,4 @@
+zoom.exe [ZPPTMainFrmWndClassEx] 点数 160
+  MSAA：命中中位 1.9ms，补父链中位 2.1ms，平均层数 2+3，最小元素面积中位 3581440.0
+  UIA ：命中中位 2.8ms，含父链中位 30.1ms，平均层数 20.3，最小元素面积中位 98240.0
+  UIA 最内层控件类型：{'TabItem': 1, 'Pane': 29, 'SplitButton': 1, 'List': 50, 'ListItem': 61, 'Group': 11, 'Text': 3, 'Image': 4}

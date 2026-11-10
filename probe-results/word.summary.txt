@@ -1,0 +1,4 @@
+winword.exe [OpusApp] 点数 160
+  MSAA：命中中位 1.8ms，补父链中位 1.5ms，平均层数 7.5+9.5，最小元素面积中位 3026170.0
+  UIA ：命中中位 4.5ms，含父链中位 118.7ms，平均层数 5.3，最小元素面积中位 2253334.5
+  UIA 最内层控件类型：{'TabItem': 4, 'Tab': 11, 'MenuItem': 1, 'Document': 80, 'Custom': 8, 'Edit': 44, 'DataItem': 12}

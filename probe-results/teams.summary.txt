@@ -1,0 +1,4 @@
+ms-teams.exe [TeamsWebView] 点数 160
+  MSAA：命中中位 5.1ms，补父链中位 138.4ms，平均层数 6.2+20.8，最小元素面积中位 486989.0
+  UIA ：命中中位 3.4ms，含父链中位 26.6ms，平均层数 18.3，最小元素面积中位 2573217.0
+  UIA 最内层控件类型：{'Document': 1, 'Group': 136, 'Button': 3, 'Text': 4, 'TreeItem': 14, 'Image': 2}

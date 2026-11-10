@@ -1,0 +1,4 @@
+powerpnt.exe [PPTFrameClass] 点数 160
+  MSAA：命中中位 173.6ms，补父链中位 142.3ms，平均层数 5.8+7.8，最小元素面积中位 3046400.0
+  UIA ：命中中位 269.7ms，含父链中位 797.6ms，平均层数 3.5，最小元素面积中位 3046400.0
+  UIA 最内层控件类型：{'TabItem': 5, 'Tab': 9, 'Button': 1, 'MenuItem': 1, 'Pane': 144}

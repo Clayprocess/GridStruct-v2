@@ -1,0 +1,6 @@
+msedge.exe [Chrome_WidgetWin_1] 点数 160
+  MSAA：命中中位 5.7ms，补父链中位 28.0ms，平均层数 2.0+8.2，最小元素面积中位 444912.0
+  UIA ：命中中位 5.0ms，含父链中位 29.5ms，平均层数 13.8，最小元素面积中位 3308424.0
+  UIA 最内层控件类型：{'ToolBar': 2, 'Edit': 13, 'Button': 1, 'Group': 105, 'List': 11, 'Hyperlink': 20, 'Text': 7, 'ListItem': 1}
+msedge.exe [Chrome_WidgetWin_1]：没有可测的点（窗口被挡住？）
+msedge.exe [Chrome_WidgetWin_1]：没有可测的点（窗口被挡住？）

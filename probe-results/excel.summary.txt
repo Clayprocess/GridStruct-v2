@@ -1,0 +1,4 @@
+excel.exe [XLMAIN] 点数 384
+  MSAA：命中中位 2.0ms，补父链中位 4.7ms，平均层数 6.1+8.1，最小元素面积中位 2880000.0
+  UIA ：命中中位 3.4ms，含父链中位 14.6ms，平均层数 7.0，最小元素面积中位 1368.0
+  UIA 最内层控件类型：{'Button': 10, 'TitleBar': 18, 'MenuItem': 8, 'Group': 8, 'ListItem': 5, 'Image': 1, 'Pane': 3, 'Edit': 22, 'DataItem': 288, 'TabItem': 1, 'Tab': 12, '50014': 8}

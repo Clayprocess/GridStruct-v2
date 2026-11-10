@@ -1,0 +1,4 @@
+outlook.exe [rctrl_renwnd32] 点数 160
+  MSAA：命中中位 8.6ms，补父链中位 12.0ms，平均层数 10.9+14.1，最小元素面积中位 2222883.0
+  UIA ：命中中位 4.2ms，含父链中位 26.4ms，平均层数 8.6，最小元素面积中位 2222883.0
+  UIA 最内层控件类型：{'Button': 13, 'TabItem': 2, 'Tab': 13, 'Pane': 13, 'DataItem': 7, 'Edit': 94, 'Custom': 7, 'Image': 10, 'Group': 1}
