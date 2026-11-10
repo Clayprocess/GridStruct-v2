@@ -12,7 +12,9 @@
 #   5. 单次点命中（不含补祖先）超过 300ms 的窗口本次截图只用窗口矩形；
 #      卡住超过 2s 的线程丢弃、换新线程，那个窗口冷却 30s 后再试；
 #   6. 截图一开始就为鼠标下和前台窗口建好 IAccessible，浏览器类程序再“戳”一下客户区，
-#      Chromium 收到无障碍查询才建完整的树；浏览器第一次点命中常给大容器，同一点再查一次取小的。
+#      Chromium 收到无障碍查询才建完整的树；浏览器第一次点命中常给大容器，同一点再查一次取小的；
+#   7. 按程序适配（2026-11 真机诊断）：Excel、Word、Zoom 的 MSAA 只到整个表格区/文档区/窗口，
+#      改用 UIA 逐层找子元素（Excel 能到单元格）。
 # 非 Windows 平台返回空（Linux 开发机不断）。
 
 import ctypes
@@ -128,7 +130,7 @@ class _Worker:
                         rects = provider.hit_path(hwnd, x, y)
                     except OSError as error:
                         print(f"[GridStruct-V2] 点命中查询失败：{error}", flush=True)
-                elapsed = (time.perf_counter() - started) * 1000
+                elapsed = 0.0 if provider is not None and provider.one_off else (time.perf_counter() - started) * 1000
                 with self._cond:
                     if self._stopped:
                         return
@@ -481,6 +483,12 @@ _BROWSERS = frozenset({
 })
 
 
+# 一次取回这么多子元素（表格整屏单元格）算一次性开销，之后都走缓存。
+_BIG_FETCH = 100
+# MSAA 取不细、UIA 能取到单元格/列表项的程序（tools/probe_snap_apps.py 真机诊断结果）。
+_UIA_PROCESSES = frozenset({"excel.exe", "winword.exe", "zoom.exe"})
+
+
 def _valid_rect(rect, x, y, minimum=8):
     return (minimum <= rect.width() <= 10000 and minimum <= rect.height() <= 10000
             and rect.contains(x, y))
@@ -529,7 +537,10 @@ class _Accessibility:
         # (hwnd, 点命中路径) -> (补全后的路径, 是否走完)：鼠标停住时的重查不再重新走一遍父链；
         # 中途失败的只当已知祖先先用着，下次还会重试补全。
         self._walks = {}
-        self._browsers = {}  # hwnd -> 是否浏览器类程序
+        self._names = {}  # hwnd -> 进程名
+        self._uia = None  # 首次用到 UIA 的程序时才创建
+        # 本次查询含一次性的大批量取子元素（如 Excel 整屏单元格）：耗时不算进慢窗口降级。
+        self.one_off = False
 
     def _call(self, pointer, index, argtypes, *args):
         ctypes = self._ctypes
@@ -546,6 +557,8 @@ class _Accessibility:
 
     def close(self):
         self._drop_deep()
+        if self._uia is not None:
+            self._uia.close()
         for root, _rect in self._roots.values():
             self._release(root)
         self._roots.clear()
@@ -571,11 +584,28 @@ class _Accessibility:
             return None
         return entry
 
+    def _process(self, hwnd):
+        name = self._names.get(hwnd)
+        if name is None:
+            name = self._names[hwnd] = _process_name(self._user32, hwnd)
+        return name
+
     def _is_browser(self, hwnd):
-        known = self._browsers.get(hwnd)
-        if known is None:
-            known = self._browsers[hwnd] = _process_name(self._user32, hwnd) in _BROWSERS
-        return known
+        return self._process(hwnd) in _BROWSERS
+
+    def _uses_uia(self, hwnd):
+        return self._process(hwnd) in _UIA_PROCESSES
+
+    def _uia_path(self, hwnd, x, y):
+        try:
+            if self._uia is None:
+                self._uia = _UiaTree(self._call, self._release, self._ole32)
+            rects = self._uia.path(hwnd, x, y)
+            self.one_off = self._uia.big_fetch
+            return rects
+        except OSError as error:
+            print(f"[GridStruct-V2] UIA 查询失败，改用 MSAA：{error}", flush=True)
+            return []
 
     def warm(self, hwnd):
         """建好窗口对象；浏览器类程序再取一次客户区名字，Chromium 由此打开完整无障碍树（同 PixPin）。"""
@@ -704,10 +734,15 @@ class _Accessibility:
     def hit_path(self, hwnd, x, y):
         """由外到内返回 accHitTest 逐层命中的控件矩形（物理像素），跳过的层由 ancestors() 补。"""
         self._drop_deep()
+        self.one_off = False
         entry = self._root(hwnd)
         if entry is None:
             return []
         root, root_rect = entry
+        if self._uses_uia(hwnd):
+            rects = self._uia_path(hwnd, x, y)
+            if rects:
+                return rects
         deep, rects, failed = self._descend(root, x, y)
         if failed and not rects:
             # 窗口对象本身失效（窗口已关）：丢掉缓存，下次重建。
@@ -735,6 +770,95 @@ class _Accessibility:
 
 def _area(rect):
     return rect.width() * rect.height()
+
+
+class _UiaTree:
+    """UIA 逐层找含鼠标的子元素，子元素和矩形每个节点只取一次。
+
+    不用 ElementFromPoint：它按屏幕找最上层窗口，截图时会命中我们自己的遮罩。
+    截图期间画面是冻结的，取过的子元素在整个会话里都有效；Excel 表格区一次取回所有可见单元格的矩形。
+    虚表（UIAutomationClient.h）：IUIAutomation ElementFromHandle 6、CreateCacheRequest 20、
+    CreateTrueCondition 21；CacheRequest AddProperty 3；Element FindAllBuildCache 8、
+    CachedBoundingRectangle 75；ElementArray Length 3、GetElement 4。
+    """
+
+    _CLSID = "ff48dba4-60ef-4201-aa87-54103eef594e"
+    _IID = "30cbe57d-d9d0-452a-ab13-7ac5ac4825ee"
+    _BOUNDING_RECTANGLE = 30001
+    _CHILDREN = 2  # TreeScope_Children
+
+    def __init__(self, call, release, ole32):
+        from uuid import UUID
+        self._call, self._release = call, release
+        self._automation = ctypes.c_void_p()
+        clsid = (ctypes.c_byte * 16).from_buffer_copy(UUID(self._CLSID).bytes_le)
+        iid = (ctypes.c_byte * 16).from_buffer_copy(UUID(self._IID).bytes_le)
+        ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(self._automation))
+        self._request, self._condition = ctypes.c_void_p(), ctypes.c_void_p()
+        call(self._automation, 20, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(self._request))
+        call(self._request, 3, [ctypes.c_int], self._BOUNDING_RECTANGLE)
+        call(self._automation, 21, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(self._condition))
+        self._roots = {}  # hwnd -> 窗口元素
+        self._children = {}  # 元素地址 -> [(子元素, 矩形)]
+
+    def path(self, hwnd, x, y):
+        """由外到内返回含鼠标的元素矩形；同一层有多个含鼠标的子元素时取最小的。"""
+        self.big_fetch = False
+        node, rects = self._root(hwnd), []
+        for _ in range(_Accessibility._MAX_DEPTH):
+            inside = [(child, rect) for child, rect in self._kids(node) if rect.contains(x, y)
+                      and rect.width() >= _MIN_ELEMENT and rect.height() >= _MIN_ELEMENT]
+            if not inside:
+                break
+            node, rect = min(inside, key=lambda item: _area(item[1]))
+            rects.append(rect)
+        return rects
+
+    def _root(self, hwnd):
+        element = self._roots.get(hwnd)
+        if element is None:
+            element = ctypes.c_void_p()
+            self._call(self._automation, 6, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+                       ctypes.c_void_p(hwnd), ctypes.byref(element))
+            self._roots[hwnd] = element
+        return element
+
+    def _kids(self, node):
+        kids = self._children.get(node.value)
+        if kids is not None:
+            return kids
+        from ctypes import wintypes
+        found, kids = ctypes.c_void_p(), []
+        self._call(node, 8, [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+                   self._CHILDREN, self._condition, self._request, ctypes.byref(found))
+        try:
+            length = ctypes.c_int()
+            if found:
+                self._call(found, 3, [ctypes.POINTER(ctypes.c_int)], ctypes.byref(length))
+            for index in range(length.value):
+                element, rc = ctypes.c_void_p(), wintypes.RECT()
+                self._call(found, 4, [ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)], index, ctypes.byref(element))
+                kids.append((element, None))
+                self._call(element, 75, [ctypes.POINTER(wintypes.RECT)], ctypes.byref(rc))
+                kids[-1] = (element, QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top))
+        except OSError:
+            for element, _rect in kids:
+                self._release(element)
+            raise
+        finally:
+            self._release(found)
+        self._children[node.value] = kids
+        self.big_fetch |= len(kids) >= _BIG_FETCH
+        return kids
+
+    def close(self):
+        for kids in self._children.values():
+            for element, _rect in kids:
+                self._release(element)
+        for element in self._roots.values():
+            self._release(element)
+        for pointer in (self._condition, self._request, self._automation):
+            self._release(pointer)
 
 
 def _process_name(user32, hwnd):

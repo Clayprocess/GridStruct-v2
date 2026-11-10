@@ -15,6 +15,7 @@ import ctypes
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -28,16 +29,19 @@ class FakeAccessible(snap._Accessibility):
     deepest=True 模拟 Chrome：accHitTest 跳过中间层，直接返回最深的对象；
     也可给 {对象 id: 它命中时直接返回的对象 id}，只让某一层跳层。
     broken: accLocation 会失败（抛 OSError）的对象 id。failing_parents: 这些对象各有一次 get_accParent 失败。
-    browsers: 算作浏览器类程序的窗口 hwnd。cold: 前几次在非窗口对象上的 accHitTest 只返回自己（树还没建好）。"""
+    browsers: 算作浏览器类程序的窗口 hwnd。cold: 前几次在非窗口对象上的 accHitTest 只返回自己（树还没建好）。
+    uia: 走 UIA 的窗口 hwnd，配合 provider._uia 注入假树。"""
 
-    def __init__(self, objects, deepest=False, broken=(), browsers=(), cold=0):
+    def __init__(self, objects, deepest=False, broken=(), browsers=(), cold=0, uia=()):
         self._ctypes = ctypes
         self._iid = (ctypes.c_byte * 16)()
         self._roots = {}
         self._deep = None
         self._walks = {}
-        self._browsers = {}
+        self._names = {}
+        self._uia = None
         self.browser_hwnds = set(browsers)
+        self.uia_hwnds = set(uia)
         self.cold = cold
         self.name_calls = 0
         self._com_owned = False
@@ -71,6 +75,9 @@ class FakeAccessible(snap._Accessibility):
 
     def _is_browser(self, hwnd):
         return hwnd in self.browser_hwnds
+
+    def _uses_uia(self, hwnd):
+        return hwnd in self.uia_hwnds
 
     @staticmethod
     def _id(pointer):
@@ -414,6 +421,8 @@ def check_hung_query():
     seen = []
 
     class Hanging:
+        one_off = False
+
         def hit_path(self, hwnd, x, y):
             seen.append(hwnd)
             if hwnd == 7:
@@ -477,6 +486,8 @@ def check_stationary_refinement():
     calls = []
 
     class LazyProvider:
+        one_off = False
+
         def hit_path(self, *_args):
             calls.append(time.monotonic())
             return [TOOLBAR] if len(calls) == 1 else [TOOLBAR, TAB, CLOSE]
@@ -523,6 +534,8 @@ def check_completion_during_timeout_check():
     entered, release = threading.Event(), threading.Event()
 
     class Provider:
+        one_off = False
+
         def hit_path(self, *_args):
             entered.set()
             release.wait(3)
@@ -562,6 +575,56 @@ def check_completion_during_timeout_check():
             release.set()
             detector.shutdown()
     print("PASS: query completion during timeout checking neither crashes nor blacklists the window")
+
+
+class FakeUiaTree(snap._UiaTree):
+    """tree: {节点: [(子节点, 矩形)]}，记录每个节点取子元素的次数。"""
+
+    def __init__(self, tree):
+        self.tree, self.fetched, self.closed, self.big_fetch = tree, [], False, False
+        self._children = {}
+
+    def _root(self, _hwnd):
+        return SimpleNamespace(value="window")
+
+    def _kids(self, node):
+        if node.value not in self._children:
+            self.fetched.append(node.value)
+            self._children[node.value] = [(SimpleNamespace(value=name), rect) for name, rect in self.tree.get(node.value, [])]
+            self.big_fetch |= len(self._children[node.value]) >= snap._BIG_FETCH
+        return self._children[node.value]
+
+    def close(self):
+        self.closed = True
+
+
+def check_uia():
+    """Excel/Word/Zoom 走 UIA：逐层取含鼠标的最小子元素并缓存；UIA 取不到时退回 MSAA。"""
+    grid = QRect(0, 100, 800, 500)
+    cells = [(f"cell{r}{c}", QRect(c * 72, 100 + r * 19, 72, 19)) for r in range(20) for c in range(11)]
+    tree = {"window": [("ribbon", QRect(0, 0, 800, 100)), ("desk", QRect(0, 100, 800, 500))],
+            "desk": [("grid", grid), ("scrollbar", QRect(780, 100, 20, 500))],
+            "grid": cells}
+    uia = FakeUiaTree(tree)
+    cell = QRect(72, 119, 72, 19)
+    assert uia.path(1, 100, 125) == [QRect(0, 100, 800, 500), grid, cell], uia.path(1, 100, 125)
+    assert uia.path(1, 790, 300) == [QRect(0, 100, 800, 500), QRect(780, 100, 20, 500)], "重叠时取最小的"
+    assert uia.path(1, 10, 10) == [QRect(0, 0, 800, 100)]
+    assert uia.fetched == ["window", "desk", "grid", "cell11", "scrollbar", "ribbon"], uia.fetched
+    provider = FakeAccessible(page(), uia={1})
+    provider._uia = uia
+    assert provider.hit_path(1, 100, 125)[-1] == cell and provider.calls == 0, "走 UIA 时不做 MSAA 点命中"
+    assert not provider.one_off, "已缓存的查询照常计入慢窗口判断"
+    uia.big_fetch = False
+    uia._children.pop("grid")
+    provider.hit_path(1, 100, 125)
+    assert provider.one_off, "一次取回 220 个单元格算一次性开销"
+    provider._uia = FakeUiaTree({})
+    assert provider.hit_path(1, 220, 155) == [BODY, TABLE, ROW, CELL, TEXT], "UIA 没有结果时退回 MSAA"
+    provider.close()
+    assert provider._uia.closed
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    print("PASS: UIA path descends to the smallest element containing the point, caches children, falls back to MSAA")
 
 
 def check_warm():
@@ -604,7 +667,7 @@ def check_warm():
 if __name__ == "__main__":
     failures = []
     for check in (check_hit_path, check_two_phase, check_detector, check_hung_query, check_stationary_refinement,
-                  check_completion_during_timeout_check, check_warm):
+                  check_completion_during_timeout_check, check_warm, check_uia):
         try:
             check()
         except AssertionError as error:
