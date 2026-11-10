@@ -4,6 +4,7 @@
 但不打开截图遮罩。只记录矩形、层数和耗时，不记录任何名称或文字。
 用法（目标窗口放最前、别被挡住）：
     python tools/probe_snap_hit.py --process excel.exe winword.exe --grid 16x10
+    python tools/probe_snap_hit.py --class Shell_TrayWnd --grid 40x1      # 任务栏（太矮，按进程名找不到）
 """
 
 import argparse
@@ -23,13 +24,19 @@ if sys.platform != "win32":
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--process", nargs="*", default=[])
+    parser.add_argument("--class", dest="window_class", help="按窗口类名找窗口，如 Shell_TrayWnd")
     parser.add_argument("--grid", default="16x10")
     args = parser.parse_args()
     user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     provider = snap._Accessibility()
     columns, rows = (int(v) for v in args.grid.lower().split("x"))
     try:
-        for hwnd in targets({p.lower() for p in args.process}):
+        if args.window_class:
+            user32.FindWindowW.argtypes, user32.FindWindowW.restype = [wintypes.LPCWSTR, wintypes.LPCWSTR], wintypes.HWND
+            hwnds = [user32.FindWindowW(args.window_class, None)]
+        else:
+            hwnds = targets({p.lower() for p in args.process})
+        for hwnd in hwnds:
             rect = wintypes.RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(rect))
             width, height = rect.right - rect.left, rect.bottom - rect.top

@@ -39,6 +39,7 @@ class FakeAccessible(snap._Accessibility):
         self._deep = None
         self._walks = {}
         self._names = {}
+        self._woken = set()
         self._uia = None
         self.browser_hwnds = set(browsers)
         self.uia_hwnds = set(uia)
@@ -624,7 +625,23 @@ def check_uia():
     provider.close()
     assert provider._uia.closed
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
-    print("PASS: UIA path descends to the smallest element containing the point, caches children, falls back to MSAA")
+    # 按进程名/窗口类分流：名单外的 Electron（Qoder）当浏览器；任务栏走 UIA；普通资源管理器窗口不变。
+    routing = snap._Accessibility.__new__(snap._Accessibility)
+    routing._names = {1: "qoder.exe", 2: "explorer.exe", 3: "explorer.exe", 4: "excel.exe"}
+    routing._classes = {1: "Chrome_WidgetWin_1", 2: "Shell_TrayWnd", 3: "CabinetWClass", 4: "XLMAIN"}
+    assert routing._is_browser(1) and not routing._uses_uia(1)
+    assert routing._uses_uia(2) and not routing._is_browser(2)
+    assert not routing._uses_uia(3) and not routing._is_browser(3)
+    assert routing._uses_uia(4)
+    # 截图开始时没预热到的浏览器类窗口：第一次命中时唤醒一次。
+    provider = FakeAccessible(page(), browsers={1})
+    provider.hit_path(1, 220, 155)
+    provider.hit_path(1, 220, 155)
+    assert provider.name_calls == 1, provider.name_calls
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    print("PASS: UIA path descends to the smallest element containing the point, caches children, falls back to MSAA; "
+          "taskbar routes to UIA, unlisted Electron windows are woken and treated as browsers")
 
 
 def check_warm():

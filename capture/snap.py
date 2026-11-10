@@ -344,6 +344,7 @@ def _win32_api():
         "WindowFromPoint": ([wintypes.POINT], wintypes.HWND),
         "GetCursorPos": ([ctypes.POINTER(wintypes.POINT)], wintypes.BOOL),
         "GetForegroundWindow": ([], wintypes.HWND),
+        "GetClassNameW": ([wintypes.HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
         "GetWindowThreadProcessId": ([wintypes.HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD),
         "GetAncestor": ([wintypes.HWND, wintypes.UINT], wintypes.HWND),
         "GetWindowRect": ([wintypes.HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
@@ -487,6 +488,8 @@ _BROWSERS = frozenset({
 _BIG_FETCH = 100
 # MSAA 取不细、UIA 能取到单元格/列表项的程序（tools/probe_snap_apps.py 真机诊断结果）。
 _UIA_PROCESSES = frozenset({"excel.exe", "winword.exe", "zoom.exe"})
+# Windows 11 任务栏是 XAML 画的，MSAA 取不到单个图标，UIA 能取到每个按钮。
+_UIA_CLASSES = frozenset({"Shell_TrayWnd", "Shell_SecondaryTrayWnd"})
 
 
 def _valid_rect(rect, x, y, minimum=8):
@@ -538,6 +541,8 @@ class _Accessibility:
         # 中途失败的只当已知祖先先用着，下次还会重试补全。
         self._walks = {}
         self._names = {}  # hwnd -> 进程名
+        self._classes = {}  # hwnd -> 窗口类名
+        self._woken = set()  # 已唤醒无障碍树的浏览器类窗口
         self._uia = None  # 首次用到 UIA 的程序时才创建
         # 本次查询含一次性的大批量取子元素（如 Excel 整屏单元格）：耗时不算进慢窗口降级。
         self.one_off = False
@@ -590,11 +595,20 @@ class _Accessibility:
             name = self._names[hwnd] = _process_name(self._user32, hwnd)
         return name
 
+    def _class(self, hwnd):
+        name = self._classes.get(hwnd)
+        if name is None:
+            buffer = self._ctypes.create_unicode_buffer(256)
+            self._user32.GetClassNameW(hwnd, buffer, 256)
+            name = self._classes[hwnd] = buffer.value
+        return name
+
     def _is_browser(self, hwnd):
-        return self._process(hwnd) in _BROWSERS
+        # 名单外的 Electron 程序（Qoder 等）靠 Chromium 的顶层窗口类名认出来。
+        return self._process(hwnd) in _BROWSERS or self._class(hwnd) == "Chrome_WidgetWin_1"
 
     def _uses_uia(self, hwnd):
-        return self._process(hwnd) in _UIA_PROCESSES
+        return self._process(hwnd) in _UIA_PROCESSES or self._class(hwnd) in _UIA_CLASSES
 
     def _uia_path(self, hwnd, x, y):
         try:
@@ -608,9 +622,13 @@ class _Accessibility:
             return []
 
     def warm(self, hwnd):
-        """建好窗口对象；浏览器类程序再取一次客户区名字，Chromium 由此打开完整无障碍树（同 PixPin）。"""
-        if self._root(hwnd) is None or not self._is_browser(hwnd):
-            return
+        """建好窗口对象；浏览器类程序顺便唤醒无障碍树。"""
+        if self._root(hwnd) is not None and self._is_browser(hwnd):
+            self._wake(hwnd)
+
+    def _wake(self, hwnd):
+        """取一次客户区名字：Chromium/Electron 收到无障碍查询才打开完整的树（同 PixPin），每个窗口一次。"""
+        self._woken.add(hwnd)
         ctypes = self._ctypes
         client = ctypes.c_void_p()
         if self._oleacc.AccessibleObjectFromWindow(hwnd, 0xFFFFFFFC, ctypes.byref(self._iid),
@@ -739,6 +757,9 @@ class _Accessibility:
         if entry is None:
             return []
         root, root_rect = entry
+        if hwnd not in self._woken and self._is_browser(hwnd):
+            # 截图开始时不在前台的浏览器类窗口，第一次悬停时补唤醒。
+            self._wake(hwnd)
         if self._uses_uia(hwnd):
             rects = self._uia_path(hwnd, x, y)
             if rects:
