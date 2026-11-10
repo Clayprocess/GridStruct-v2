@@ -379,9 +379,15 @@ def check_detector():
         settle(app, detector)
         assert results[-1] == CLOSE, results
         calls = provider.calls
-        detector.detect(QPoint(117, 20))
+        detector.detect(QPoint(115, 18))
         settle(app, detector)
-        assert provider.calls == calls, "命中矩形内移动不应再查询"
+        assert provider.calls == calls, "停在同一点、结果未过期时不应再查询"
+        count = len(results)
+        detector.detect(QPoint(117, 20))
+        assert results[-1] == CLOSE and WINDOW not in results[count:], "框内移动先沿用旧框"
+        settle(app, detector)
+        assert provider.calls > calls, "框内移动也要重查（大容器里的按钮）"
+        assert results[-1] == CLOSE, results
         detector.step_level(1)
         assert results[-1] == TAB, results
         detector.step_level(1)
@@ -456,7 +462,7 @@ def check_hung_query():
         while 7 not in seen and time.monotonic() < deadline:
             app.processEvents()
         key = (7, WINDOW.getRect())
-        detector._hits[key] = (TAB, [TOOLBAR, TAB], time.monotonic() - snap._HIT_REUSE_S)
+        detector._hits[key] = (TAB, [TOOLBAR, TAB], time.monotonic() - snap._HIT_REUSE_S, None)
         detector._show(key, 115, 18)
         time.sleep(0.35)
         hung = detector._worker

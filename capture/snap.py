@@ -222,8 +222,11 @@ class RegionDetector(QObject):
         elif self._shown_key != key:
             # 刚进入这个窗口：先框整个窗口，控件结果到了再收紧。
             self._show(key, x, y)
-        # 结果只沿用 1 秒：Chrome 等程序首次被查询后才逐步建好无障碍树，停住不动也要能细化。
-        remaining = _HIT_REUSE_S - (time.monotonic() - hits[2]) if covered else 0
+        # 只有鼠标停在上次查询的同一点才沿用结果：在框内移动也要重查，否则停在大容器空白处后
+        # 移到里面的按钮上要等结果过期才收紧（Qoder 等网页界面最明显，同 PixPin 每次移动都查）。
+        # 停住时结果只沿用 1 秒：Chrome 等程序首次被查询后才逐步建好无障碍树，停住不动也要能细化。
+        same_point = covered and hits[3] == (x, y)
+        remaining = _HIT_REUSE_S - (time.monotonic() - hits[2]) if same_point else 0
         if remaining <= 0:
             self._request(key, hwnd, x, y)
             if _hung(hwnd):
@@ -287,7 +290,7 @@ class RegionDetector(QObject):
             print(f"[GridStruct-V2] 点命中 {elapsed_ms:.0f}ms，该窗口改用窗口快照", flush=True)
         # 窗口不提供无障碍信息时整窗都算命中，1 秒内不再问。
         inner = rects[-1] if rects else QRect(*key[1])
-        self._hits[key] = (inner, rects, time.monotonic())
+        self._hits[key] = (inner, rects, time.monotonic(), (x, y))
         if self._point is None or self._shown_key != key:
             return
         if not inner.contains(*self._point):
