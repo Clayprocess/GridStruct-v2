@@ -52,7 +52,7 @@ def run_case(action):
         def ancestors(self, _interrupted):
             return None
 
-        def warm(self, _hwnd):
+        def warm(self, _hwnd, _cursor):
             pass
 
         def close(self):

@@ -102,13 +102,13 @@ class _Worker:
         global _abandoned
         provider = _try_init_msaa()
         try:
-            for hwnd in self._warm if provider is not None else ():
+            for hwnd, cursor in self._warm if provider is not None else ():
                 with self._cond:
                     if self._stopped:
                         return
                     self.busy = (hwnd, time.monotonic())
                 try:
-                    provider.warm(hwnd)
+                    provider.warm(hwnd, cursor)
                 except OSError as error:
                     print(f"[GridStruct-V2] 预热无障碍对象失败：{error}", flush=True)
                 with self._cond:
@@ -449,16 +449,17 @@ def _window_at(user32, x, y, ignored_hwnd):
 
 
 def _warm_targets(user32, windows):
-    """截图开始时要预热的窗口：鼠标下的窗口在前，再加前台窗口；只取快照里的（自身遮罩已排除）。"""
+    """截图开始时要预热的 (窗口, 鼠标位置)：鼠标下的窗口在前，再加前台窗口；只取快照里的（自身遮罩已排除）。"""
     from ctypes import wintypes
     known = {hwnd for hwnd, _rect in windows}
     point = wintypes.POINT()
-    under = None
+    under, cursor = None, None
     if user32.GetCursorPos(ctypes.byref(point)):
-        under = next((hwnd for hwnd, rect in windows if rect.contains(point.x, point.y)), None)
+        cursor = (point.x, point.y)
+        under = next((hwnd for hwnd, rect in windows if rect.contains(*cursor)), None)
     foreground = user32.GetForegroundWindow()
     foreground = user32.GetAncestor(foreground, 2) if foreground else None
-    return [hwnd for hwnd in dict.fromkeys((under, foreground)) if hwnd in known]
+    return [(hwnd, cursor) for hwnd in dict.fromkeys((under, foreground)) if hwnd in known]
 
 
 # 控件最小边长（物理像素）：任务栏、托盘、标签页关闭按钮这类小图标也要能框到。
@@ -621,10 +622,21 @@ class _Accessibility:
             print(f"[GridStruct-V2] UIA 查询失败，改用 MSAA：{error}", flush=True)
             return []
 
-    def warm(self, hwnd):
-        """建好窗口对象；浏览器类程序顺便唤醒无障碍树。"""
-        if self._root(hwnd) is not None and self._is_browser(hwnd):
+    def warm(self, hwnd, cursor):
+        """建好窗口对象；浏览器类程序顺便唤醒无障碍树。
+
+        走 UIA 的程序沿鼠标位置和窗口中心各取一遍子元素：Excel 整屏单元格一次要几十到上百毫秒，
+        截图一开始就在后台取好，第一次移进表格区时不用再等。
+        """
+        entry = self._root(hwnd)
+        if entry is None:
+            return
+        if self._is_browser(hwnd):
             self._wake(hwnd)
+        if self._uses_uia(hwnd):
+            center = (entry[1].center().x(), entry[1].center().y())
+            for point in dict.fromkeys(point for point in (cursor, center) if point):
+                self._uia_path(hwnd, *point)
 
     def _wake(self, hwnd):
         """取一次客户区名字：Chromium/Electron 收到无障碍查询才打开完整的树（同 PixPin），每个窗口一次。"""

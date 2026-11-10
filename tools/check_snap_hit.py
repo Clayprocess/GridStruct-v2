@@ -271,10 +271,10 @@ def check_hit_path():
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
     # 预热：建好窗口对象；浏览器再取一次客户区名字唤醒无障碍树。
     provider = FakeAccessible(page())
-    provider.warm(1)
+    provider.warm(1, None)
     assert provider.opened == 1 and provider.name_calls == 0
     provider = FakeAccessible(page(), browsers={1})
-    provider.warm(1)
+    provider.warm(1, None)
     assert provider.opened == 2 and provider.name_calls == 1, (provider.opened, provider.name_calls)
     provider.hit_path(1, 220, 155)
     assert provider.opened == 2, "预热过的窗口对象应复用"
@@ -433,7 +433,7 @@ def check_hung_query():
         def ancestors(self, _interrupted):
             return None
 
-        def warm(self, _hwnd):
+        def warm(self, _hwnd, _cursor):
             pass
 
         def close(self):
@@ -496,7 +496,7 @@ def check_stationary_refinement():
         def ancestors(self, _interrupted):
             return None
 
-        def warm(self, _hwnd):
+        def warm(self, _hwnd, _cursor):
             pass
 
         def close(self):
@@ -545,7 +545,7 @@ def check_completion_during_timeout_check():
         def ancestors(self, _interrupted):
             return None
 
-        def warm(self, _hwnd):
+        def warm(self, _hwnd, _cursor):
             pass
 
         def close(self):
@@ -620,6 +620,13 @@ def check_uia():
     uia._children.pop("grid")
     provider.hit_path(1, 100, 125)
     assert provider.one_off, "一次取回 220 个单元格算一次性开销"
+    # 截图开始预热：沿鼠标位置和窗口中心取好子元素，第一次移进表格区不再有大批量等待。
+    provider = FakeAccessible(page(), uia={1})
+    provider._uia = FakeUiaTree(tree)
+    provider.warm(1, (10, 10))
+    assert {"window", "desk", "grid"} <= set(provider._uia.fetched), provider._uia.fetched
+    provider.hit_path(1, 100, 125)
+    assert not provider.one_off, "预热后首次进入表格区不应再大批量取子元素"
     provider._uia = FakeUiaTree({})
     assert provider.hit_path(1, 220, 155) == [BODY, TABLE, ROW, CELL, TEXT], "UIA 没有结果时退回 MSAA"
     provider.close()
@@ -652,11 +659,11 @@ def check_warm():
     original = (FakeUser32.cursor, FakeUser32.foreground)
     try:
         FakeUser32.cursor, FakeUser32.foreground = (400, 300), 0
-        assert snap._warm_targets(FakeUser32, windows) == [7]
+        assert snap._warm_targets(FakeUser32, windows) == [(7, (400, 300))]
         FakeUser32.foreground = 8
-        assert snap._warm_targets(FakeUser32, windows) == [7, 8]
+        assert snap._warm_targets(FakeUser32, windows) == [(7, (400, 300)), (8, (400, 300))]
         FakeUser32.foreground = 99  # 自身遮罩等不在快照里的窗口不预热
-        assert snap._warm_targets(FakeUser32, windows) == [7]
+        assert snap._warm_targets(FakeUser32, windows) == [(7, (400, 300))]
         FakeUser32.foreground = 0
         provider = FakeAccessible(tree())
         with patch.object(snap, "_IS_WIN", True), patch.object(snap, "_win32_api", FakeUser32), \
