@@ -5,6 +5,7 @@
 用法（目标窗口放最前、别被挡住）：
     python tools/probe_snap_hit.py --process excel.exe winword.exe --grid 16x10
     python tools/probe_snap_hit.py --class Shell_TrayWnd --grid 40x1      # 任务栏（太矮，按进程名找不到）
+    python tools/probe_snap_hit.py --class Shell_TrayWnd --point 1300,1420  # 打印该点 UIA 每层子元素数和空矩形数
 """
 
 import argparse
@@ -26,6 +27,7 @@ def main():
     parser.add_argument("--process", nargs="*", default=[])
     parser.add_argument("--class", dest="window_class", help="按窗口类名找窗口，如 Shell_TrayWnd")
     parser.add_argument("--grid", default="16x10")
+    parser.add_argument("--point", help="只测这一点（屏幕物理坐标 x,y），并打印 UIA 逐层的子元素情况")
     args = parser.parse_args()
     user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     provider = snap._Accessibility()
@@ -36,6 +38,24 @@ def main():
             hwnds = [user32.FindWindowW(args.window_class, None)]
         else:
             hwnds = targets({p.lower() for p in args.process})
+        if args.point:
+            x, y = (int(v) for v in args.point.split(","))
+            for hwnd in hwnds:
+                print(f"{process_name(hwnd)} 命中路径：{[r.getRect() for r in provider.hit_path(hwnd, x, y)]}")
+                uia = provider._uia
+                if uia is None:
+                    print("  （该窗口没走 UIA）")
+                    continue
+                node = uia._root(hwnd)
+                for depth in range(31):
+                    kids = uia._kids(node)
+                    inside = [(c, r) for c, r in kids if r.contains(x, y)]
+                    empty = sum(1 for _c, r in kids if r.isEmpty())
+                    print(f"  第 {depth} 层：子元素 {len(kids)} 个，空矩形 {empty} 个，含该点 {[r.getRect() for _c, r in inside]}")
+                    if not inside:
+                        break
+                    node = min(inside, key=lambda item: item[1].width() * item[1].height())[0]
+            return
         for hwnd in hwnds:
             rect = wintypes.RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(rect))

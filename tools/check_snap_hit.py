@@ -40,7 +40,7 @@ class FakeAccessible(snap._Accessibility):
         self._walks = {}
         self._names = {}
         self._woken = set()
-        self._uia = None
+        self._uia = FakeUiaTree({})  # 默认 UIA 什么也取不到
         self.browser_hwnds = set(browsers)
         self.uia_hwnds = set(uia)
         self.cold = cold
@@ -632,6 +632,18 @@ def check_uia():
     provider.close()
     assert provider._uia.closed
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    # MSAA 只到整窗（Qoder）时改用 UIA；MSAA 取得到元素时不碰 UIA。
+    flat = FakeAccessible({1: (WINDOW, [5]), 5: (QRect(0, 0, 800, 590), [])})
+    flat._uia = FakeUiaTree({"window": [("sidebar", QRect(0, 40, 200, 560))],
+                             "sidebar": [("button", QRect(10, 50, 30, 30))]})
+    assert flat.hit_path(1, 20, 60) == [QRect(0, 40, 200, 560), QRect(10, 50, 30, 30)]
+    assert flat.hit_path(1, 600, 300) == [QRect(0, 0, 800, 590)], "UIA 也取不到时保留 MSAA 结果"
+    flat.close()
+    assert sorted(flat.released) == sorted(flat.acquired), (flat.released, flat.acquired)
+    deep_msaa = FakeAccessible(page())
+    deep_msaa._uia = FakeUiaTree({})
+    deep_msaa.hit_path(1, 220, 155)
+    assert deep_msaa._uia.fetched == [], "MSAA 取得到元素时不查 UIA"
     # 按进程名/窗口类分流：名单外的 Electron（Qoder）当浏览器；任务栏走 UIA；普通资源管理器窗口不变。
     routing = snap._Accessibility.__new__(snap._Accessibility)
     routing._names = {1: "qoder.exe", 2: "explorer.exe", 3: "explorer.exe", 4: "excel.exe"}

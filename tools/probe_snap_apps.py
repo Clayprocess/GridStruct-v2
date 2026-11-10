@@ -244,7 +244,10 @@ def class_name(hwnd):
     return buffer.value
 
 
-def targets(processes):
+def targets(processes, window_class=None):
+    if window_class:
+        user32.FindWindowW.argtypes, user32.FindWindowW.restype = [wintypes.LPCWSTR, wintypes.LPCWSTR], wintypes.HWND
+        return [user32.FindWindowW(window_class, None)]
     if not processes:
         point = wintypes.POINT()
         user32.GetCursorPos(ctypes.byref(point))
@@ -268,6 +271,7 @@ def targets(processes):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--process", nargs="*", default=[], help="进程名，如 excel.exe winword.exe")
+    parser.add_argument("--class", dest="window_class", help="按窗口类名找窗口，如 Shell_TrayWnd（任务栏太矮，按进程名筛不到）")
     parser.add_argument("--grid", default="16x10", help="每个窗口取点的列x行")
     parser.add_argument("--out", default="probe-snap.jsonl")
     args = parser.parse_args()
@@ -276,7 +280,7 @@ def main():
     uia = Uia()
     columns, rows = (int(v) for v in args.grid.lower().split("x"))
     with open(args.out, "a", encoding="utf-8") as out:
-        for hwnd in targets({p.lower() for p in args.process}):
+        for hwnd in targets({p.lower() for p in args.process}, args.window_class):
             rect = wintypes.RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(rect))
             window_rect = [rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top]

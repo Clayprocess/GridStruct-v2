@@ -788,6 +788,13 @@ class _Accessibility:
                 deep, again, rects = again, deep, rects_again
             if again is not None:
                 self._release(again)
+        if _shallow(rects, root_rect):
+            # Qoder 等 Electron 程序的 MSAA 只有窗口一层，局部元素只在 UIA 里（2026-11 真机验收）。
+            fallback = self._uia_path(hwnd, x, y)
+            if not _shallow(fallback, root_rect):
+                if deep is not None:
+                    self._release(deep)
+                return fallback
         if deep is not None:
             key = (hwnd, tuple(r.getRect() for r in rects))
             walk = self._walks.get(key)
@@ -803,6 +810,11 @@ class _Accessibility:
 
 def _area(rect):
     return rect.width() * rect.height()
+
+
+def _shallow(rects, window_rect):
+    """最内层仍几乎是整个窗口：等于没取到元素。"""
+    return not rects or _area(rects[-1]) * 10 >= _area(window_rect) * 9
 
 
 class _UiaTree:
