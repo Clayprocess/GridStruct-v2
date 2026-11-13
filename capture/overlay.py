@@ -53,6 +53,10 @@ class ScreenShotWindow(QObject):
         self._wheel_at = 0.0  # 上一个滚轮事件的时刻，用于层级切换防抖
         self._pending_snap = QRect()
         self._sel_start = QRect()
+        # Excel 按格拖选：表格区当前屏幕上的所有单元格（逻辑坐标）和按下时的那一格。
+        # _grid 非空时选区跟着单元格网格走（拖选、拉边角），按住 Alt 自由框选。
+        self._grid = []
+        self._cell_anchor = QRect()
         self._pointer_pos = self._manager.cursor_position()
         self._windows = []
         self._keyboard_windows = []
@@ -113,6 +117,7 @@ class ScreenShotWindow(QObject):
             return
         self._refreshing = True
         self._sel = QRect()
+        self._grid = []
         self._pending_snap = QRect()
         self._snap_anim.stop()
         self.selectionChanged.emit(QRect())
@@ -273,8 +278,12 @@ class ScreenShotWindow(QObject):
             self._pending_snap = QRect(self._snap_rect)
             self._show_snap(self._snap_rect)
             self._drag_mode = None
+            # 在 Excel 单元格上按下：拖动时按格选（同 Excel 拖选），按住 Alt 才自由框选。
+            self._grid = [] if event.modifiers() & Qt.AltModifier else self._snap.cells_at(pos)
+            self._cell_anchor = _nearest_cell(self._grid, pos) if self._grid else QRect()
         else:
             self._drag_mode = "create"
+            self._grid = []
             self._sel = QRect(pos, pos)
             self._show_snap(QRect())
         self._drag_start = pos
@@ -300,7 +309,7 @@ class ScreenShotWindow(QObject):
                 return
             self._pending_snap = QRect()
             self._show_snap(QRect())
-            self._drag_mode = "create"
+            self._drag_mode = "cells" if self._grid else "create"
         if self._drag_mode is None:
             cursor = self._hover_cursor(pos)
             if cursor == Qt.CrossCursor and self._sel.isNull():
@@ -310,7 +319,10 @@ class ScreenShotWindow(QObject):
             return
         dx, dy = pos.x() - self._drag_start.x(), pos.y() - self._drag_start.y()
         square = bool(event.modifiers() & Qt.ShiftModifier)
-        if self._drag_mode == "create":
+        free = bool(event.modifiers() & Qt.AltModifier)
+        if self._drag_mode == "cells" and not free:
+            self._sel = _cell_range(self._grid, self._cell_anchor, _nearest_cell(self._grid, pos))
+        elif self._drag_mode in ("create", "cells"):
             if square:
                 # 同 PixPin：按住 Shift 锁定 1:1，以按下点为锚点。边长先按锚点到屏幕边缘的
                 # 距离收住，否则末尾的 intersected 会把正方形裁成长方形。
@@ -326,6 +338,8 @@ class ScreenShotWindow(QObject):
             self._resize_by_handle(self._sel_start, self._drag_mode, dx, dy)
             if square:
                 self._square_by_handle(self._drag_mode)
+            elif self._grid and not free:
+                self._sel = _snap_edges(self._sel, self._grid, self._drag_mode)
         self._sel = self._sel.intersected(self._vg)
         self.update(dirty | self._selection_region(previous) | self._hover_region())
         self.selectionChanged.emit(QRect(self._sel))
@@ -349,10 +363,13 @@ class ScreenShotWindow(QObject):
             return
         self.mouse_move(event)
         previous, dirty = QRect(self._sel), self._hover_region()
+        if self._drag_mode == "cells" and event.modifiers() & Qt.AltModifier:
+            self._grid = []  # 按住 Alt 松手的是自由选区，之后拉边角也不再对齐单元格
         self._drag_mode = None
         pos = event.globalPosition().toPoint() if len(self._windows) == 1 else self._manager.cursor_position()
         if self._sel.width() < _MIN_SIZE or self._sel.height() < _MIN_SIZE:
             self._sel = QRect()
+            self._grid = []
             self._snap.redetect(pos)
         self._set_cursor(self._hover_cursor(pos))
         self.update(dirty | self._selection_region(previous) | self._hover_region())
@@ -551,6 +568,51 @@ class ScreenShotWindow(QObject):
         if hh < _MIN_SIZE:
             hh = _MIN_SIZE
         self._sel = QRect(x, y, w, hh).normalized()
+
+
+def _nearest_cell(cells, pos):
+    """含 pos 的单元格；拖出表格区时取离鼠标最近的那格（截图时画面冻结，不能滚动）。"""
+    def distance(cell):
+        dx = max(cell.left() - pos.x(), 0, pos.x() - cell.right())
+        dy = max(cell.top() - pos.y(), 0, pos.y() - cell.bottom())
+        return dx * dx + dy * dy
+    return min(cells, key=distance)
+
+
+def _cell_range(cells, first, last):
+    """两格围成的整块区域；压到合并单元格的一部分时把整个合并格包进来（同 Excel）。"""
+    rect, grown = first.united(last), True
+    while grown:
+        grown = False
+        for cell in cells:
+            part = cell.intersected(rect)
+            # 只算真正压住的：相邻单元格的矩形可能共用一像素的表格线。
+            if part.width() > 2 and part.height() > 2 and not rect.contains(cell):
+                rect, grown = rect.united(cell), True
+    return rect
+
+
+def _snap_edges(sel, cells, handle):
+    """拉边角时，被拉动的边落到最近的单元格边界上；拉出表格区范围的边不对齐。"""
+    bounds = cells[0]
+    for cell in cells[1:]:
+        bounds = bounds.united(cell)
+
+    def nearest(value, edges, low, high):
+        return min(edges, key=lambda edge: abs(edge - value)) if low <= value <= high else value
+
+    left, top, right, bottom = sel.left(), sel.top(), sel.right(), sel.bottom()
+    # 0 左上 1 上 2 右上 3 右 4 右下 5 下 6 左下 7 左
+    if handle in (0, 6, 7):
+        left = nearest(left, {c.left() for c in cells}, bounds.left(), bounds.right())
+    if handle in (2, 3, 4):
+        right = nearest(right, {c.right() for c in cells}, bounds.left(), bounds.right())
+    if handle in (0, 1, 2):
+        top = nearest(top, {c.top() for c in cells}, bounds.top(), bounds.bottom())
+    if handle in (4, 5, 6):
+        bottom = nearest(bottom, {c.bottom() for c in cells}, bounds.top(), bounds.bottom())
+    rect = QRect(QPoint(left, top), QPoint(right, bottom)).normalized()
+    return _cell_range(cells, rect, rect) if rect.width() >= _MIN_SIZE and rect.height() >= _MIN_SIZE else sel
 
 
 class _ScreenOverlay(QWidget):
