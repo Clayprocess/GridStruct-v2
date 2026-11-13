@@ -124,17 +124,18 @@ class _Worker:
                     self.busy = (request[2], time.monotonic())
                 token, key, hwnd, x, y = request
                 started = time.perf_counter()
-                rects = []
+                rects, cells = [], ()
                 if provider is not None:
                     try:
                         rects = provider.hit_path(hwnd, x, y)
+                        cells = provider.cells
                     except OSError as error:
                         print(f"[GridStruct-V2] 点命中查询失败：{error}", flush=True)
                 elapsed = 0.0 if provider is not None and provider.one_off else (time.perf_counter() - started) * 1000
                 with self._cond:
                     if self._stopped:
                         return
-                self._results.done.emit((token, key, x, y, rects, elapsed))
+                self._results.done.emit((token, key, x, y, rects, elapsed, cells))
                 # 第二段：补祖先。鼠标移到别处（有新请求）就放弃，不拖慢下一次点命中。
                 full = provider.ancestors(lambda: self._pending is not None or self._stopped) if provider else None
                 with self._cond:
@@ -144,7 +145,7 @@ class _Worker:
                         return
                 if full is not None and full != rects:
                     # 补全耗时不计入慢窗口判断：点命中本身已经出框了。
-                    self._results.done.emit((token, key, x, y, full, 0.0))
+                    self._results.done.emit((token, key, x, y, full, 0.0, cells))
         finally:
             # COM 的创建、调用和释放必须在同一线程。
             if provider is not None:
@@ -164,6 +165,8 @@ class RegionDetector(QObject):
         self._only_window = only_window
         # key=(hwnd, 窗口矩形) -> (最内层矩形, 由外到内的路径, 查询时刻)
         self._hits = {}
+        # key -> Excel 当前屏幕上同一表格区的所有单元格（物理像素），供按格拖选。
+        self._cells = {}
         self._slow = set()
         self._stopping = False
         self._token = object()
@@ -282,9 +285,11 @@ class RegionDetector(QObject):
 
     @Slot(object)
     def _on_result(self, result):
-        token, key, x, y, rects, elapsed_ms = result
+        token, key, x, y, rects, elapsed_ms, cells = result
         if token is not self._token or self._stopping:
             return
+        if cells:
+            self._cells[key] = cells
         if elapsed_ms > _SLOW_POINT_MS:
             self._slow.add(key)
             print(f"[GridStruct-V2] 点命中 {elapsed_ms:.0f}ms，该窗口改用窗口快照", flush=True)
@@ -314,6 +319,20 @@ class RegionDetector(QObject):
                     and self._window_api.IsWindowVisible(hwnd)):
                 return hwnd, rect
         return None
+
+    def cells_at(self, pos: QPoint):
+        """鼠标所在 Excel 表格区的所有单元格（逻辑坐标）；鼠标不在已知单元格上时返回空列表。"""
+        from .screen import ScreenManager
+
+        manager = ScreenManager.instance()
+        screen = manager.screen_at(pos)
+        cells = self._cells.get(self._shown_key) if screen is not None else None
+        if not cells:
+            return []
+        point = manager.logical_to_physical(pos, screen)
+        if not any(cell.contains(point) for cell in cells):
+            return []
+        return [manager.physical_rect_to_logical(cell) for cell in cells]
 
     def step_level(self, delta):
         """delta>0 选更外层的父元素，<0 回到更内层的子元素。"""
@@ -495,6 +514,8 @@ _BIG_FETCH = 100
 _UIA_PROCESSES = frozenset({"excel.exe", "winword.exe", "zoom.exe"})
 # Windows 11 任务栏是 XAML 画的，MSAA 取不到单个图标，UIA 能取到每个按钮。
 _UIA_CLASSES = frozenset({"Shell_TrayWnd", "Shell_SecondaryTrayWnd"})
+# 支持按格拖选的程序（先只做 Excel）。
+_CELL_PROCESSES = frozenset({"excel.exe"})
 # UIA 一次点查询最多看的节点数（含鼠标的分支都往下试，要有上限）。
 _UIA_VISITS = 64
 # 取到 0 个子元素的节点，过这么久再取一次。
@@ -555,6 +576,8 @@ class _Accessibility:
         self._uia = None  # 首次用到 UIA 的程序时才创建
         # 本次查询含一次性的大批量取子元素（如 Excel 整屏单元格）：耗时不算进慢窗口降级。
         self.one_off = False
+        # 本次命中落在 Excel 单元格上时，同一表格区当前屏幕上的所有单元格矩形（按格拖选用）。
+        self.cells = ()
 
     def _call(self, pointer, index, argtypes, *args):
         ctypes = self._ctypes
@@ -625,6 +648,8 @@ class _Accessibility:
                 self._uia = _UiaTree(self._call, self._release, self._ole32)
             rects = self._uia.path(hwnd, x, y)
             self.one_off = self._uia.big_fetch
+            if self._process(hwnd) in _CELL_PROCESSES:
+                self.cells = self._uia.cells()
             return rects
         except OSError as error:
             print(f"[GridStruct-V2] UIA 查询失败，改用 MSAA：{error}", flush=True)
@@ -797,6 +822,7 @@ class _Accessibility:
         """由外到内返回 accHitTest 逐层命中的控件矩形（物理像素），跳过的层由 ancestors() 补。"""
         self._drop_deep()
         self.one_off = False
+        self.cells = ()
         entry = self._root(hwnd)
         if entry is None:
             return []
@@ -864,6 +890,7 @@ class _UiaTree:
     _BOUNDING_RECTANGLE, _CONTROL_TYPE = 30001, 30003
     # 控件类型 Custom 50025、Group 50026、Window 50032、Pane 50033：没有子元素时算空容器。
     _CONTAINERS = frozenset({50025, 50026, 50032, 50033})
+    _DATA_ITEM = 50029  # Excel 单元格 XLSpreadsheetCell
     _CHILDREN = 2  # TreeScope_Children
 
     def __init__(self, call, release, ole32):
@@ -887,6 +914,7 @@ class _UiaTree:
         """由外到内返回含鼠标的元素矩形，取最内层最小的一条路径。"""
         self.big_fetch = False
         self._budget = _UIA_VISITS
+        self._leaf = None  # (父元素, 最内层元素)
         return self._best(self._root(hwnd), x, y, _Accessibility._MAX_DEPTH)[0]
 
     def _best(self, node, x, y, depth):
@@ -908,11 +936,21 @@ class _UiaTree:
         for child, rect in inside:
             below, solid = self._best(child, x, y, depth - 1)
             found = [rect] + below
-            if solid or (not below and self._types.get(child.value) not in self._CONTAINERS):
+            if solid:
+                return found, True
+            if not below and self._types.get(child.value) not in self._CONTAINERS:
+                self._leaf = (node, child)
                 return found, True
             if not fallback or _area(found[-1]) < _area(fallback[-1]):
                 fallback = found
         return fallback, False
+
+    def cells(self):
+        """上次 path() 落在单元格（DataItem）上时，它所在表格区当前取到的所有单元格矩形。"""
+        if self._leaf is None or self._types.get(self._leaf[1].value) != self._DATA_ITEM:
+            return ()
+        return tuple(rect for child, rect in self._kids(self._leaf[0])
+                     if self._types.get(child.value) == self._DATA_ITEM and not rect.isEmpty())
 
     def _root(self, hwnd):
         element = self._roots.get(hwnd)

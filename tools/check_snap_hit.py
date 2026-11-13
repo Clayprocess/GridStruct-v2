@@ -44,6 +44,7 @@ class FakeAccessible(snap._Accessibility):
         self.browser_hwnds = set(browsers)
         self.uia_hwnds = set(uia)
         self.widgets = {}  # hwnd -> Chromium 网页内容子窗口
+        self.processes = {}  # hwnd -> 进程名
         self.cold = cold
         self.name_calls = 0
         self._com_owned = False
@@ -80,6 +81,9 @@ class FakeAccessible(snap._Accessibility):
 
     def _render_widgets(self, hwnd):
         return self.widgets.get(hwnd, [])
+
+    def _process(self, hwnd):
+        return self.processes.get(hwnd, "")
 
     def _uses_uia(self, hwnd):
         return hwnd in self.uia_hwnds
@@ -417,6 +421,9 @@ def check_detector():
         settle(app, detector)
         assert provider.calls == calls, "降级后的窗口不再点命中"
         assert results[-1] == WINDOW, results
+        detector._cells[key], detector._shown_key = (QRect(100, 100, 72, 19), QRect(172, 100, 72, 19)), key
+        assert detector.cells_at(QPoint(180, 110)) == [QRect(100, 100, 72, 19), QRect(172, 100, 72, 19)]
+        assert detector.cells_at(QPoint(400, 300)) == [], "不在单元格上不给网格"
         print("PASS: detector keeps the old box while waiting, skips repeat queries, steps to parents, demotes slow windows")
     finally:
         detector.shutdown()
@@ -432,7 +439,7 @@ def check_hung_query():
     seen = []
 
     class Hanging:
-        one_off = False
+        one_off, cells = False, ()
 
         def hit_path(self, hwnd, x, y):
             seen.append(hwnd)
@@ -497,7 +504,7 @@ def check_stationary_refinement():
     calls = []
 
     class LazyProvider:
-        one_off = False
+        one_off, cells = False, ()
 
         def hit_path(self, *_args):
             calls.append(time.monotonic())
@@ -545,7 +552,7 @@ def check_completion_during_timeout_check():
     entered, release = threading.Event(), threading.Event()
 
     class Provider:
-        one_off = False
+        one_off, cells = False, ()
 
         def hit_path(self, *_args):
             entered.set()
@@ -660,6 +667,16 @@ def check_uia():
     provider = FakeAccessible(page(), uia={1})
     provider._uia = uia
     assert provider.hit_path(1, 100, 125)[-1] == cell and provider.calls == 0, "走 UIA 时不做 MSAA 点命中"
+    assert provider.cells == (), "按格拖选只给 Excel"
+    # Excel：命中单元格（DataItem）时带回同一表格区的所有单元格；落在滚动条上时不带。
+    excel = FakeAccessible(page(), uia={1})
+    excel.processes = {1: "excel.exe"}
+    excel._uia = FakeUiaTree(tree, {name: 50029 for name, _rect in cells})
+    excel.hit_path(1, 100, 125)
+    assert excel.cells == tuple(rect for _name, rect in cells), len(excel.cells)
+    excel.hit_path(1, 790, 300)
+    assert excel.cells == (), "不在单元格上时不带单元格"
+    excel.close()
     assert not provider.one_off, "已缓存的查询照常计入慢窗口判断"
     uia.big_fetch = False
     uia._children.pop("grid")
