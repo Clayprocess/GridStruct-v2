@@ -10,7 +10,11 @@
 #   4. 最内层矩形仍包含鼠标时不再查询；换控件时保留旧框直到新结果到达，
 #      避免先退回外层容器再跳到新控件；
 #   5. 单次点命中（不含补祖先）超过 300ms 的窗口本次截图只用窗口矩形；
-#      卡住超过 2s 的线程丢弃、换新线程，那个窗口冷却 30s 后再试。
+#      卡住超过 2s 的线程丢弃、换新线程，那个窗口冷却 30s 后再试；
+#   6. 截图一开始就为鼠标下和前台窗口建好 IAccessible，浏览器类程序再“戳”一下客户区，
+#      Chromium 收到无障碍查询才建完整的树；浏览器第一次点命中常给大容器，同一点再查一次取小的；
+#   7. 按程序适配（2026-11 真机诊断）：Excel、Word、Zoom 的 MSAA 只到整个表格区/文档区/窗口，
+#      改用 UIA 逐层找子元素（Excel 能到单元格）。
 # 非 Windows 平台返回空（Linux 开发机不断）。
 
 import ctypes
@@ -52,7 +56,8 @@ def _result_channel():
 class _Worker:
     """一次截图会话一条线程；只引用结果转发器，不引用 detector，旧会话可以立即销毁。"""
 
-    def __init__(self, results):
+    def __init__(self, results, warm=()):
+        self._warm = tuple(warm)
         self._cond = Condition()
         self._pending = None
         self._current = None
@@ -97,6 +102,17 @@ class _Worker:
         global _abandoned
         provider = _try_init_msaa()
         try:
+            for hwnd, cursor in self._warm if provider is not None else ():
+                with self._cond:
+                    if self._stopped:
+                        return
+                    self.busy = (hwnd, time.monotonic())
+                try:
+                    provider.warm(hwnd, cursor)
+                except OSError as error:
+                    print(f"[GridStruct-V2] 预热无障碍对象失败：{error}", flush=True)
+                with self._cond:
+                    self.busy = None
             while True:
                 with self._cond:
                     while self._pending is None and not self._stopped:
@@ -114,7 +130,7 @@ class _Worker:
                         rects = provider.hit_path(hwnd, x, y)
                     except OSError as error:
                         print(f"[GridStruct-V2] 点命中查询失败：{error}", flush=True)
-                elapsed = (time.perf_counter() - started) * 1000
+                elapsed = 0.0 if provider is not None and provider.one_off else (time.perf_counter() - started) * 1000
                 with self._cond:
                     if self._stopped:
                         return
@@ -167,6 +183,9 @@ class RegionDetector(QObject):
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setTimerType(Qt.PreciseTimer)
         self._refresh_timer.timeout.connect(self._refresh_hover)
+        if _IS_WIN and not only_window and _abandoned < _MAX_ABANDONED:
+            # 第一次悬停前就在工作线程里建好对象，首个框不用再等 AccessibleObjectFromWindow。
+            self._worker = _Worker(self._channel, _warm_targets(self._window_api, self._windows))
 
     def _refresh_hover(self):
         self.detect(self._last)
@@ -203,8 +222,11 @@ class RegionDetector(QObject):
         elif self._shown_key != key:
             # 刚进入这个窗口：先框整个窗口，控件结果到了再收紧。
             self._show(key, x, y)
-        # 结果只沿用 1 秒：Chrome 等程序首次被查询后才逐步建好无障碍树，停住不动也要能细化。
-        remaining = _HIT_REUSE_S - (time.monotonic() - hits[2]) if covered else 0
+        # 只有鼠标停在上次查询的同一点才沿用结果：在框内移动也要重查，否则停在大容器空白处后
+        # 移到里面的按钮上要等结果过期才收紧（Qoder 等网页界面最明显，同 PixPin 每次移动都查）。
+        # 停住时结果只沿用 1 秒：Chrome 等程序首次被查询后才逐步建好无障碍树，停住不动也要能细化。
+        same_point = covered and hits[3] == (x, y)
+        remaining = _HIT_REUSE_S - (time.monotonic() - hits[2]) if same_point else 0
         if remaining <= 0:
             self._request(key, hwnd, x, y)
             if _hung(hwnd):
@@ -268,7 +290,7 @@ class RegionDetector(QObject):
             print(f"[GridStruct-V2] 点命中 {elapsed_ms:.0f}ms，该窗口改用窗口快照", flush=True)
         # 窗口不提供无障碍信息时整窗都算命中，1 秒内不再问。
         inner = rects[-1] if rects else QRect(*key[1])
-        self._hits[key] = (inner, rects, time.monotonic())
+        self._hits[key] = (inner, rects, time.monotonic(), (x, y))
         if self._point is None or self._shown_key != key:
             return
         if not inner.contains(*self._point):
@@ -323,6 +345,10 @@ def _win32_api():
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     signatures = {
         "WindowFromPoint": ([wintypes.POINT], wintypes.HWND),
+        "GetCursorPos": ([ctypes.POINTER(wintypes.POINT)], wintypes.BOOL),
+        "GetForegroundWindow": ([], wintypes.HWND),
+        "GetClassNameW": ([wintypes.HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
+        "GetWindowThreadProcessId": ([wintypes.HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD),
         "GetAncestor": ([wintypes.HWND, wintypes.UINT], wintypes.HWND),
         "GetWindowRect": ([wintypes.HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
         "IsWindow": ([wintypes.HWND], wintypes.BOOL),
@@ -331,6 +357,7 @@ def _win32_api():
         "GetWindowLongW": ([wintypes.HWND, ctypes.c_int], ctypes.c_long),
         "ScreenToClient": ([wintypes.HWND, ctypes.POINTER(wintypes.POINT)], wintypes.BOOL),
         "ChildWindowFromPointEx": ([wintypes.HWND, wintypes.POINT, wintypes.UINT], wintypes.HWND),
+        "EnumChildWindows": ([wintypes.HWND, ctypes.c_void_p, wintypes.LPARAM], wintypes.BOOL),
         "SendMessageTimeoutW": ([wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
                                 wintypes.LPARAM, wintypes.UINT, wintypes.UINT,
                                 ctypes.POINTER(ctypes.c_size_t)], ctypes.c_ssize_t),
@@ -357,8 +384,8 @@ def _usable_window(user32, dwm, hwnd, ignored_hwnd):
     if (not hwnd or excluded or not user32.IsWindow(hwnd)
             or not user32.IsWindowVisible(hwnd) or user32.IsHungAppWindow(hwnd)):
         return False
-    exstyle = user32.GetWindowLongW(hwnd, -20)
-    if exstyle & 0x80020 == 0x80020:
+    # 同 PixPin：鼠标穿透（WS_EX_TRANSPARENT）的窗口点不到，也不吸附。
+    if user32.GetWindowLongW(hwnd, -20) & 0x20:
         return False
     cloaked = wintypes.DWORD()
     result = dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
@@ -420,9 +447,23 @@ def _window_at(user32, x, y, ignored_hwnd):
     if target:
         result = ctypes.c_size_t()
         # 只发送无副作用的 WM_NULL，提前隔离尚未被系统标记 hung 的窗口。
-        if not user32.SendMessageTimeoutW(target, 0, 0, 0, 2, 100, ctypes.byref(result)):
+        if not user32.SendMessageTimeoutW(target, 0, 0, 0, 2, _PROBE_MS, ctypes.byref(result)):
             return None, covered
     return target, covered or target != root
+
+
+def _warm_targets(user32, windows):
+    """截图开始时要预热的 (窗口, 鼠标位置)：鼠标下的窗口在前，再加前台窗口；只取快照里的（自身遮罩已排除）。"""
+    from ctypes import wintypes
+    known = {hwnd for hwnd, _rect in windows}
+    point = wintypes.POINT()
+    under, cursor = None, None
+    if user32.GetCursorPos(ctypes.byref(point)):
+        cursor = (point.x, point.y)
+        under = next((hwnd for hwnd, rect in windows if rect.contains(*cursor)), None)
+    foreground = user32.GetForegroundWindow()
+    foreground = user32.GetAncestor(foreground, 2) if foreground else None
+    return [(hwnd, cursor) for hwnd in dict.fromkeys((under, foreground)) if hwnd in known]
 
 
 # 控件最小边长（物理像素）：任务栏、托盘、标签页关闭按钮这类小图标也要能框到。
@@ -435,6 +476,29 @@ _HIT_REUSE_S = 1.0
 _HUNG_S = 2.0
 _HUNG_COOLDOWN_S = 30.0
 _MAX_ABANDONED = 2
+# 跨进程前用 WM_NULL 探活的等待（同 PixPin 50ms），没响应的窗口不做 COM 调用。
+_PROBE_MS = 50
+# 浏览器及 Chromium/Electron 内核程序（进程名小写）：首次点命中常给大容器，需要唤醒和二次命中。
+_BROWSERS = frozenset({
+    "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe", "chromium.exe",
+    "arc.exe", "360se.exe", "360chrome.exe", "360chromex.exe", "qqbrowser.exe", "sogouexplorer.exe",
+    "2345explorer.exe", "liebao.exe", "maxthon.exe", "quark.exe", "msedgewebview2.exe",
+    "code.exe", "cursor.exe", "windsurf.exe", "feishu.exe", "lark.exe", "dingtalk.exe", "qq.exe",
+    "wxwork.exe", "slack.exe", "discord.exe", "notion.exe", "obsidian.exe", "typora.exe",
+    "postman.exe", "figma.exe", "ms-teams.exe", "teams.exe", "spotify.exe", "yuque.exe",
+})
+
+
+# 一次取回这么多子元素（表格整屏单元格）算一次性开销，之后都走缓存。
+_BIG_FETCH = 100
+# MSAA 取不细、UIA 能取到单元格/列表项的程序（tools/probe_snap_apps.py 真机诊断结果）。
+_UIA_PROCESSES = frozenset({"excel.exe", "winword.exe", "zoom.exe"})
+# Windows 11 任务栏是 XAML 画的，MSAA 取不到单个图标，UIA 能取到每个按钮。
+_UIA_CLASSES = frozenset({"Shell_TrayWnd", "Shell_SecondaryTrayWnd"})
+# UIA 一次点查询最多看的节点数（含鼠标的分支都往下试，要有上限）。
+_UIA_VISITS = 64
+# 取到 0 个子元素的节点，过这么久再取一次。
+_UIA_EMPTY_RETRY_S = 0.5
 
 
 def _valid_rect(rect, x, y, minimum=8):
@@ -485,6 +549,12 @@ class _Accessibility:
         # (hwnd, 点命中路径) -> (补全后的路径, 是否走完)：鼠标停住时的重查不再重新走一遍父链；
         # 中途失败的只当已知祖先先用着，下次还会重试补全。
         self._walks = {}
+        self._names = {}  # hwnd -> 进程名
+        self._classes = {}  # hwnd -> 窗口类名
+        self._woken = set()  # 已唤醒无障碍树的浏览器类窗口
+        self._uia = None  # 首次用到 UIA 的程序时才创建
+        # 本次查询含一次性的大批量取子元素（如 Excel 整屏单元格）：耗时不算进慢窗口降级。
+        self.one_off = False
 
     def _call(self, pointer, index, argtypes, *args):
         ctypes = self._ctypes
@@ -501,6 +571,8 @@ class _Accessibility:
 
     def close(self):
         self._drop_deep()
+        if self._uia is not None:
+            self._uia.close()
         for root, _rect in self._roots.values():
             self._release(root)
         self._roots.clear()
@@ -514,7 +586,7 @@ class _Accessibility:
         ctypes = self._ctypes
         result = ctypes.c_size_t()
         # 跨进程 COM 遇到无响应窗口会一直卡住线程，先用无副作用的 WM_NULL 探一下。
-        if not self._user32.SendMessageTimeoutW(hwnd, 0, 0, 0, 2, 100, ctypes.byref(result)):
+        if not self._user32.SendMessageTimeoutW(hwnd, 0, 0, 0, 2, _PROBE_MS, ctypes.byref(result)):
             return None
         root = ctypes.c_void_p()
         if self._oleacc.AccessibleObjectFromWindow(hwnd, 0, ctypes.byref(self._iid), ctypes.byref(root)) < 0 or not root:
@@ -525,6 +597,97 @@ class _Accessibility:
             self._release(root)
             return None
         return entry
+
+    def _process(self, hwnd):
+        name = self._names.get(hwnd)
+        if name is None:
+            name = self._names[hwnd] = _process_name(self._user32, hwnd)
+        return name
+
+    def _class(self, hwnd):
+        name = self._classes.get(hwnd)
+        if name is None:
+            buffer = self._ctypes.create_unicode_buffer(256)
+            self._user32.GetClassNameW(hwnd, buffer, 256)
+            name = self._classes[hwnd] = buffer.value
+        return name
+
+    def _is_browser(self, hwnd):
+        # 名单外的 Electron 程序（Qoder 等）靠 Chromium 的顶层窗口类名认出来。
+        return self._process(hwnd) in _BROWSERS or self._class(hwnd) == "Chrome_WidgetWin_1"
+
+    def _uses_uia(self, hwnd):
+        return self._process(hwnd) in _UIA_PROCESSES or self._class(hwnd) in _UIA_CLASSES
+
+    def _uia_path(self, hwnd, x, y):
+        try:
+            if self._uia is None:
+                self._uia = _UiaTree(self._call, self._release, self._ole32)
+            rects = self._uia.path(hwnd, x, y)
+            self.one_off = self._uia.big_fetch
+            return rects
+        except OSError as error:
+            print(f"[GridStruct-V2] UIA 查询失败，改用 MSAA：{error}", flush=True)
+            return []
+
+    def warm(self, hwnd, cursor):
+        """建好窗口对象；浏览器类程序顺便唤醒无障碍树。
+
+        走 UIA 的程序沿鼠标位置和窗口中心各取一遍子元素：Excel 整屏单元格一次要几十到上百毫秒，
+        截图一开始就在后台取好，第一次移进表格区时不用再等。
+        """
+        entry = self._root(hwnd)
+        if entry is None:
+            return
+        if self._is_browser(hwnd):
+            self._wake(hwnd)
+        if self._uses_uia(hwnd):
+            center = (entry[1].center().x(), entry[1].center().y())
+            for point in dict.fromkeys(point for point in (cursor, center) if point):
+                self._uia_path(hwnd, *point)
+
+    def _wake(self, hwnd):
+        """取一次客户区名字：Chromium/Electron 收到无障碍查询才打开完整的树（同 PixPin），每个窗口一次。
+
+        网页内容的树挂在子窗口 Chrome_RenderWidgetHostHWND 上，只问顶层窗口时 Electron 程序（Qoder）
+        常常不建网页的树；UIA 的 ElementFromPoint 能取到正是因为它问到了这个子窗口（2026-11 真机第三轮），
+        所以子窗口也各问一次。
+        """
+        self._woken.add(hwnd)
+        for target in [hwnd] + self._render_widgets(hwnd):
+            self._read_name(target)
+
+    def _render_widgets(self, hwnd):
+        """窗口下的 Chromium 网页内容子窗口（最多 8 个）。"""
+        ctypes = self._ctypes
+        from ctypes import wintypes
+        found = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def collect(child, _param):
+            if self._class(child) == "Chrome_RenderWidgetHostHWND":
+                found.append(child)
+            return len(found) < 8
+
+        self._user32.EnumChildWindows(hwnd, collect, 0)
+        return found
+
+    def _read_name(self, hwnd):
+        ctypes = self._ctypes
+        client = ctypes.c_void_p()
+        if self._oleacc.AccessibleObjectFromWindow(hwnd, 0xFFFFFFFC, ctypes.byref(self._iid),
+                                                   ctypes.byref(client)) < 0 or not client:
+            return
+        name = ctypes.c_void_p()
+        try:
+            self._call(client, 10, [_Variant, ctypes.POINTER(ctypes.c_void_p)],
+                       _Variant(vt=self._VT_I4), ctypes.byref(name))
+        finally:
+            if name:
+                oleaut32 = ctypes.WinDLL("oleaut32")
+                oleaut32.SysFreeString.argtypes, oleaut32.SysFreeString.restype = [ctypes.c_void_p], None
+                oleaut32.SysFreeString(name)
+            self._release(client)
 
     def _location(self, accessible, child):
         ctypes = self._ctypes
@@ -591,17 +754,10 @@ class _Accessibility:
         self._walks[key] = (full, complete)
         return full
 
-    def hit_path(self, hwnd, x, y):
-        """由外到内返回 accHitTest 逐层命中的控件矩形（物理像素），跳过的层由 ancestors() 补。"""
+    def _descend(self, root, x, y):
+        """从窗口对象逐层 accHitTest。返回 (最深的完整对象或 None, 路径, 是否出错)，对象由调用方释放。"""
         ctypes = self._ctypes
-        self._drop_deep()
-        entry = self._root(hwnd)
-        if entry is None:
-            return []
-        root, root_rect = entry
-        accessible = root
-        rects = []
-        descended = False  # 是否下钻到过完整对象（不只是简单子元素）
+        accessible, rects = root, []
         try:
             for _ in range(self._MAX_DEPTH):
                 variant = _Variant()
@@ -621,7 +777,7 @@ class _Accessibility:
                         break
                     if accessible is not root:
                         self._release(accessible)
-                    accessible, descended = child, True
+                    accessible = child
                     rects.append(rect)
                 elif variant.vt == self._VT_I4 and variant.value.lVal != 0:
                     rect = self._location(accessible, variant.value.lVal)
@@ -630,22 +786,218 @@ class _Accessibility:
                     break
                 else:
                     break
-            if descended:
-                key = (hwnd, tuple(r.getRect() for r in rects))
-                walk = self._walks.get(key)
-                if walk is None or not walk[1]:
-                    self._deep, accessible = (accessible, x, y, root_rect, key, list(rects)), root
-                if walk is not None:
-                    # 补过父链的元素直接给已知的完整路径，静止刷新时不会先退回短路径、丢掉滚轮选中的层。
-                    rects = walk[0]
         except OSError:
-            # 某层不支持命中或定位：保留已经得到的外层路径。窗口对象本身失效（窗口已关）就丢掉缓存。
-            if accessible is root and not rects:
-                self._release(self._roots.pop(hwnd)[0])
-        finally:
+            # 某层不支持命中或定位：保留已经得到的外层路径。
             if accessible is not root:
                 self._release(accessible)
+            return None, rects, True
+        return (None if accessible is root else accessible), rects, False
+
+    def hit_path(self, hwnd, x, y):
+        """由外到内返回 accHitTest 逐层命中的控件矩形（物理像素），跳过的层由 ancestors() 补。"""
+        self._drop_deep()
+        self.one_off = False
+        entry = self._root(hwnd)
+        if entry is None:
+            return []
+        root, root_rect = entry
+        if hwnd not in self._woken and self._is_browser(hwnd):
+            # 截图开始时不在前台的浏览器类窗口，第一次悬停时补唤醒。
+            self._wake(hwnd)
+        if self._uses_uia(hwnd):
+            rects = self._uia_path(hwnd, x, y)
+            if rects:
+                return rects
+        deep, rects, failed = self._descend(root, x, y)
+        if failed and not rects:
+            # 窗口对象本身失效（窗口已关）：丢掉缓存，下次重建。
+            self._release(self._roots.pop(hwnd)[0])
+            return rects
+        if not failed and self._is_browser(hwnd):
+            # 同 PixPin：浏览器第一次命中常给大容器，同一点再查一次，取更小且含鼠标的。
+            again, rects_again, failed_again = self._descend(root, x, y)
+            if not failed_again and rects_again and (not rects or _area(rects_again[-1]) < _area(rects[-1])):
+                deep, again, rects = again, deep, rects_again
+            if again is not None:
+                self._release(again)
+        if _shallow(rects, root_rect):
+            # Qoder 等 Electron 程序的 MSAA 只有窗口一层，局部元素只在 UIA 里（2026-11 真机验收）。
+            fallback = self._uia_path(hwnd, x, y)
+            if not _shallow(fallback, root_rect):
+                if deep is not None:
+                    self._release(deep)
+                return fallback
+        if deep is not None:
+            key = (hwnd, tuple(r.getRect() for r in rects))
+            walk = self._walks.get(key)
+            if walk is None or not walk[1]:
+                self._deep, deep = (deep, x, y, root_rect, key, list(rects)), None
+            if walk is not None:
+                # 补过父链的元素直接给已知的完整路径，静止刷新时不会先退回短路径、丢掉滚轮选中的层。
+                rects = walk[0]
+            if deep is not None:
+                self._release(deep)
         return rects
+
+
+def _area(rect):
+    return rect.width() * rect.height()
+
+
+def _shallow(rects, window_rect):
+    """最内层仍几乎是整个窗口：等于没取到元素。"""
+    return not rects or _area(rects[-1]) * 10 >= _area(window_rect) * 9
+
+
+class _UiaTree:
+    """UIA 逐层找含鼠标的子元素，子元素、矩形和控件类型每个节点只取一次。
+
+    不用 ElementFromPoint：它按屏幕找最上层窗口，截图时会命中我们自己的遮罩。
+    截图期间画面是冻结的，取过的子元素在整个会话里都有效；Excel 表格区一次取回所有可见单元格的矩形。
+    虚表（UIAutomationClient.h）：IUIAutomation ElementFromHandle 6、CreateCacheRequest 20、
+    CreateTrueCondition 21；CacheRequest AddProperty 3；Element FindAllBuildCache 8、
+    CachedControlType 53、CachedBoundingRectangle 75；ElementArray Length 3、GetElement 4。
+    """
+
+    _CLSID = "ff48dba4-60ef-4201-aa87-54103eef594e"
+    _IID = "30cbe57d-d9d0-452a-ab13-7ac5ac4825ee"
+    _BOUNDING_RECTANGLE, _CONTROL_TYPE = 30001, 30003
+    # 控件类型 Custom 50025、Group 50026、Window 50032、Pane 50033：没有子元素时算空容器。
+    _CONTAINERS = frozenset({50025, 50026, 50032, 50033})
+    _CHILDREN = 2  # TreeScope_Children
+
+    def __init__(self, call, release, ole32):
+        from uuid import UUID
+        self._call, self._release = call, release
+        self._automation = ctypes.c_void_p()
+        clsid = (ctypes.c_byte * 16).from_buffer_copy(UUID(self._CLSID).bytes_le)
+        iid = (ctypes.c_byte * 16).from_buffer_copy(UUID(self._IID).bytes_le)
+        ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(self._automation))
+        self._request, self._condition = ctypes.c_void_p(), ctypes.c_void_p()
+        call(self._automation, 20, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(self._request))
+        call(self._request, 3, [ctypes.c_int], self._BOUNDING_RECTANGLE)
+        call(self._request, 3, [ctypes.c_int], self._CONTROL_TYPE)
+        call(self._automation, 21, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(self._condition))
+        self._roots = {}  # hwnd -> 窗口元素
+        self._children = {}  # 元素地址 -> [(子元素, 矩形)]
+        self._empty_at = {}  # 元素地址 -> 上次取到 0 个子元素的时间
+        self._types = {}  # 元素地址 -> 控件类型
+
+    def path(self, hwnd, x, y):
+        """由外到内返回含鼠标的元素矩形，取最内层最小的一条路径。"""
+        self.big_fetch = False
+        self._budget = _UIA_VISITS
+        return self._best(self._root(hwnd), x, y, _Accessibility._MAX_DEPTH)[0]
+
+    def _best(self, node, x, y, depth):
+        """node 之下含鼠标的最深一串矩形，以及它是否落在实际控件上。
+
+        同一层有多个含鼠标的子元素时先走最小的；走到底只是没有子元素的空容器（窗格/分组）时，
+        换同层其他含鼠标的子元素往下试：任务栏上有盖在图标上方的空整组容器，图标在另一个和
+        任务栏等宽的子元素下面（2026-11 真机第三轮）；Chromium 也有和内容等大的空子窗口。
+        按钮、滚动条这类实际控件即使没有子元素也直接用。都只到空容器时取最内层最小的那条。
+        最多看 _UIA_VISITS 个节点，防止大树上走太久。
+        """
+        if depth <= 0 or self._budget <= 0:
+            return [], False
+        self._budget -= 1
+        inside = sorted(((child, rect) for child, rect in self._kids(node) if rect.contains(x, y)
+                         and rect.width() >= _MIN_ELEMENT and rect.height() >= _MIN_ELEMENT),
+                        key=lambda item: _area(item[1]))
+        fallback = []
+        for child, rect in inside:
+            below, solid = self._best(child, x, y, depth - 1)
+            found = [rect] + below
+            if solid or (not below and self._types.get(child.value) not in self._CONTAINERS):
+                return found, True
+            if not fallback or _area(found[-1]) < _area(fallback[-1]):
+                fallback = found
+        return fallback, False
+
+    def _root(self, hwnd):
+        element = self._roots.get(hwnd)
+        if element is None:
+            element = ctypes.c_void_p()
+            self._call(self._automation, 6, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+                       ctypes.c_void_p(hwnd), ctypes.byref(element))
+            self._roots[hwnd] = element
+        return element
+
+    def _kids(self, node):
+        """node 的 [(子元素, 矩形)]；取过的直接用，取到 0 个的过 _UIA_EMPTY_RETRY_S 再取。
+
+        Chromium/Electron 被唤醒后是异步建树的，刚唤醒时取到的空子元素不能一直当真。
+        """
+        kids = self._children.get(node.value)
+        if kids or (kids is not None and time.monotonic() - self._empty_at[node.value] < _UIA_EMPTY_RETRY_S):
+            return kids
+        kids = self._children[node.value] = self._fetch(node)
+        if not kids:
+            self._empty_at[node.value] = time.monotonic()
+        self.big_fetch |= len(kids) >= _BIG_FETCH
+        return kids
+
+    def _fetch(self, node):
+        from ctypes import wintypes
+        found, kids = ctypes.c_void_p(), []
+        self._call(node, 8, [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+                   self._CHILDREN, self._condition, self._request, ctypes.byref(found))
+        try:
+            length = ctypes.c_int()
+            if found:
+                self._call(found, 3, [ctypes.POINTER(ctypes.c_int)], ctypes.byref(length))
+            for index in range(length.value):
+                element, rc = ctypes.c_void_p(), wintypes.RECT()
+                self._call(found, 4, [ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)], index, ctypes.byref(element))
+                kids.append((element, None))
+                self._call(element, 75, [ctypes.POINTER(wintypes.RECT)], ctypes.byref(rc))
+                kids[-1] = (element, QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top))
+                kind = ctypes.c_int()
+                try:
+                    self._call(element, 53, [ctypes.POINTER(ctypes.c_int)], ctypes.byref(kind))  # CachedControlType
+                except OSError:
+                    pass  # 取不到类型就当实际控件，不影响矩形
+                self._types[element.value] = kind.value
+        except OSError:
+            for element, _rect in kids:
+                self._release(element)
+            raise
+        finally:
+            self._release(found)
+        return kids
+
+    def close(self):
+        for kids in self._children.values():
+            for element, _rect in kids:
+                self._release(element)
+        for element in self._roots.values():
+            self._release(element)
+        for pointer in (self._condition, self._request, self._automation):
+            self._release(pointer)
+
+
+def _process_name(user32, hwnd):
+    """窗口所属进程的文件名（小写）；取不到返回空串。"""
+    from ctypes import wintypes
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                     ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(1024)
+        path = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+            return ""
+        return path.value.rsplit("\\", 1)[-1].lower()
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _try_init_msaa():

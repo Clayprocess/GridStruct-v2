@@ -37,6 +37,8 @@ def run_case(action):
     window_rect, element_rect = QRect(0, 0, 800, 600), QRect(20, 20, 60, 40)
 
     class Provider:
+        one_off = False
+
         def __init__(self):
             self.record = [threading.get_ident()]
             records.append(self.record)
@@ -49,6 +51,9 @@ def run_case(action):
 
         def ancestors(self, _interrupted):
             return None
+
+        def warm(self, _hwnd, _cursor):
+            pass
 
         def close(self):
             self.record.append(threading.get_ident())
@@ -79,7 +84,8 @@ def run_case(action):
         isolated.enter_context(patch("capture.flow.capture_virtual_desktop", return_value=shot))
         isolated.enter_context(patch.object(snap, "_IS_WIN", True))
         isolated.enter_context(patch.object(snap, "_win32_api", return_value=SimpleNamespace(
-            IsWindow=lambda _hwnd: True, IsWindowVisible=lambda _hwnd: True)))
+            IsWindow=lambda _hwnd: True, IsWindowVisible=lambda _hwnd: True,
+            GetCursorPos=lambda _point: 0, GetForegroundWindow=lambda: 0)))
         isolated.enter_context(patch.object(snap, "_snapshot_windows", return_value=[(7, window_rect)]))
         isolated.enter_context(patch.object(snap, "_try_init_msaa", side_effect=Provider))
         flow = ScreenshotFlow(app)

@@ -15,6 +15,7 @@ import ctypes
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -27,14 +28,24 @@ class FakeAccessible(snap._Accessibility):
     """objects: {id: (rect, [子对象 id 或 ("item", 子元素编号, rect)])}，1 是窗口对象。
     deepest=True 模拟 Chrome：accHitTest 跳过中间层，直接返回最深的对象；
     也可给 {对象 id: 它命中时直接返回的对象 id}，只让某一层跳层。
-    broken: accLocation 会失败（抛 OSError）的对象 id。failing_parents: 这些对象各有一次 get_accParent 失败。"""
+    broken: accLocation 会失败（抛 OSError）的对象 id。failing_parents: 这些对象各有一次 get_accParent 失败。
+    browsers: 算作浏览器类程序的窗口 hwnd。cold: 前几次在非窗口对象上的 accHitTest 只返回自己（树还没建好）。
+    uia: 走 UIA 的窗口 hwnd，配合 provider._uia 注入假树。"""
 
-    def __init__(self, objects, deepest=False, broken=()):
+    def __init__(self, objects, deepest=False, broken=(), browsers=(), cold=0, uia=()):
         self._ctypes = ctypes
         self._iid = (ctypes.c_byte * 16)()
         self._roots = {}
         self._deep = None
         self._walks = {}
+        self._names = {}
+        self._woken = set()
+        self._uia = FakeUiaTree({})  # 默认 UIA 什么也取不到
+        self.browser_hwnds = set(browsers)
+        self.uia_hwnds = set(uia)
+        self.widgets = {}  # hwnd -> Chromium 网页内容子窗口
+        self.cold = cold
+        self.name_calls = 0
         self._com_owned = False
         self.objects = objects
         self.deepest = deepest
@@ -64,6 +75,15 @@ class FakeAccessible(snap._Accessibility):
 
         self._user32, self._oleacc = User32(), OleAcc()
 
+    def _is_browser(self, hwnd):
+        return hwnd in self.browser_hwnds
+
+    def _render_widgets(self, hwnd):
+        return self.widgets.get(hwnd, [])
+
+    def _uses_uia(self, hwnd):
+        return hwnd in self.uia_hwnds
+
     @staticmethod
     def _id(pointer):
         return pointer.value if isinstance(pointer, ctypes.c_void_p) else pointer
@@ -73,6 +93,10 @@ class FakeAccessible(snap._Accessibility):
         if index == 24:  # accHitTest
             self.calls += 1
             x, y, variant = args[0], args[1], args[2]._obj
+            if self.cold and node != 1:
+                self.cold -= 1
+                variant.vt, variant.value.lVal = snap._Accessibility._VT_I4, 0
+                return 0
             for child in self.objects[node][1]:
                 if isinstance(child, tuple):
                     if child[2].contains(x, y):
@@ -102,6 +126,9 @@ class FakeAccessible(snap._Accessibility):
             args[0]._obj.value = None if parent is None else 1000 + parent
             if parent is not None:
                 self.acquired.append(1000 + parent)
+            return 0
+        if index == 10:  # get_accName
+            self.name_calls += 1
             return 0
         if index == 0:  # QueryInterface
             args[1]._obj.value = node - 1000
@@ -147,11 +174,27 @@ def page():
 
 
 class FakeUser32:
+    cursor = (0, 0)
+    foreground = 0
+
     @staticmethod
     def IsWindow(_hwnd):
         return True
 
     IsWindowVisible = IsWindow
+
+    @classmethod
+    def GetCursorPos(cls, point):
+        point._obj.x, point._obj.y = cls.cursor
+        return 1
+
+    @classmethod
+    def GetForegroundWindow(cls):
+        return cls.foreground
+
+    @staticmethod
+    def GetAncestor(hwnd, _flags):
+        return hwnd
 
 
 def settle(app, detector):
@@ -215,6 +258,30 @@ def check_hit_path():
     provider = FakeAccessible(page(), deepest=True, broken={9})
     for _ in range(20):
         full_path(provider, 220, 155)
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    # 浏览器类程序第一次命中只给大容器（树还没建好）：同一点再查一次，取更小的。
+    provider = FakeAccessible(page(), browsers={1}, cold=1)
+    assert provider.hit_path(1, 220, 155) == [BODY, TABLE, ROW, CELL, TEXT]
+    provider = FakeAccessible(page(), cold=1)
+    assert provider.hit_path(1, 220, 155) == [BODY], "非浏览器不做二次命中"
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    provider = FakeAccessible(page(), browsers={1})
+    calls = provider.calls
+    assert provider.hit_path(1, 220, 155) == [BODY, TABLE, ROW, CELL, TEXT]
+    assert provider.calls == calls + 12, "浏览器每次命中查两遍"
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    # 预热：建好窗口对象；浏览器再取一次客户区名字唤醒无障碍树。
+    provider = FakeAccessible(page())
+    provider.warm(1, None)
+    assert provider.opened == 1 and provider.name_calls == 0
+    provider = FakeAccessible(page(), browsers={1})
+    provider.warm(1, None)
+    assert provider.opened == 2 and provider.name_calls == 1, (provider.opened, provider.name_calls)
+    provider.hit_path(1, 220, 155)
+    assert provider.opened == 2, "预热过的窗口对象应复用"
     provider.close()
     assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
     print("PASS: hit_path descends window → toolbar → tab → close button; ancestors() recovers skipped table/row, "
@@ -312,9 +379,15 @@ def check_detector():
         settle(app, detector)
         assert results[-1] == CLOSE, results
         calls = provider.calls
-        detector.detect(QPoint(117, 20))
+        detector.detect(QPoint(115, 18))
         settle(app, detector)
-        assert provider.calls == calls, "命中矩形内移动不应再查询"
+        assert provider.calls == calls, "停在同一点、结果未过期时不应再查询"
+        count = len(results)
+        detector.detect(QPoint(117, 20))
+        assert results[-1] == CLOSE and WINDOW not in results[count:], "框内移动先沿用旧框"
+        settle(app, detector)
+        assert provider.calls > calls, "框内移动也要重查（大容器里的按钮）"
+        assert results[-1] == CLOSE, results
         detector.step_level(1)
         assert results[-1] == TAB, results
         detector.step_level(1)
@@ -359,6 +432,8 @@ def check_hung_query():
     seen = []
 
     class Hanging:
+        one_off = False
+
         def hit_path(self, hwnd, x, y):
             seen.append(hwnd)
             if hwnd == 7:
@@ -367,6 +442,9 @@ def check_hung_query():
 
         def ancestors(self, _interrupted):
             return None
+
+        def warm(self, _hwnd, _cursor):
+            pass
 
         def close(self):
             pass
@@ -384,7 +462,7 @@ def check_hung_query():
         while 7 not in seen and time.monotonic() < deadline:
             app.processEvents()
         key = (7, WINDOW.getRect())
-        detector._hits[key] = (TAB, [TOOLBAR, TAB], time.monotonic() - snap._HIT_REUSE_S)
+        detector._hits[key] = (TAB, [TOOLBAR, TAB], time.monotonic() - snap._HIT_REUSE_S, None)
         detector._show(key, 115, 18)
         time.sleep(0.35)
         hung = detector._worker
@@ -419,12 +497,17 @@ def check_stationary_refinement():
     calls = []
 
     class LazyProvider:
+        one_off = False
+
         def hit_path(self, *_args):
             calls.append(time.monotonic())
             return [TOOLBAR] if len(calls) == 1 else [TOOLBAR, TAB, CLOSE]
 
         def ancestors(self, _interrupted):
             return None
+
+        def warm(self, _hwnd, _cursor):
+            pass
 
         def close(self):
             pass
@@ -462,6 +545,8 @@ def check_completion_during_timeout_check():
     entered, release = threading.Event(), threading.Event()
 
     class Provider:
+        one_off = False
+
         def hit_path(self, *_args):
             entered.set()
             release.wait(3)
@@ -469,6 +554,9 @@ def check_completion_during_timeout_check():
 
         def ancestors(self, _interrupted):
             return None
+
+        def warm(self, _hwnd, _cursor):
+            pass
 
         def close(self):
             pass
@@ -500,10 +588,175 @@ def check_completion_during_timeout_check():
     print("PASS: query completion during timeout checking neither crashes nor blacklists the window")
 
 
+class FakeUiaTree(snap._UiaTree):
+    """tree: {节点: [(子节点, 矩形)]}，记录每个节点取子元素的次数。types: {节点: 控件类型}，默认按钮。"""
+
+    def __init__(self, tree, types=None):
+        self.tree, self.fetched, self.closed, self.big_fetch = tree, [], False, False
+        self._children, self._empty_at, self._types = {}, {}, dict(types or {})
+
+    def _root(self, _hwnd):
+        return SimpleNamespace(value="window")
+
+    def _fetch(self, node):
+        self.fetched.append(node.value)
+        for name, _rect in self.tree.get(node.value, []):
+            self._types.setdefault(name, 50000)
+        return [(SimpleNamespace(value=name), rect) for name, rect in self.tree.get(node.value, [])]
+
+    def close(self):
+        self.closed = True
+
+
+def check_uia_dead_ends():
+    """最小的含鼠标子元素是空容器时换路：任务栏图标在等宽的子元素下面；Chromium 刚唤醒取到的空结果会重取。"""
+    pane, button = 50033, 50000
+    bar, legacy, bridge = QRect(0, 1392, 2560, 48), QRect(55, 1392, 220, 48), QRect(0, 1392, 2560, 48)
+    icon, tray_icon = QRect(116, 1392, 44, 48), QRect(2400, 1392, 24, 48)
+    tree = {"window": [("bar", bar), ("legacy", legacy), ("tray", QRect(2271, 1392, 289, 48))],
+            "bar": [("bridge", bridge)],
+            "bridge": [("icon", icon), ("tray_icon", tray_icon)]}
+    types = {"bar": pane, "legacy": pane, "tray": pane, "bridge": pane}
+    uia = FakeUiaTree(tree, types)
+    assert uia.path(1, 138, 1416) == [bar, bridge, icon], uia.path(1, 138, 1416)
+    assert uia.path(1, 2410, 1416) == [bar, bridge, tray_icon], uia.path(1, 2410, 1416)
+    assert uia.path(1, 60, 1416) == [legacy], "都只到空容器时取最小的"
+    # 实际控件即使没有子元素也直接用，不去翻同层更大的分支（Excel 滚动条压在表格上）。
+    uia = FakeUiaTree({"window": [("grid", QRect(0, 0, 800, 500)), ("scroll", QRect(780, 0, 20, 500))],
+                       "grid": [("cell", QRect(720, 0, 80, 20))]})
+    assert uia.path(1, 790, 10) == [QRect(780, 0, 20, 500)]
+    assert "grid" not in uia.fetched, uia.fetched
+    # 节点数有上限：很宽的一层全是含鼠标的空容器时不会全部走一遍。
+    wide = {"window": [(f"p{i}", QRect(0, 0, 100 + i, 100)) for i in range(200)]}
+    uia = FakeUiaTree(wide, {f"p{i}": pane for i in range(200)})
+    assert uia.path(1, 50, 50) == [QRect(0, 0, 100, 100)]
+    assert len(uia.fetched) == snap._UIA_VISITS, len(uia.fetched)
+    # Chromium 唤醒后异步建树：取到 0 个子元素的节点过一会儿再取。
+    tree = {"window": [("web", QRect(0, 0, 800, 600))]}
+    uia = FakeUiaTree(tree, {"web": pane})
+    assert uia.path(1, 20, 60) == [QRect(0, 0, 800, 600)]
+    tree["web"] = [("button", QRect(10, 50, 30, 30))]
+    assert uia.path(1, 20, 60) == [QRect(0, 0, 800, 600)], "刚取过的空结果先照用"
+    uia._empty_at["web"] -= snap._UIA_EMPTY_RETRY_S
+    assert uia.path(1, 20, 60) == [QRect(0, 0, 800, 600), QRect(10, 50, 30, 30)]
+    assert uia.fetched.count("web") == 2 and uia.fetched.count("window") == 1, uia.fetched
+    print("PASS: UIA descent backs out of empty containers (taskbar groups), keeps leaf controls, "
+          "is bounded, and refetches empty children after a delay")
+
+
+def check_uia():
+    """Excel/Word/Zoom 走 UIA：逐层取含鼠标的最小子元素并缓存；UIA 取不到时退回 MSAA。"""
+    grid = QRect(0, 100, 800, 500)
+    cells = [(f"cell{r}{c}", QRect(c * 72, 100 + r * 19, 72, 19)) for r in range(20) for c in range(11)]
+    tree = {"window": [("ribbon", QRect(0, 0, 800, 100)), ("desk", QRect(0, 100, 800, 500))],
+            "desk": [("grid", grid), ("scrollbar", QRect(780, 100, 20, 500))],
+            "grid": cells}
+    uia = FakeUiaTree(tree)
+    cell = QRect(72, 119, 72, 19)
+    assert uia.path(1, 100, 125) == [QRect(0, 100, 800, 500), grid, cell], uia.path(1, 100, 125)
+    assert uia.path(1, 790, 300) == [QRect(0, 100, 800, 500), QRect(780, 100, 20, 500)], "重叠时取最小的"
+    assert uia.path(1, 10, 10) == [QRect(0, 0, 800, 100)]
+    assert uia.fetched == ["window", "desk", "grid", "cell11", "scrollbar", "ribbon"], uia.fetched
+    provider = FakeAccessible(page(), uia={1})
+    provider._uia = uia
+    assert provider.hit_path(1, 100, 125)[-1] == cell and provider.calls == 0, "走 UIA 时不做 MSAA 点命中"
+    assert not provider.one_off, "已缓存的查询照常计入慢窗口判断"
+    uia.big_fetch = False
+    uia._children.pop("grid")
+    provider.hit_path(1, 100, 125)
+    assert provider.one_off, "一次取回 220 个单元格算一次性开销"
+    # 截图开始预热：沿鼠标位置和窗口中心取好子元素，第一次移进表格区不再有大批量等待。
+    provider = FakeAccessible(page(), uia={1})
+    provider._uia = FakeUiaTree(tree)
+    provider.warm(1, (10, 10))
+    assert {"window", "desk", "grid"} <= set(provider._uia.fetched), provider._uia.fetched
+    provider.hit_path(1, 100, 125)
+    assert not provider.one_off, "预热后首次进入表格区不应再大批量取子元素"
+    provider._uia = FakeUiaTree({})
+    assert provider.hit_path(1, 220, 155) == [BODY, TABLE, ROW, CELL, TEXT], "UIA 没有结果时退回 MSAA"
+    provider.close()
+    assert provider._uia.closed
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    # MSAA 只到整窗（Qoder）时改用 UIA；MSAA 取得到元素时不碰 UIA。
+    flat = FakeAccessible({1: (WINDOW, [5]), 5: (QRect(0, 0, 800, 590), [])})
+    flat._uia = FakeUiaTree({"window": [("sidebar", QRect(0, 40, 200, 560))],
+                             "sidebar": [("button", QRect(10, 50, 30, 30))]})
+    assert flat.hit_path(1, 20, 60) == [QRect(0, 40, 200, 560), QRect(10, 50, 30, 30)]
+    assert flat.hit_path(1, 600, 300) == [QRect(0, 0, 800, 590)], "UIA 也取不到时保留 MSAA 结果"
+    flat.close()
+    assert sorted(flat.released) == sorted(flat.acquired), (flat.released, flat.acquired)
+    deep_msaa = FakeAccessible(page())
+    deep_msaa._uia = FakeUiaTree({})
+    deep_msaa.hit_path(1, 220, 155)
+    assert deep_msaa._uia.fetched == [], "MSAA 取得到元素时不查 UIA"
+    # 按进程名/窗口类分流：名单外的 Electron（Qoder）当浏览器；任务栏走 UIA；普通资源管理器窗口不变。
+    routing = snap._Accessibility.__new__(snap._Accessibility)
+    routing._names = {1: "qoder.exe", 2: "explorer.exe", 3: "explorer.exe", 4: "excel.exe"}
+    routing._classes = {1: "Chrome_WidgetWin_1", 2: "Shell_TrayWnd", 3: "CabinetWClass", 4: "XLMAIN"}
+    assert routing._is_browser(1) and not routing._uses_uia(1)
+    assert routing._uses_uia(2) and not routing._is_browser(2)
+    assert not routing._uses_uia(3) and not routing._is_browser(3)
+    assert routing._uses_uia(4)
+    # 截图开始时没预热到的浏览器类窗口：第一次命中时唤醒一次。
+    provider = FakeAccessible(page(), browsers={1})
+    provider.hit_path(1, 220, 155)
+    provider.hit_path(1, 220, 155)
+    assert provider.name_calls == 1, provider.name_calls
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    # Qoder：顶层窗口和网页内容子窗口都唤醒一次。
+    provider = FakeAccessible(page(), browsers={1})
+    provider.widgets = {1: [7, 8]}
+    provider.warm(1, None)
+    provider.hit_path(1, 220, 155)
+    assert provider.name_calls == 3, provider.name_calls
+    provider.close()
+    assert sorted(provider.released) == sorted(provider.acquired), (provider.released, provider.acquired)
+    print("PASS: UIA path descends to the smallest element containing the point, caches children, falls back to MSAA; "
+          "taskbar routes to UIA, unlisted Electron windows are woken and treated as browsers")
+
+
+def check_warm():
+    """截图开始就在工作线程里预热鼠标下和前台窗口的无障碍对象；只吸附窗口时不开线程。"""
+    app = QApplication.instance() or QApplication([])
+    other = QRect(900, 0, 100, 100)
+    windows = [(7, WINDOW), (8, other)]
+    original = (FakeUser32.cursor, FakeUser32.foreground)
+    try:
+        FakeUser32.cursor, FakeUser32.foreground = (400, 300), 0
+        assert snap._warm_targets(FakeUser32, windows) == [(7, (400, 300))]
+        FakeUser32.foreground = 8
+        assert snap._warm_targets(FakeUser32, windows) == [(7, (400, 300)), (8, (400, 300))]
+        FakeUser32.foreground = 99  # 自身遮罩等不在快照里的窗口不预热
+        assert snap._warm_targets(FakeUser32, windows) == [(7, (400, 300))]
+        FakeUser32.foreground = 0
+        provider = FakeAccessible(tree())
+        with patch.object(snap, "_IS_WIN", True), patch.object(snap, "_win32_api", FakeUser32), \
+                patch.object(snap, "_try_init_msaa", lambda: provider), \
+                patch.object(snap, "_snapshot_windows", lambda _ignored: windows):
+            detector = snap.RegionDetector(only_window=True)
+            assert detector._worker is None
+            detector.shutdown()
+            detector = snap.RegionDetector(only_window=False)
+            try:
+                deadline = time.monotonic() + 3
+                while provider.opened == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert provider.opened == 1 and provider.calls == 0, "应在首次悬停前建好窗口对象"
+                detector.detect(QPoint(115, 18))
+                settle(app, detector)
+                assert provider.opened == 1, "悬停复用预热的对象"
+            finally:
+                detector.shutdown()
+    finally:
+        FakeUser32.cursor, FakeUser32.foreground = original
+    print("PASS: capture start prewarms the window under the cursor and the foreground window")
+
+
 if __name__ == "__main__":
     failures = []
     for check in (check_hit_path, check_two_phase, check_detector, check_hung_query, check_stationary_refinement,
-                  check_completion_during_timeout_check):
+                  check_completion_during_timeout_check, check_warm, check_uia, check_uia_dead_ends):
         try:
             check()
         except AssertionError as error:
