@@ -53,10 +53,11 @@ class ScreenShotWindow(QObject):
         self._wheel_at = 0.0  # 上一个滚轮事件的时刻，用于层级切换防抖
         self._pending_snap = QRect()
         self._sel_start = QRect()
-        # Excel 按格拖选：表格区当前屏幕上的所有单元格（逻辑坐标）和按下时的那一格。
-        # _grid 非空时选区跟着单元格网格走（拖选、拉边角），按住 Alt 自由框选。
-        self._grid = []
+        # Excel 的网格和裁剪框保留物理像素。分数 DPI 下，整数逻辑选区只够定位遮罩。
+        self._grid = ()
         self._cell_anchor = QRect()
+        self.selection_pixels = None
+        self._pixels_start = None
         self._pointer_pos = self._manager.cursor_position()
         self._windows = []
         self._keyboard_windows = []
@@ -117,7 +118,8 @@ class ScreenShotWindow(QObject):
             return
         self._refreshing = True
         self._sel = QRect()
-        self._grid = []
+        self._grid = ()
+        self.selection_pixels = None
         self._pending_snap = QRect()
         self._snap_anim.stop()
         self.selectionChanged.emit(QRect())
@@ -255,6 +257,32 @@ class ScreenShotWindow(QObject):
         self._sel.moveLeft(max(self._vg.left(), min(self._sel.x(), self._vg.right() - self._sel.width() + 1)))
         self._sel.moveTop(max(self._vg.top(), min(self._sel.y(), self._vg.bottom() - self._sel.height() + 1)))
 
+    def _select_pixels(self, pixels):
+        self.selection_pixels = pixels
+        self._sel = self._manager.physical_rect_to_logical(pixels)
+
+    def _select_cells(self, rect):
+        # Excel 的左、上框线各在 UIA 矩形外一像素，右、下框线已在矩形内。
+        self._select_pixels(rect.adjusted(-1, -1, 0, 0))
+
+    def _edited_pixels(self, previous, original_pixels):
+        pixels = self._manager.logical_rect_to_physical(self._sel)
+        if original_pixels is None:
+            return pixels
+        if self._sel.size() == previous.size():
+            origin = self._manager.logical_rect_to_physical(previous).topLeft()
+            return original_pixels.translated(pixels.topLeft() - origin)
+        # 保留未移动的原生像素边。反复拉同一手柄时，对边不能因逻辑坐标取整而漂移。
+        if self._sel.left() == previous.left():
+            pixels.setLeft(original_pixels.left())
+        if self._sel.right() == previous.right():
+            pixels.setRight(original_pixels.right())
+        if self._sel.top() == previous.top():
+            pixels.setTop(original_pixels.top())
+        if self._sel.bottom() == previous.bottom():
+            pixels.setBottom(original_pixels.bottom())
+        return pixels
+
     def mouse_press(self, event):
         if self._frozen or self._refreshing or event.button() != Qt.LeftButton:
             return
@@ -279,15 +307,19 @@ class ScreenShotWindow(QObject):
             self._show_snap(self._snap_rect)
             self._drag_mode = None
             # 在 Excel 单元格上按下：拖动时按格选（同 Excel 拖选），按住 Alt 才自由框选。
-            self._grid = [] if event.modifiers() & Qt.AltModifier else self._snap.cells_at(pos)
-            self._cell_anchor = _nearest_cell(self._grid, pos) if self._grid else QRect()
+            screen = self._manager.screen_at(pos)
+            point = self._manager.logical_to_physical(pos, screen)
+            self._grid = self._snap.cells_at(point)
+            self._cell_anchor = _nearest_cell(self._grid, point) if self._grid else QRect()
         else:
             self._drag_mode = "create"
-            self._grid = []
+            self._grid = ()
+            self.selection_pixels = None
             self._sel = QRect(pos, pos)
             self._show_snap(QRect())
         self._drag_start = pos
         self._sel_start = QRect(self._sel)
+        self._pixels_start = self.selection_pixels
         self.update(dirty | self._selection_region(previous) | self._hover_region())
 
     def mouse_move(self, event):
@@ -321,8 +353,11 @@ class ScreenShotWindow(QObject):
         square = bool(event.modifiers() & Qt.ShiftModifier)
         free = bool(event.modifiers() & Qt.AltModifier)
         if self._drag_mode == "cells" and not free:
-            self._sel = _cell_range(self._grid, self._cell_anchor, _nearest_cell(self._grid, pos))
+            screen = self._manager.screen_at(pos) or self._manager.screen_at(self._drag_start)
+            point = self._manager.logical_to_physical(pos, screen)
+            self._select_cells(_cell_range(self._grid, self._cell_anchor, _nearest_cell(self._grid, point)))
         elif self._drag_mode in ("create", "cells"):
+            self.selection_pixels = None
             if square:
                 # 同 PixPin：按住 Shift 锁定 1:1，以按下点为锚点。边长先按锚点到屏幕边缘的
                 # 距离收住，否则末尾的 intersected 会把正方形裁成长方形。
@@ -334,12 +369,20 @@ class ScreenShotWindow(QObject):
         elif self._drag_mode == "move":
             self._sel = self._sel_start.translated(dx, dy)
             self._clamp_position()
+            if self._pixels_start is not None:
+                self._select_pixels(self._edited_pixels(self._sel_start, self._pixels_start))
         else:
             self._resize_by_handle(self._sel_start, self._drag_mode, dx, dy)
             if square:
+                self.selection_pixels = None
                 self._square_by_handle(self._drag_mode)
-            elif self._grid and not free:
-                self._sel = _snap_edges(self._sel, self._grid, self._drag_mode)
+            elif self._grid or self._pixels_start is not None:
+                pixels = self._edited_pixels(self._sel_start, self._pixels_start)
+                if self._grid and not free:
+                    raw = pixels.adjusted(1, 1, 0, 0)
+                    self._select_cells(_snap_edges(raw, self._grid, self._drag_mode))
+                else:
+                    self._select_pixels(pixels)
         self._sel = self._sel.intersected(self._vg)
         self.update(dirty | self._selection_region(previous) | self._hover_region())
         self.selectionChanged.emit(QRect(self._sel))
@@ -352,6 +395,10 @@ class ScreenShotWindow(QObject):
             if (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
                 previous, dirty = QRect(self._sel), self._hover_region()
                 self._sel = QRect(self._pending_snap)
+                if self._grid and self._sel == self._manager.physical_rect_to_logical(self._cell_anchor):
+                    self._select_cells(self._cell_anchor)
+                else:
+                    self._grid = ()
                 self._pending_snap = QRect()
                 self._show_snap(QRect())
                 self._pointer_pos = pos
@@ -363,13 +410,14 @@ class ScreenShotWindow(QObject):
             return
         self.mouse_move(event)
         previous, dirty = QRect(self._sel), self._hover_region()
-        if self._drag_mode == "cells" and event.modifiers() & Qt.AltModifier:
-            self._grid = []  # 按住 Alt 松手的是自由选区，之后拉边角也不再对齐单元格
+        if event.modifiers() & Qt.AltModifier:
+            self._grid = ()  # 按住 Alt 松手的是自由选区，之后拉边角也不再对齐单元格
         self._drag_mode = None
         pos = event.globalPosition().toPoint() if len(self._windows) == 1 else self._manager.cursor_position()
         if self._sel.width() < _MIN_SIZE or self._sel.height() < _MIN_SIZE:
             self._sel = QRect()
-            self._grid = []
+            self._grid = ()
+            self.selection_pixels = None
             self._snap.redetect(pos)
         self._set_cursor(self._hover_cursor(pos))
         self.update(dirty | self._selection_region(previous) | self._hover_region())
@@ -394,7 +442,9 @@ class ScreenShotWindow(QObject):
         for window in self._windows:
             window.loupe.hide()
         self.update()
-        get_settings().setValue("capture/last_region", QRect(self._sel))
+        settings = get_settings()
+        settings.setValue("capture/last_region", QRect(self._sel))
+        settings.setValue("capture/last_region_pixels", self.selection_pixels or QRect())
         self.regionSelected.emit(QRect(self._sel))
         if not self._keep_open:
             self.close()
@@ -420,9 +470,11 @@ class ScreenShotWindow(QObject):
             self._copy_color()
         elif key == Qt.Key_R and not modifiers:
             # 同 PixPin：R 复用上一次截图的选区。
-            last = get_settings().value("capture/last_region", QRect())
+            settings = get_settings()
+            last = settings.value("capture/last_region", QRect())
             if last.intersects(self._vg):
-                self._set_selection(last)
+                pixels = settings.value("capture/last_region_pixels", QRect())
+                self._set_selection(last, pixels if self._manager.physical_rect_to_logical(pixels) == last else None)
         elif key == Qt.Key_A and modifiers == Qt.ControlModifier:
             # 同 PixPin：Ctrl+A 选中鼠标所在屏幕，再按一次选中全部屏幕。
             screen = next(w.frame.geometry for w in self._windows if w.frame.geometry.contains(self._pointer_pos))
@@ -443,11 +495,17 @@ class ScreenShotWindow(QObject):
             else:
                 self._sel.translate(dx, dy)
                 self._clamp_position()
+            if self._sel != previous:
+                self._grid = ()
+                if self.selection_pixels is not None:
+                    self._select_pixels(self._edited_pixels(previous, self.selection_pixels))
             self.selectionChanged.emit(QRect(self._sel))
             self.update(dirty | self._selection_region(previous) | self._hover_region())
 
-    def _set_selection(self, rect):
+    def _set_selection(self, rect, pixels=None):
         previous, dirty = QRect(self._sel), self._hover_region()
+        self._grid = ()
+        self.selection_pixels = pixels
         self._sel = rect.intersected(self._vg)
         self._show_snap(QRect())
         self.update(dirty | self._selection_region(previous) | self._hover_region())
@@ -455,7 +513,7 @@ class ScreenShotWindow(QObject):
 
     def size_tip(self):
         """尺寸提示的全局矩形和文字。"""
-        size = self._shot.pixel_size(self._sel)
+        size = self._shot.pixel_size(self._sel, self.selection_pixels)
         text = f"{size.width()} × {size.height()} px"
         fm = self._windows[0].fontMetrics()
         width, height = fm.horizontalAdvance(text) + 16, fm.height() + 10
@@ -469,13 +527,18 @@ class ScreenShotWindow(QObject):
 
     def _edit_size(self):
         tip = self.size_tip()[0]
-        self._size_editor = SizeEditor(self._shot.pixel_size(self._sel), self._resize_to)
+        self._size_editor = SizeEditor(self._shot.pixel_size(self._sel, self.selection_pixels), self._resize_to)
         self._size_editor.move(tip.topLeft())
         self._size_editor.show()
 
     def _resize_to(self, pixels):
-        # 输入的是物理像素，换回选区左上角所在屏幕的逻辑像素；左上角不动。
         frame = next(w.frame for w in self._windows if w.frame.geometry.contains(self._sel.topLeft()))
+        if self.selection_pixels is not None:
+            minimum = round(_MIN_SIZE * frame.pixmap.devicePixelRatio())
+            rect = QRect(self.selection_pixels.topLeft(), pixels.expandedTo(QSize(minimum, minimum)))
+            self._set_selection(self._manager.physical_rect_to_logical(rect), rect)
+            return
+        # 普通选区用左上角所在屏幕的缩放率把输入尺寸换回逻辑像素。
         dpr = frame.pixmap.width() / frame.geometry.width()
         size = QSize(max(_MIN_SIZE, round(pixels.width() / dpr)), max(_MIN_SIZE, round(pixels.height() / dpr)))
         self._set_selection(QRect(self._sel.topLeft(), size))

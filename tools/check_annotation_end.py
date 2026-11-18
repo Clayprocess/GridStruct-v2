@@ -185,8 +185,9 @@ class _FakeLongshot(QObject):
     def start(self):
         self.active = self.starts
 
-    def start_region(self, _capture, rect):
+    def start_region(self, _capture, rect, physical_rect=None):
         self.region = QRect(rect)
+        self.region_pixels = physical_rect
         self.active = self.starts
 
     def cancel(self):

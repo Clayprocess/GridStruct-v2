@@ -422,8 +422,10 @@ def check_detector():
         assert provider.calls == calls, "降级后的窗口不再点命中"
         assert results[-1] == WINDOW, results
         detector._cells[key], detector._shown_key = (QRect(100, 100, 72, 19), QRect(172, 100, 72, 19)), key
-        assert detector.cells_at(QPoint(180, 110)) == [QRect(100, 100, 72, 19), QRect(172, 100, 72, 19)]
-        assert detector.cells_at(QPoint(400, 300)) == [], "不在单元格上不给网格"
+        assert detector.cells_at(QPoint(180, 110)) == detector._cells[key]
+        assert detector.cells_at(QPoint(400, 300)) == (), "不在单元格上不给网格"
+        detector._on_result((detector._token, key, 180, 110, [BODY], 0, ()))
+        assert detector.cells_at(QPoint(180, 110)) == (), "命中覆盖单元格的其他控件后丢弃旧网格"
         print("PASS: detector keeps the old box while waiting, skips repeat queries, steps to parents, demotes slow windows")
     finally:
         detector.shutdown()

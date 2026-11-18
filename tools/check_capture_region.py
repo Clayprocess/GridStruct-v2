@@ -52,8 +52,9 @@ class FakeScreen:
 
 
 class FakeManager:
-    capture_region = lambda self, rect: ScreenManager.capture_region(self, rect)
+    capture_region = ScreenManager.capture_region
     logical_to_physical = ScreenManager.logical_to_physical
+    physical_rect_to_logical = ScreenManager.physical_rect_to_logical
     def __init__(self, screens):
         self.screens = screens
         self._records = {s: (s.rect, s.physical, s.dpr) for s in screens}
@@ -91,6 +92,34 @@ def check(manager, rect, baseline=False):
     return elapsed
 
 
+def check_physical(manager, physical):
+    logical = manager.physical_rect_to_logical(physical)
+    shot = capture_virtual_desktop()
+    for screen in manager.screens:
+        screen.pixel_calls.clear()
+    first = shot.crop(logical, physical)
+    live = manager.capture_region(logical, physical)
+    assert first.toImage() == live.toImage(), physical
+    bounds = QRect()
+    for screen in manager.screens:
+        bounds = bounds.united(physical.intersected(screen.physical))
+    assert first.size() == shot.pixel_size(logical, physical) == bounds.size()
+    for screen in manager.screens:
+        overlap = physical.intersected(screen.physical)
+        if overlap.isEmpty():
+            assert not screen.pixel_calls
+            continue
+        local = overlap.translated(-screen.physical.topLeft())
+        expected = screen.image.copy(local).toImage()
+        actual = first.copy(overlap.translated(-bounds.topLeft())).toImage()
+        actual.setDevicePixelRatio(1)
+        assert actual == expected, (physical, screen.name())
+        request, = screen.pixel_calls
+        assert request.contains(local)
+        assert request.width() <= local.width() + 2 * screen.dpr
+        assert request.height() <= local.height() + 2 * screen.dpr
+
+
 def main():
     app = QApplication([])
     baseline = '--baseline' in sys.argv
@@ -109,6 +138,11 @@ def main():
         # 负坐标、多屏间隙与混合 DPR 均按原生坐标拼接。
         check(manager, QRect(-1930, -100, 2070, 380), baseline)
         samples += 1
+        # #66 的 C3、合并格 B5:D5，加上屏幕边缘、仅一列和跨屏原生像素。
+        for rect in (QRect(216, 365, 91, 25), QRect(126, 413, 271, 25),
+                     QRect(-1, -1, 91, 25), QRect(1919, 1079, 1, 1), QRect(1917, 174, 12, 9)):
+            check_physical(manager, rect.translated(screen.physical.topLeft()))
+            samples += 1
     for rect in (QRect(4000, 4000, 20, 20), QRect()):
         check(manager, rect, baseline)
         samples += 1

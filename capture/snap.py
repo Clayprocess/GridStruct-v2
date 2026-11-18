@@ -290,6 +290,8 @@ class RegionDetector(QObject):
             return
         if cells:
             self._cells[key] = cells
+        else:
+            self._cells.pop(key, None)
         if elapsed_ms > _SLOW_POINT_MS:
             self._slow.add(key)
             print(f"[GridStruct-V2] 点命中 {elapsed_ms:.0f}ms，该窗口改用窗口快照", flush=True)
@@ -320,19 +322,10 @@ class RegionDetector(QObject):
                 return hwnd, rect
         return None
 
-    def cells_at(self, pos: QPoint):
-        """鼠标所在 Excel 表格区的所有单元格（逻辑坐标）；鼠标不在已知单元格上时返回空列表。"""
-        from .screen import ScreenManager
-
-        manager = ScreenManager.instance()
-        screen = manager.screen_at(pos)
-        cells = self._cells.get(self._shown_key) if screen is not None else None
-        if not cells:
-            return []
-        point = manager.logical_to_physical(pos, screen)
-        if not any(cell.contains(point) for cell in cells):
-            return []
-        return [manager.physical_rect_to_logical(cell) for cell in cells]
+    def cells_at(self, point: QPoint):
+        """在屏幕物理坐标中命中 Excel 网格，保留 UIA 给出的原始像素边界。"""
+        cells = self._cells.get(self._shown_key, ())
+        return cells if any(cell.contains(point) for cell in cells) else ()
 
     def step_level(self, delta):
         """delta>0 选更外层的父元素，<0 回到更内层的子元素。"""

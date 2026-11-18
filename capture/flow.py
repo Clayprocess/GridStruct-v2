@@ -37,6 +37,7 @@ class ScreenshotFlow(QObject):
         self._longshot_escape = None
         self._phase = Phase.IDLE
         self._pending_longshot_region = QRect()
+        self._pending_longshot_pixels = None
         self._longshot_timer = QTimer(self)
         self._longshot_timer.setSingleShot(True)
         self._longshot_timer.setInterval(100)
@@ -113,6 +114,7 @@ class ScreenshotFlow(QObject):
             # 标注窗口里点“长截图”（已按 Esc 的规则确认过）。
             if self._phase is not Phase.ANNOTATING:
                 return
+            self._pending_longshot_pixels = self._win.selection_pixels if self._win else self._longshot.region_pixels
             self._cleanup()
             self._phase = Phase.LONGSHOT_PENDING
             self._pending_longshot_region = QRect(region)
@@ -136,7 +138,7 @@ class ScreenshotFlow(QObject):
             show_message(None, "无法开始长截图", str(exc))
             return
         self._phase = Phase.LONGSHOT
-        self._get_longshot().start_region(capture, self._pending_longshot_region)
+        self._get_longshot().start_region(capture, self._pending_longshot_region, self._pending_longshot_pixels)
         self._settle_longshot()
 
     def _settle_longshot(self):
@@ -191,13 +193,14 @@ class ScreenshotFlow(QObject):
 
     def _on_region(self, rect: QRect):
         capture = self._win.capture
+        pixels = self._win.selection_pixels
         if self._phase is Phase.LONGSHOT_PENDING:
             self._cleanup()
             self._phase = Phase.LONGSHOT
-            self._get_longshot().start_region(capture, rect)
+            self._get_longshot().start_region(capture, rect, pixels)
             self._settle_longshot()
             return
-        cropped = capture.crop(rect)
+        cropped = capture.crop(rect, pixels)
         crosses_screens = sum(frame.geometry.intersects(rect) for frame in capture.frames) > 1
 
         toolbar_pos = None
