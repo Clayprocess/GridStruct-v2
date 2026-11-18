@@ -37,7 +37,7 @@ def run_case(action):
     window_rect, element_rect = QRect(0, 0, 800, 600), QRect(20, 20, 60, 40)
 
     class Provider:
-        one_off = False
+        one_off, cells = False, ()
 
         def __init__(self):
             self.record = [threading.get_ident()]

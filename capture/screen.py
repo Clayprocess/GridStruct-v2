@@ -11,6 +11,21 @@ from PySide6.QtWidgets import QApplication, QWidget
 from styles import tokens as T
 
 
+def _source_pixels(rect, physical_rect, geometry, physical, dpr):
+    """冻结快照和长截图实时采集共用的屏内原生像素范围。"""
+    if physical_rect is not None:
+        return physical_rect.intersected(physical).translated(-physical.topLeft())
+    intersection = rect.intersected(geometry)
+    if intersection.isEmpty():
+        return QRect()
+    local = intersection.translated(-geometry.topLeft())
+    left, top = round(local.x() * dpr), round(local.y() * dpr)
+    # Qt 的逻辑屏幕尺寸经过取整，整屏边界仍需保留原生最后一行/列。
+    right = physical.width() if intersection.right() == geometry.right() else round((local.right() + 1) * dpr)
+    bottom = physical.height() if intersection.bottom() == geometry.bottom() else round((local.bottom() + 1) * dpr)
+    return QRect(left, top, right - left, bottom - top)
+
+
 def _monitor_rectangles():
     if sys.platform != "win32":
         return {}
@@ -150,7 +165,7 @@ class ScreenManager(QObject):
             result = result.united(logical)
         return result
 
-    def capture_region(self, rect: QRect) -> QPixmap:
+    def capture_region(self, rect: QRect, physical_rect: QRect | None = None) -> QPixmap:
         for attempt in range(3):
             self.refresh()
             if not self.screens:
@@ -159,22 +174,14 @@ class ScreenManager(QObject):
             frames = []
             for screen in self.screens:
                 logical, physical, dpr = self._records[screen]
-                intersection = rect.intersected(logical)
-                if intersection.isEmpty():
+                pixels = _source_pixels(rect, physical_rect, logical, physical, dpr)
+                if pixels.isEmpty():
                     continue
-                local = intersection.translated(-logical.topLeft())
-                start = QPoint(round(local.x() * dpr), round(local.y() * dpr))
-                end = QPoint(round((local.x() + local.width()) * dpr),
-                             round((local.y() + local.height()) * dpr))
-                if intersection.right() == logical.right():
-                    end.setX(physical.width())
-                if intersection.bottom() == logical.bottom():
-                    end.setY(physical.height())
-                # Qt 对采集起点四舍五入，旧裁剪用 Python round；多取一圈以保留相同像素。
-                x, y = max(0, local.x() - 1), max(0, local.y() - 1)
+                # QScreen 只接收整数逻辑坐标，向前取到能覆盖目标像素的起点。
+                x, y = math.floor(pixels.x() / dpr), math.floor(pixels.y() / dpr)
                 origin = QPoint(math.floor(x * dpr + .5), math.floor(y * dpr + .5))
-                width = math.ceil((end.x() - origin.x()) / dpr)
-                height = math.ceil((end.y() - origin.y()) / dpr)
+                width = math.ceil((pixels.right() + 1 - origin.x()) / dpr)
+                height = math.ceil((pixels.bottom() + 1 - origin.y()) / dpr)
                 native_width = math.floor(width * dpr + .5)
                 native_height = math.floor(height * dpr + .5)
                 # Qt 6 在任一尺寸为 -1 时不缩放 QSize；另一维须传物理尺寸。
@@ -190,13 +197,12 @@ class ScreenManager(QObject):
                 if (pixmap.isNull() or pixmap.size() != QSize(native_width, native_height)
                         or screen.geometry() != logical or screen.devicePixelRatio() != dpr):
                     break
-                pixels = QRect(start - origin, QSize(end.x() - start.x(), end.y() - start.y()))
-                frames.append(ScreenFrame(screen, intersection, pixmap.copy(pixels),
-                                          physical.topLeft() + start))
+                frames.append(ScreenFrame(screen, rect.intersected(logical), pixmap.copy(pixels.translated(-origin)),
+                                          physical.topLeft() + pixels.topLeft()))
             else:
                 self.refresh()
                 if self._signature == signature:
-                    return frames[0].pixmap if len(frames) == 1 else DesktopCapture(frames).crop(rect)
+                    return frames[0].pixmap if len(frames) == 1 else DesktopCapture(frames).crop(rect, physical_rect)
         raise RuntimeError("屏幕捕获尺寸或显示器布局持续变化，请重试截图")
 
     def screen_at(self, point):
@@ -297,30 +303,24 @@ class DesktopCapture:
         for frame in frames:
             self.geometry = self.geometry.united(frame.geometry)
 
-    def _parts(self, rect):
+    def _parts(self, rect, physical_rect):
         parts = []
         for frame in self.frames:
-            intersection = rect.intersected(frame.geometry)
-            if not intersection.isEmpty():
-                local = intersection.translated(-frame.geometry.topLeft())
-                pixels = ScreenManager.image_rect_to_physical(local, frame.pixmap)
-                # Qt 的逻辑屏幕尺寸经过取整，整屏边界仍需保留原生最后一行/列。
-                if intersection.right() == frame.geometry.right():
-                    pixels.setRight(frame.pixmap.width() - 1)
-                if intersection.bottom() == frame.geometry.bottom():
-                    pixels.setBottom(frame.pixmap.height() - 1)
+            physical = QRect(frame.physical_origin, frame.pixmap.size())
+            pixels = _source_pixels(rect, physical_rect, frame.geometry, physical, frame.pixmap.devicePixelRatio())
+            if not pixels.isEmpty():
                 parts.append((frame, pixels, frame.physical_origin + pixels.topLeft()))
         return parts
 
-    def pixel_size(self, rect):
-        parts = self._parts(rect)
+    def pixel_size(self, rect, physical_rect=None):
+        parts = self._parts(rect, physical_rect)
         bounds = QRect()
         for frame, pixels, position in parts:
             bounds = bounds.united(QRect(position, pixels.size()))
         return bounds.size()
 
-    def crop(self, rect):
-        parts = self._parts(rect)
+    def crop(self, rect, physical_rect=None):
+        parts = self._parts(rect, physical_rect)
         if len(parts) == 1:
             frame, pixels, position = parts[0]
             return frame.pixmap.copy(pixels)

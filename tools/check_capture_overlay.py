@@ -22,6 +22,10 @@ class Detector(QObject):
         self.result = QRect()
         self.requests = []
         self.steps = []
+        self.cells = ()
+
+    def cells_at(self, pos):
+        return self.cells if any(cell.contains(pos) for cell in self.cells) else ()
 
     def redetect(self, pos):
         self.requests.append(QPoint(pos))
@@ -118,9 +122,9 @@ def check_edges():
     print(f"PASS: {count} rendered edge cases (four directions, holes, gaps, mixed DPR, no cross-screen seams)")
 
 
-def event(point):
+def event(point, modifiers=Qt.NoModifier):
     return SimpleNamespace(button=lambda: Qt.LeftButton, globalPosition=lambda: SimpleNamespace(toPoint=lambda: point),
-                           modifiers=lambda: Qt.NoModifier)
+                           modifiers=lambda: modifiers)
 
 
 def check_repaint():
@@ -217,6 +221,99 @@ def check_wheel():
     print("PASS: wheel steps one snap level per gesture, ignores horizontal scroll and active selections")
 
 
+def check_cells(dpr):
+    """用 #66 的单元格位置绘制冻结画面，逐像素比较按格选区和实际裁剪结果。"""
+    c = controller([QRect(0, 0, 800, 700)], [dpr])
+    frame = c.capture.frames[0]
+    native_screen = QRect(frame.physical_origin, frame.pixmap.size())
+
+    def cell(col, row, cols=1):
+        return QRect(37 + col * 90, 318 + row * 24, cols * 90, 24)
+
+    merged = cell(1, 4, 3)  # B5:D5；普通 C3 和这个合并格的坐标均来自真机 UIA。
+    grid = tuple(cell(col, row) for row in range(12) for col in range(8)
+                 if not (row == 4 and 1 <= col <= 3)) + (merged,)
+    c._snap.cells = grid
+    # Excel 默认网格线与“所有框线”的位置相同。逐物理像素画黑框，外侧一行白边也能检出。
+    source = QImage(frame.pixmap.size(), QImage.Format_RGB32)
+    source.fill(Qt.white)
+    with QPainter(source) as painter:
+        for rect in grid:
+            painter.fillRect(rect.adjusted(-1, -1, 0, 0), Qt.black)
+            painter.fillRect(rect.adjusted(0, 0, -1, -1), Qt.white)
+    source.setDevicePixelRatio(dpr)
+    frame.pixmap = QPixmap.fromImage(source)
+
+    def logical(raw):
+        return c._manager.physical_rect_to_logical(raw)
+
+    def gesture(start, end, modifiers=Qt.NoModifier):
+        c.mouse_press(event(start, modifiers))
+        if start != end:
+            c.mouse_move(event(end, modifiers))
+        c.mouse_release(event(end, modifiers))
+
+    def begin(raw, end=None, modifiers=Qt.NoModifier, hover=None):
+        c._set_selection(QRect())
+        c._show_snap(logical(hover if hover is not None else raw))
+        start = logical(raw).center()
+        gesture(start, start if end is None else end, modifiers)
+
+    def check_crop(raw):
+        expected = raw.adjusted(-1, -1, 0, 0)
+        assert c.selection_pixels == expected, (dpr, c.selection_pixels, expected)
+        assert c._sel == logical(expected), (c._sel, logical(expected))
+        assert c.size_tip()[1] == f"{expected.width()} × {expected.height()} px"
+        actual = c.capture.crop(c._sel, c.selection_pixels).toImage()
+        assert actual == source.copy(expected), (dpr, expected, actual.size())
+
+    a1, b2, c3, d4 = cell(0, 0), cell(1, 1), cell(2, 2), cell(3, 3)
+    records = {frame.screen: (frame.geometry, native_screen, dpr)}
+    try:
+        with patch.object(c._manager, "_records", records):
+            begin(c3)
+            check_crop(c3)
+            begin(merged)
+            check_crop(merged)
+            begin(cell(0, 2), logical(merged).center())
+            check_crop(cell(0, 2).united(merged))
+            begin(cell(0, 2), logical(cell(2, 5)).center())
+            check_crop(cell(0, 2).united(cell(3, 5)))  # 合并格位于拖选中途，右边须扩到 D 列。
+            begin(cell(5, 6), logical(a1).center())
+            check_crop(a1.united(cell(5, 6)))
+            begin(a1, QPoint(790, 680))
+            check_crop(a1.united(cell(7, 11)))
+
+            for offset in (QPoint(), QPoint(5, 3)):
+                begin(a1, logical(c3).center() + offset)
+                check_crop(a1.united(c3))
+            gesture(c._sel.topLeft(), logical(b2).topLeft())
+            check_crop(b2.united(c3))
+            gesture(c._sel.bottomRight(), logical(d4).bottomRight())
+            check_crop(b2.united(d4))
+            corner = c._sel.bottomRight()
+            anchor = c.selection_pixels.topLeft()
+            gesture(corner, corner + QPoint(10, 5), Qt.AltModifier)
+            assert c._sel.bottomRight() == corner + QPoint(10, 5), "Alt 拉边角应停在格内"
+            free_corner = c._manager.logical_rect_to_physical(c._sel).bottomRight()
+            cropped = c.capture.crop(c._sel, c.selection_pixels).toImage()
+            assert cropped == source.copy(QRect(anchor, free_corner)), "Alt 拉右下角应保留左上边缘像素"
+
+            end = logical(d4).center()
+            begin(b2, end, Qt.AltModifier)
+            assert c._sel == QRect(logical(b2).center(), end) and c.selection_pixels is None
+            parent = a1.united(cell(7, 11))
+            begin(c3, hover=parent)
+            assert c._sel == logical(parent) and c.selection_pixels is None, "单击滚轮选中的父层应保持原框"
+            begin(c3)
+            gesture(QPoint(20, 20), QPoint(140, 110))
+            assert c._sel == QRect(QPoint(20, 20), QPoint(140, 110)) and c.selection_pixels is None
+    finally:
+        c.close()
+    print(f"PASS: Excel cell clicks, ranges, merged cells and handles crop exact border pixels at {dpr:g}×; "
+          "Alt, parent and free selections retain their bounds")
+
+
 if __name__ == "__main__":
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
@@ -224,3 +321,5 @@ if __name__ == "__main__":
     check_repaint()
     check_handles()
     check_wheel()
+    for dpr in (1, 1.25):
+        check_cells(dpr)

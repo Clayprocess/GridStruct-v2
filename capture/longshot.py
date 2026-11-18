@@ -296,6 +296,7 @@ class LongShotFlow(QObject):
         self._hook = None
         self._stitcher = ImageStitcher()
         self._region = QRect()
+        self.region_pixels = None
         self._screen_region = QRect()
         self._shot = None
         self._last_frame = None
@@ -352,12 +353,12 @@ class LongShotFlow(QObject):
         self._win.cancelled.connect(self._cleanup)
         self._win.show()
 
-    def start_region(self, capture, rect):
+    def start_region(self, capture, rect, physical_rect=None):
         """沿用截图会话已确认的选区和原始快照。"""
         if self._win is not None or self._bar is not None:
             return
         self._reset_session()
-        self._begin_region(capture, rect)
+        self._begin_region(capture, rect, physical_rect)
 
     def _reset_session(self):
         self._stitcher = ImageStitcher()
@@ -372,17 +373,20 @@ class LongShotFlow(QObject):
         self._auto_corrected = False
         self._has_increment = False
         self._layout_changed = False
+
     def _on_region(self, rect):
         window, self._win = self._win, None
         capture = window.capture
+        physical_rect = window.selection_pixels
         window.close()
-        self._begin_region(capture, rect)
+        self._begin_region(capture, rect, physical_rect)
 
-    def _begin_region(self, capture, rect):
+    def _begin_region(self, capture, rect, physical_rect):
         self._region = QRect(rect)
         self._screen_region = QRect(rect)
+        self.region_pixels = physical_rect
         # 首帧沿用框选前快照，避免桌面合成器尚未移除覆盖层。
-        self._last_frame = capture.crop(self._region)
+        self._last_frame = capture.crop(self._region, self.region_pixels)
         self._shot = None
         self._stitcher.feed(self._last_frame)
         self._bar = LongShotBar()
@@ -492,7 +496,7 @@ class LongShotFlow(QObject):
         self._bar.place_near(self._screen_region, screen.availableGeometry())
 
     def _grab(self):
-        return self._manager.capture_region(self._region)
+        return self._manager.capture_region(self._region, self.region_pixels)
 
     def _enter_recovery(self):
         self._recovering = True

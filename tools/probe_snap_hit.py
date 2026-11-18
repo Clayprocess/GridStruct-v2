@@ -6,6 +6,7 @@
     python tools/probe_snap_hit.py --process excel.exe winword.exe --grid 16x10
     python tools/probe_snap_hit.py --class Shell_TrayWnd --grid 40x1      # 任务栏（太矮，按进程名找不到）
     python tools/probe_snap_hit.py --class Shell_TrayWnd --point 1300,1420  # 打印该点 UIA 每层子元素数和空矩形数
+    python tools/probe_snap_hit.py --process excel.exe --point 300,400  # Excel 还打印按格拖选的网格和单元格边缘颜色
 """
 
 import argparse
@@ -20,6 +21,30 @@ from probe_snap_apps import targets, process_name, user32, wintypes, ctypes
 
 if sys.platform != "win32":
     sys.exit("只能在 Windows 上运行")
+
+
+def print_cells(cells, x, y):
+    """按格拖选用的网格：单元格个数，含该点的单元格，以及它四条边内外各一像素的屏幕颜色（判断矩形含不含表格线）。"""
+    gdi32 = ctypes.WinDLL("gdi32")
+    gdi32.GetPixel.argtypes, gdi32.GetPixel.restype = [wintypes.HDC, ctypes.c_int, ctypes.c_int], wintypes.DWORD
+    user32.GetDC.argtypes, user32.GetDC.restype = [wintypes.HWND], wintypes.HDC
+    user32.ReleaseDC.argtypes, user32.ReleaseDC.restype = [wintypes.HWND, wintypes.HDC], ctypes.c_int
+    cell = next((c for c in cells if c.contains(x, y)), None)
+    print(f"  网格：单元格 {len(cells)} 个，含该点 {cell.getRect() if cell else None}")
+    if cell is None:
+        return
+    dc = user32.GetDC(None)
+    try:
+        def color(px, py):
+            value = gdi32.GetPixel(dc, px, py)
+            return f"#{value & 0xff:02x}{value >> 8 & 0xff:02x}{value >> 16 & 0xff:02x}"
+        cx, cy = cell.center().x(), cell.center().y()
+        print(f"  左边 外/内 {color(cell.left() - 1, cy)} {color(cell.left(), cy)}；"
+              f"右边 内/外 {color(cell.right(), cy)} {color(cell.right() + 1, cy)}；"
+              f"上边 外/内 {color(cx, cell.top() - 1)} {color(cx, cell.top())}；"
+              f"下边 内/外 {color(cx, cell.bottom())} {color(cx, cell.bottom() + 1)}")
+    finally:
+        user32.ReleaseDC(None, dc)
 
 
 def main():
@@ -42,6 +67,8 @@ def main():
             x, y = (int(v) for v in args.point.split(","))
             for hwnd in hwnds:
                 print(f"{process_name(hwnd)} 命中路径：{[r.getRect() for r in provider.hit_path(hwnd, x, y)]}")
+                if provider.cells:
+                    print_cells(provider.cells, x, y)
                 uia = provider._uia
                 if uia is None:
                     print("  （该窗口没走 UIA）")
