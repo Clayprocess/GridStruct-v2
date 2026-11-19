@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog
 from ui import show_message
 from .analysis import analyze
 from .dialog import TableDialog
-from .pages import OPEN_FILTER, FilePage, ImagePage, collect_pages
+from .pages import OPEN_FILTER, ImagePage, collect_pages
 
 
 @dataclass

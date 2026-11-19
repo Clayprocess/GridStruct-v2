@@ -81,7 +81,7 @@ def main():
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    app = QApplication.instance() or QApplication([])
+    _app = QApplication.instance() or QApplication([])
     # offscreen 插件不自动枚举 Windows 字体，否则数字会全部变成相同的方框。
     QFontDatabase.addApplicationFont(str(Path(os.environ["WINDIR"]) / "Fonts" / "arial.ttf"))
     page = make_page()

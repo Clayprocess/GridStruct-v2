@@ -12,6 +12,7 @@ from importlib import metadata, util
 import json
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import sys
 from zipfile import ZipFile, ZIP_DEFLATED
@@ -20,6 +21,8 @@ from zipfile import ZipFile, ZIP_DEFLATED
 ROOT = Path(__file__).resolve().parents[1]
 BOOTLOADER = Path("PyInstaller/bootloader/Windows-64bit-intel/runw.exe")
 MODELS = ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx", "slanet-plus.onnx")
+EXECUTABLES = ("GridStruct-V2.exe", "GridStruct-V2 识别文档.exe")
+RUNTIME_PACKAGES = ("PySide6", "onnxruntime", "rapidocr", "XlsxWriter")
 
 
 def check_requirements():
@@ -61,8 +64,39 @@ def check_bootloader(wheel):
         raise RuntimeError("PyInstaller 仍在使用官方预编译引导程序；请设置 PYINSTALLER_COMPILE_BOOTLOADER=1 并用 --no-binary pyinstaller 重装。")
 
 
+def copy_licenses(bundle):
+    from PyInstaller.utils.hooks import copy_metadata
+
+    for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
+        shutil.copyfile(ROOT / name, bundle / name)
+    licenses = bundle / "licenses"
+    shutil.copytree(ROOT / "licenses", licenses)
+    shutil.copyfile(Path(sys.base_prefix) / "LICENSE.txt", licenses / "Python.txt")
+
+    # 按构建环境解析运行依赖；PyInstaller 只分发引导程序。
+    metadata_dirs = set(copy_metadata("pyinstaller"))
+    for name in RUNTIME_PACKAGES:
+        metadata_dirs.update(copy_metadata(name, recursive=True))
+    for source, _ in sorted(metadata_dirs):
+        directory = Path(source)
+        destination = licenses / "packages" / directory.name
+        for entry in directory.iterdir():
+            if entry.name.lower() == "licenses" and entry.is_dir():
+                shutil.copytree(entry, destination / entry.name)
+            elif entry.is_file() and entry.name.lower().startswith(("licen", "notice", "copying")):
+                destination.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(entry, destination / entry.name)
+
+    # ONNX Runtime 把主许可和原生库声明放在模块目录中。
+    runtime = metadata.distribution("onnxruntime")
+    destination = licenses / "packages" / f"onnxruntime-{runtime.version}"
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ("LICENSE", "ThirdPartyNotices.txt"):
+        shutil.copyfile(runtime.locate_file(f"onnxruntime/{name}"), destination / name)
+
+
 def verify_bundle(bundle):
-    for name in ("GridStruct-V2.exe", "GridStruct-V2 识别文档.exe"):
+    for name in EXECUTABLES:
         if not (bundle / name).is_file():
             raise RuntimeError(f"构建未输出 {name}。")
     runtime = bundle / "_internal"
@@ -99,6 +133,27 @@ def verify_bundle(bundle):
     return hashes
 
 
+def verify_archive(archive, bundle, resource_hashes):
+    notices = [bundle / "LICENSE", bundle / "THIRD_PARTY_NOTICES.md"]
+    notices.extend(path for path in (bundle / "licenses").rglob("*") if path.is_file())
+    expected = {path.relative_to(bundle).as_posix(): sha256(path) for path in notices}
+    expected.update({name: sha256(bundle / name) for name in EXECUTABLES})
+    for model in MODELS:
+        relative = f"assets/models/{model}"
+        expected[f"_internal/{relative}"] = resource_hashes[relative]
+
+    with ZipFile(archive) as zipped:
+        invalid = zipped.testzip()
+        if invalid is not None:
+            raise RuntimeError(f"ZIP CRC 校验失败：{invalid}")
+        names = set(zipped.namelist())
+        for relative, digest in expected.items():
+            name = f"{bundle.name}/{relative}"
+            if name not in names or hashlib.sha256(zipped.read(name)).hexdigest() != digest:
+                raise RuntimeError(f"ZIP 文件缺失或内容不一致：{relative}")
+    print(f"ZIP 内容核验通过：{len(EXECUTABLES)} 个 EXE、{len(MODELS)} 个模型、{len(notices)} 份许可与声明。")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="仅检查构建依赖和本地资源")
@@ -125,12 +180,13 @@ def main():
     )
     bundle = output / "GridStruct-V2"
     hashes = verify_bundle(bundle)
+    copy_licenses(bundle)
     manifest = {
         "format": "Windows onedir portable",
         "built_at": datetime.now().astimezone().isoformat(),
         "python": platform.python_version(),
         "architecture": platform.machine(),
-        "dependencies": {name: metadata.version(name) for name in ("pyinstaller", "PySide6", "onnxruntime", "rapidocr", "XlsxWriter")},
+        "dependencies": {name: metadata.version(name) for name in ("pyinstaller", *RUNTIME_PACKAGES)},
         "bootloader_sha256": sha256(installed_bootloader()),
         "resource_sha256": hashes,
         "native_dependency_load_verified": True,
@@ -151,10 +207,7 @@ def main():
         for file in sorted(bundle.rglob("*")):
             if file.is_file():
                 zipped.write(file, file.relative_to(output))
-    with ZipFile(archive) as zipped:
-        invalid = zipped.testzip()
-        if invalid is not None:
-            raise RuntimeError(f"ZIP CRC 校验失败：{invalid}")
+    verify_archive(archive, bundle, hashes)
     print(f"便携目录：{bundle}")
     print(f"ZIP：{archive}")
     print("资源校验通过；未启动程序或进行真实桌面验收。")

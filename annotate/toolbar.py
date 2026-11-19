@@ -265,8 +265,7 @@ class FloatPanel(QWidget):
 
         对照截图核对、改字都在这里完成，不必再开识别窗口；排版和识别窗口共用同一个设置。
         """
-        from ocr.editor import OCRTextEdit
-        from ocr.layout import LAYOUTS
+        from ocr import LAYOUTS, OCRTextEdit
         card = QWidget(self)
         card.setObjectName("FloatPanelCard")
         self._ocr_feedback = card
