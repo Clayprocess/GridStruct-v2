@@ -28,12 +28,17 @@ def first_hover(editor, panel, group):
     assert QApplication.activeWindow() is editor
     assert not QToolTip.isVisible()
     button = panel._buttons[group]
-    # 只移动鼠标，让 Qt 自己启动提示计时器。直接发 ToolTip 事件会绕过窗口激活检查。
-    QTest.mouseMove(button, button.rect().center())
+    location = button.mapToGlobal(button.rect().center())
+    hit = QApplication.widgetAt(location)
+    assert hit is button, f"按钮在 {location} 被遮挡：{hit}"
+    # Windows runner 可能不投递 SetCursorPos 产生的消息；向窗口投递移动，再由 Qt 命中按钮并计时。
+    QCursor.setPos(location)
+    QTest.mouseMove(panel.windowHandle(), panel.mapFromGlobal(location))
     deadline = monotonic() + 4
     while not QToolTip.isVisible() and monotonic() < deadline:
         QTest.qWait(40)
-    assert QToolTip.isVisible() and QToolTip.text() == button.toolTip(), button.toolTip()
+    assert QToolTip.isVisible() and QToolTip.text() == button.toolTip(), (
+        button.toolTip(), QToolTip.text(), button.underMouse(), QCursor.pos(), location)
     assert QApplication.activeWindow() is editor, "工具提示抢走了画布焦点"
 
 

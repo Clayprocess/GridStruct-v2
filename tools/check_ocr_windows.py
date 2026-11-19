@@ -22,7 +22,7 @@ from table.grid import Candidate, Suggestion
 from table.model import GridSpec
 from table.pages import ImagePage
 from tray import create_tray
-from ui import app_icon_pixmap
+from ui import app_icon_pixmap, set_taskbar_app_id
 
 
 def flush(app):
@@ -32,6 +32,15 @@ def flush(app):
 
 
 def check_icons(app, image):
+    if app.platformName() == "windows":
+        import ctypes
+        app_id = ctypes.c_wchar_p()
+        ctypes.oledll.shell32.GetCurrentProcessExplicitAppUserModelID(ctypes.byref(app_id))
+        try:
+            assert app_id.value == "Clayprocess.GridStructV2", app_id.value
+        finally:
+            ctypes.windll.ole32.CoTaskMemFree(app_id)
+
     apply_theme(app, "light")
     tray = create_tray(app, {})
     windows = [OCRResultDialog([], pixmap=QPixmap.fromImage(image)), TableDialog(image)]
@@ -74,6 +83,7 @@ def check_icons(app, image):
     finally:
         for window in windows:
             window.close()
+            window.deleteLater()
         tray.deleteLater()
         flush(app)
     print(f"PASS recognition window and tray icons: light, dark, system ({app.platformName()})", flush=True)
@@ -160,6 +170,7 @@ def check_window(app, image):
 
 
 if __name__ == "__main__":
+    set_taskbar_app_id()
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
     if sys.platform == "win32":

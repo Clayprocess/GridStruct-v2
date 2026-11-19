@@ -22,7 +22,7 @@ from PySide6.QtGui import QDesktopServices
 
 from styles import apply_theme
 from styles import tokens as T
-from ui import app_icon, tinted_icon, show_desktop_check, show_message
+from ui import app_icon, set_taskbar_app_id, tinted_icon, show_desktop_check, show_message
 from ui.motion import enable_menu_effects
 from tray import create_tray, GlobalHotkey, HOTKEY_DEFAULTS, parse_hotkey
 from annotate import confirm_discard_all
@@ -47,6 +47,7 @@ def _ensure_single_instance() -> QSharedMemory | None:
 
 def main() -> int:
     desktop_check = "--desktop-check" in sys.argv
+    set_taskbar_app_id()
     app = QApplication(sys.argv)
     app.setProperty("desktop_check", desktop_check)
     app.setApplicationName(APP_NAME)

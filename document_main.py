@@ -12,11 +12,12 @@ from PySide6.QtWidgets import QApplication
 
 from settings import get_settings
 from styles import apply_theme
-from ui import app_icon, show_message
+from ui import app_icon, set_taskbar_app_id, show_message
 from ui.motion import enable_menu_effects
 
 
 def main() -> int:
+    set_taskbar_app_id()
     app = QApplication(sys.argv)
     app.setApplicationName("GridStruct-V2 识别文档")
     app.setWindowIcon(app_icon())
