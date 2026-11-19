@@ -79,8 +79,12 @@ def standard_window(dialog):
 
     任务栏图标只给没有所有者的窗口，调用方要传 parent=None 并自己持有引用。
     """
+    from PySide6.QtWidgets import QApplication
+    from .icons import app_icon
     dialog.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
                           | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
+    # 让 Qt 给这个 HWND 设置大小图标，Windows 任务栏缩略图可直接取到。
+    dialog.setWindowIcon(app_icon(QApplication.instance().property("theme_mode") or "light"))
 
 
 def set_topmost(window, on):

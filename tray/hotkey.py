@@ -36,7 +36,7 @@ WM_HOTKEY = 0x0312
 # 默认热键，存于设置 hotkey/<名称>，格式为 QKeySequence 的 PortableText。
 # 默认为空的是可选热键：不设就不注册，只走托盘。
 # 长截图只从截图工具条进入（实测决定），不占全局热键。
-HOTKEY_DEFAULTS = {"screenshot": "Ctrl+Alt+S", "document": ""}
+HOTKEY_DEFAULTS = {"screenshot": "Ctrl+1", "document": ""}
 
 _QT_MODIFIERS = (
     (Qt.ControlModifier, MOD_CONTROL),

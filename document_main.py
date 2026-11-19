@@ -12,11 +12,12 @@ from PySide6.QtWidgets import QApplication
 
 from settings import get_settings
 from styles import apply_theme
-from ui import app_icon, show_message
+from ui import app_icon, set_taskbar_app_id, show_message
 from ui.motion import enable_menu_effects
 
 
 def main() -> int:
+    set_taskbar_app_id()
     app = QApplication(sys.argv)
     app.setApplicationName("GridStruct-V2 识别文档")
     app.setWindowIcon(app_icon())
@@ -25,7 +26,7 @@ def main() -> int:
     except OSError as exc:
         show_message(None, "无法读取便携配置", f"{exc}\n请将应用放在有写入权限的目录。")
         return 1
-    app.setWindowIcon(app_icon(apply_theme(app, config.value("theme", "system"))))
+    apply_theme(app, config.value("theme", "system"))
     enable_menu_effects(app)
     from table import open_document
     if open_document(paths=sys.argv[1:]) is None:

@@ -1,5 +1,5 @@
 from .dialogs import BaseDialog, MessageDialog, show_message, ask_confirmation, standard_window, topmost_button
-from .icons import APP_ICON_SIZES, app_icon, app_icon_pixmap, paint_svg, painted_icon, tinted_icon
+from .icons import APP_ICON_SIZES, app_icon, app_icon_pixmap, paint_svg, painted_icon, set_taskbar_app_id, tinted_icon
 from .desktop_check import floating_window_type, show_desktop_check
 from .toast import show_toast
 from .menu import round_corners
@@ -7,4 +7,4 @@ from .delegates import MultilineDelegate
 from .zoom import PreviewZoom
 
 __all__ = ["BaseDialog", "MessageDialog", "show_message", "ask_confirmation", "standard_window", "topmost_button",
-           "APP_ICON_SIZES", "app_icon", "app_icon_pixmap", "tinted_icon", "paint_svg", "painted_icon", "floating_window_type", "show_desktop_check", "show_toast", "round_corners", "MultilineDelegate", "PreviewZoom"]
+           "APP_ICON_SIZES", "app_icon", "app_icon_pixmap", "set_taskbar_app_id", "tinted_icon", "paint_svg", "painted_icon", "floating_window_type", "show_desktop_check", "show_toast", "round_corners", "MultilineDelegate", "PreviewZoom"]

@@ -3,6 +3,7 @@
 # 替换为目标色再渲染，保证图标颜色跟随主题。
 
 import os
+import sys
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtSvg import QSvgRenderer
@@ -78,6 +79,16 @@ def tinted_icon(name: str, color: str, size: int = 16, icon: QIcon | None = None
 
 APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "app"))
 APP_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
+
+
+def set_taskbar_app_id() -> None:
+    """两个入口共用任务栏分组，源码运行时也能与其他 Python 应用区分。"""
+    if sys.platform == "win32":
+        import ctypes
+        try:
+            ctypes.oledll.shell32.SetCurrentProcessExplicitAppUserModelID("Clayprocess.GridStructV2")
+        except OSError as error:
+            print(f"[GridStruct-V2] Windows 任务栏分组设置失败：{error}", file=sys.stderr)
 
 
 def _app_variant(size: int) -> str:

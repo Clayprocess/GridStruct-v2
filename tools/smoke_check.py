@@ -511,7 +511,7 @@ def frozen_overlay_escape():
     source = sample(800, 600)
     shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(0, 0, 800, 600), source, QPoint())])
     settings = get_settings()
-    previous_confirm = settings.value("capture/confirm_exit", True, type=bool)
+    previous_confirm = settings.value("capture/confirm_exit")
     settings.setValue("capture/confirm_exit", True)
 
     def open_annotation():
@@ -583,7 +583,10 @@ def frozen_overlay_escape():
     finally:
         flow.cancel()
         flow.deleteLater()
-        settings.setValue("capture/confirm_exit", previous_confirm)
+        if previous_confirm is None:
+            settings.remove("capture/confirm_exit")
+        else:
+            settings.setValue("capture/confirm_exit", previous_confirm)
         flush()
 
 
@@ -753,8 +756,14 @@ def exit_confirmation():
     from annotate import AnnotationWindow
     from PySide6.QtGui import QUndoCommand
     settings = get_settings()
-    settings.setValue("capture/confirm_exit", True)
     with patch("annotate.window.MessageDialog") as dialog:
+        # 新配置默认允许直接退出，即使有未保存的标注。
+        settings.remove("capture/confirm_exit")
+        w = AnnotationWindow(sample(), QPoint())
+        w._canvas._undo.push(QUndoCommand("mark"))
+        w.trigger_action("cancel")
+        assert not dialog.called and w._ended
+        settings.setValue("capture/confirm_exit", True)
         # 没有标注时直接退出，不打断。
         w = AnnotationWindow(sample(), QPoint())
         w.trigger_action("cancel")
@@ -771,12 +780,13 @@ def exit_confirmation():
         w._canvas._undo.push(QUndoCommand("mark"))
         w.trigger_action("cancel")
         assert dialog.call_count == 1 and w._ended, "不再提醒 ignored"
-    settings.setValue("capture/confirm_exit", True)
+    settings.remove("capture/confirm_exit")
     flush()
 
 
 def hotkey_settings():
     from tray import HOTKEY_DEFAULTS, parse_hotkey
+    assert parse_hotkey("Ctrl+1") == (0x2, 0x31)
     assert parse_hotkey("Ctrl+Alt+S") == (0x2 | 0x1, 0x53)
     assert parse_hotkey("F1") == (0, 0x70) and parse_hotkey("Print") == (0, 0x2C)
     for bad in ("S", "Shift+S", "Ctrl+Alt+Space", ""):
@@ -832,6 +842,38 @@ def hotkey_settings():
                                    {"screenshot": "Ctrl+Shift+A", "document": ""}]
                 assert dialog.result() == 0 and s.value("hotkey/screenshot") == "Ctrl+Shift+A"
                 dialog.deleteLater()
+
+
+def capture_settings_defaults():
+    from capture import DesktopCapture, ScreenFrame, ScreenShotWindow
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(0, 0, 240, 160), sample(), QPoint())])
+    with TemporaryDirectory() as folder, patch("settings.storage.data_directory", return_value=Path(folder)), \
+         patch("settings.dialog._read_autostart", return_value=None), patch("settings.dialog._write_autostart"):
+        # 空便携配置不会触发从本机注册表的首次迁移。
+        Path(folder, "settings.ini").touch()
+        for saved in (False, True):
+            dialog = SettingsDialog()
+            assert dialog._guides.isChecked() == saved and dialog._confirm_exit.isChecked() == saved
+            assert dialog._snap_only.isChecked() == saved and dialog._same_color.isChecked() != saved
+            assert dialog._hotkey_texts()["screenshot"] == ("Ctrl+Alt+S" if saved else "Ctrl+1")
+            overlay = ScreenShotWindow(shot)
+            assert overlay._guides == saved and overlay._snap._only_window == saved
+            overlay.close()
+            overlay.deleteLater()
+            if saved:
+                dialog._reset_hotkeys()
+                assert dialog._hotkey_texts()["screenshot"] == "Ctrl+1"
+                assert get_settings().value("hotkey/screenshot") == "Ctrl+Alt+S"
+            else:
+                # 模拟旧版本已保存的设置，重开时应保留每一项。
+                dialog._guides.setChecked(True)
+                dialog._confirm_exit.setChecked(True)
+                dialog._snap_only.setChecked(True)
+                dialog._same_color.setChecked(False)
+                dialog._hotkeys["screenshot"].setKeySequence("Ctrl+Alt+S")
+            dialog._save()
+            dialog.deleteLater()
+        assert get_settings().value("hotkey/screenshot") == "Ctrl+1"
 
 
 def saved_settings():
@@ -948,6 +990,59 @@ def toolbar_keyboard_redo():
     canvas._undo.setClean()
     window.close()
     flush()
+
+
+def toolbar_group_shortcuts():
+    from capture import DesktopCapture, ScreenFrame, ScreenshotFlow
+
+    flow = ScreenshotFlow(app)
+    shot = DesktopCapture([ScreenFrame(app.primaryScreen(), QRect(0, 0, 640, 320), sample(640, 320), QPoint())])
+    with TemporaryDirectory() as folder, patch("capture.flow.capture_virtual_desktop", return_value=shot):
+        settings = QSettings(str(Path(folder) / "settings.ini"), QSettings.IniFormat)
+        settings.setValue("annotation/geo_tool", "ellipse")
+        with patch("annotate.toolbar.get_settings", return_value=settings):
+            try:
+                flow.start()
+                flow._win._sel = QRect(0, 0, 600, 300)
+                # 框选时还没有画布，首按必须记住用户上次选的椭圆。
+                QTest.keyClick(flow._win._windows[0], Qt.Key_1, Qt.ShiftModifier)
+                window = flow._ann
+                canvas, panel = window._canvas, window._toolbar
+                assert canvas.tool_id == "ellipse"
+                groups = (("geo", ("rect", "ellipse")), ("pen", ("pencil", "highlight")),
+                          ("lines", ("arrow", "line", "polyline")), ("text", ("text",)),
+                          ("serial", ("serial",)), ("mosaic", ("mosaic",)), ("eraser", ("eraser",)))
+                for number, (group, members) in enumerate(groups, 1):
+                    key = Qt.Key(Qt.Key_0 + number)
+                    for tool in (*members, members[0]):
+                        QTest.keyClick(canvas.viewport(), key, Qt.ShiftModifier)
+                        assert canvas.tool_id == panel.selected_tool() == tool, (number, tool, canvas.tool_id)
+                        assert f"Shift+{number}" in panel._buttons[group].toolTip()
+                    if len(members) > 1:
+                        actions = panel._carets[number - 1].menu().actions()
+                        assert all(f"Shift+{number}" in action.text() for action in actions)
+                # 菜单和快捷键共用所选成员；切走再回来先选回折线，再按才轮到箭头。
+                panel._carets[2].menu().actions()[2].trigger()
+                QTest.keyClick(panel, Qt.Key_5, Qt.ShiftModifier)
+                QTest.keyClick(panel, Qt.Key_NumberSign, Qt.ShiftModifier)
+                assert canvas.tool_id == "polyline"
+                QTest.keyClick(panel, Qt.Key_3, Qt.ShiftModifier)
+                assert canvas.tool_id == "arrow"
+                for key in (Qt.Key_8, Qt.Key_9):
+                    QTest.keyClick(canvas.viewport(), key, Qt.ShiftModifier)
+                    assert canvas.tool_id == "arrow"
+                # Windows 键盘布局可能给数字键不同字符，优先采用物理数字键对应的虚拟键码。
+                event = QKeyEvent(QEvent.KeyPress, Qt.Key_Ampersand, Qt.ShiftModifier, 0, 0x32, 0, "&")
+                QApplication.sendEvent(canvas.viewport(), event)
+                assert canvas.tool_id == "pencil"
+                QTest.keyClick(canvas.viewport(), Qt.Key_4, Qt.ShiftModifier)
+                QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(40, 40)))
+                QTest.keyClick(canvas.viewport(), Qt.Key_Exclam, Qt.ShiftModifier)
+                assert canvas.tool_id == "text" and canvas.scene().focusItem().toPlainText() == "!"
+            finally:
+                flow.cancel()
+                flow.deleteLater()
+                flush()
 
 
 def drawing_interaction():
@@ -1203,11 +1298,11 @@ def render_windows():
 
 
 if __name__ == "__main__":
-    checks = [eraser_removes_marks, high_dpi_canvas, ocr_pixels, offline_models, empty_polyline,
+    checks = [toolbar_group_shortcuts, eraser_removes_marks, high_dpi_canvas, ocr_pixels, offline_models, empty_polyline,
               text_undo, serial_undo, remove_undo_order, fresh_mark_color, text_live_style, square_edge, pin_missing_fields,
               pin_geometry, longshot_pixels, cancelled_settings,
               real_ocr, all_tools, empty_shapes, scroll_sampling, screenshot_lifecycle, frozen_overlay_escape, pin_lifecycle, save_failure,
-              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, saved_settings, canvas_mouse_events, capture_loupe_leave, toolbar_keyboard_redo, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
+              longshot_lifecycle, toolbar_stability, exit_confirmation, hotkey_settings, capture_settings_defaults, saved_settings, canvas_mouse_events, capture_loupe_leave, toolbar_keyboard_redo, drawing_interaction, ocr_copy_text, ocr_selection_paint, ocr_confirm_selection, render_windows]
     failures = []
     with TemporaryDirectory() as folder, ExitStack() as isolated:
         directory = Path(folder)

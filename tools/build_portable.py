@@ -139,7 +139,7 @@ def main():
     (bundle / "build-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     (bundle / "使用说明.txt").write_text(
         "解压整个 GridStruct-V2 文件夹到可写目录，双击 GridStruct-V2.exe。\n"
-        "应用常驻系统托盘；默认 Ctrl+Alt+S 截图。\n"
+        "应用常驻系统托盘；默认 Ctrl+1 截图。\n"
         "“GridStruct-V2 识别文档.exe”是独立的识别文档入口：直接选图片或 PDF 识别表格，也可以把文件拖到它上面。\n"
         "_internal 目录包含程序依赖、图标与本地 OCR 模型，请勿单独移动 EXE。\n"
         "配置和历史保存于同目录 user-data；移动整个文件夹可一并迁移。\n"

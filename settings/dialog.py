@@ -1,6 +1,7 @@
 # 设置窗口：左侧纵向导航、右侧分组卡片（对齐 PixPin 配置窗口），QSettings 持久化。
 # organization/app 名按任务约定为 GridStruct/GridStruct。
 
+import re
 import sys
 from pathlib import Path
 from subprocess import list2cmdline
@@ -10,10 +11,10 @@ from PySide6.QtWidgets import (
     QFileDialog, QWidget, QApplication, QKeySequenceEdit, QListWidget, QListWidgetItem,
     QStackedWidget, QScrollArea, QFrame,
 )
-from PySide6.QtCore import QSettings, Qt, QUrl, QSize
+from PySide6.QtCore import QSettings, Qt, QUrl, QUrlQuery, QSize
 from PySide6.QtGui import QDesktopServices, QKeySequence, QIcon
 
-from ui import BaseDialog, ask_confirmation, show_message, tinted_icon
+from ui import BaseDialog, ask_confirmation, show_message, show_toast, tinted_icon
 from styles import apply_theme
 from styles import tokens as T
 from tray import HOTKEY_DEFAULTS, parse_hotkey
@@ -21,6 +22,11 @@ from .storage import get_settings
 
 _ORG, _APP = "GridStruct", "GridStruct"
 _VERSION = "0.2.4"
+_FEEDBACK_TEMPLATE = (
+    f"【GridStruct-V2 反馈】\n版本：{_VERSION}\n"
+    "问题类型：功能异常 / 界面 / 识别效果 / 建议（保留一项）\n"
+    "复现步骤：\n实际结果：\n期望结果："
+)
 # 保留旧版内部标识，避免升级后自启项失联或重复。
 _AUTOSTART_VALUE = "PixShot"
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -281,7 +287,7 @@ class SettingsDialog(BaseDialog):
         self._snap_only = QCheckBox("仅吸附窗口")
         self._snap_only.setChecked(self._s.value("snap_only_window", False, type=bool))
         self._guides = QCheckBox("显示十字辅助线")
-        self._guides.setChecked(self._s.value("capture_guides", True, type=bool))
+        self._guides.setChecked(self._s.value("capture_guides", False, type=bool))
         detect = page.group("自动识别")
         detect.check(self._snap_only, "开启后只框选整个窗口，不再识别按钮、输入框等控件。")
         detect.check(self._guides)
@@ -289,7 +295,7 @@ class SettingsDialog(BaseDialog):
         self._same_color.setChecked(self._s.value("same_tool_color", True, type=bool))
         page.group("标注").check(self._same_color, "高亮笔保留自己的颜色。")
         self._confirm_exit = QCheckBox("退出截图时，如有未保存的标注先确认")
-        self._confirm_exit.setChecked(self._s.value("capture/confirm_exit", True, type=bool))
+        self._confirm_exit.setChecked(self._s.value("capture/confirm_exit", False, type=bool))
         page.group("退出").check(self._confirm_exit, "按 Esc、点关闭、托盘退出或改做长截图时生效；没有标注时直接退出。")
         return page
 
@@ -396,14 +402,40 @@ class SettingsDialog(BaseDialog):
         page = _Page(title)
         card = page.group("GridStruct-V2")
         card.row("当前版本", QLabel(f"{_VERSION} · Windows 便携版"))
-        links = QLabel('<a href="https://github.com/Clayprocess/GridStruct-v2#readme">使用说明</a> · '
-                       '<a href="https://github.com/Clayprocess/GridStruct-v2/issues">反馈问题</a>')
+        links = QLabel('<a href="https://github.com/Clayprocess/GridStruct-v2#readme">使用说明</a>')
         links.setOpenExternalLinks(True)
         card.row("帮助", links)
+        recipient = self._s.value("feedback/email", "", type=str).strip()
+        teams = QPushButton("打开 Teams")
+        teams.setEnabled(bool(re.fullmatch(r"[^@\s,;]+@[^@\s,;]+", recipient)))
+        teams.clicked.connect(lambda: self._open_feedback(recipient))
+        copy = QPushButton("复制反馈模板")
+
+        def copy_template():
+            QApplication.clipboard().setText(_FEEDBACK_TEMPLATE)
+            show_toast("已复制反馈模板")
+
+        copy.clicked.connect(copy_template)
+        actions = QHBoxLayout()
+        actions.addWidget(teams)
+        actions.addWidget(copy)
+        hint = ("在公司 Teams 中编辑并发送。无法登录时，可复制模板另行反馈。"
+                if teams.isEnabled() else "尚未配置有效的 Teams 收件人，可复制模板后交给维护者。")
+        card.row("反馈问题", actions, hint)
         updates = QPushButton("检查更新")
         updates.clicked.connect(lambda: check_updates(self))
         card.widget(updates, "截图、贴图与中英文 OCR 均在本机处理。")
         return page
+
+    def _open_feedback(self, recipient):
+        url = QUrl("https://teams.microsoftonline.cn/l/chat/0/0")
+        query = QUrlQuery()
+        # QUrlQuery 会保留字面上的加号；Teams 按表单解码时会把它当成空格。
+        for key, value in (("users", recipient), ("message", _FEEDBACK_TEMPLATE)):
+            query.addQueryItem(key, bytes(QUrl.toPercentEncoding(value)).decode("ascii"))
+        url.setQuery(query)
+        if not QDesktopServices.openUrl(url):
+            show_message(self, "无法打开 Teams", "请检查默认浏览器设置，或点击“复制反馈模板”另行反馈。")
 
     # ---------- 保存 ----------
 

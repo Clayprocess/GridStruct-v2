@@ -29,7 +29,7 @@ def confirm_discard_all():
 def _confirm_exit(parent, lost="未复制或保存的标注", question="退出截图", confirm_text="退出"):
     """有未保存的标注或改过的识别文字时确认；勾选“不再提醒”后直接通过，可在设置里恢复。"""
     settings = get_settings()
-    if not settings.value("capture/confirm_exit", True, type=bool):
+    if not settings.value("capture/confirm_exit", False, type=bool):
         return True
     dialog = MessageDialog(parent, question, f"确认{question}？{lost}将丢失。",
                            confirm_text=confirm_text, cancel_text="取消", checkbox_text="不再提醒")
@@ -323,9 +323,12 @@ class AnnotationWindow(QWidget):
             event.accept()
             return True
         # 面板控件会先消化字母和撤销，工具命令必须在 QWidget 的局部编辑之前分发。
-        tool = shortcut_tool(event)
+        tool = shortcut_tool(event, self._canvas.tool_id)
         if tool:
-            self.select_tool(tool)
+            if isinstance(obj, (QLineEdit, QAbstractSpinBox)) or (isinstance(obj, QComboBox) and obj.isEditable()):
+                return False
+            if not event.isAutoRepeat() and tool != self._canvas.tool_id:
+                self.select_tool(tool)
         elif event.matches(QKeySequence.Undo):
             self._on_action("undo")
         elif event.matches(QKeySequence.Redo):
@@ -343,8 +346,6 @@ class AnnotationWindow(QWidget):
             self._on_action("save" if key == Qt.Key_S else "copy")
         elif modifiers & Qt.ShiftModifier and key == Qt.Key_O:
             self._on_action("ocr")
-        elif shortcut_tool(event):
-            self.select_tool(shortcut_tool(event))
         elif key in (Qt.Key_Return, Qt.Key_Enter):
             self._on_action("confirm")
         else:

@@ -40,20 +40,27 @@ TOOL_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
 ]
 _GROUP_OF = {tool[0]: group for group, tools in TOOL_GROUPS for tool in tools}
 _TOOL_INFO = {tool[0]: tool[1:] for _group, tools in TOOL_GROUPS for tool in tools}
-# 合并按钮不改快捷键：Shift+1～9 仍是 PixPin 文档的几何、折线、箭头、序号、铅笔、荧光笔、马赛克、文字、橡皮擦。
-DIGIT_TOOLS = ("geo", "polyline", "arrow", "serial", "pencil", "highlight", "mosaic", "text", "eraser")
 
 
-def shortcut_tool(event):
-    """Shift+数字对应的工具 id，没有则返回 None。"""
+def shortcut_tool(event, current_tool=None):
+    """按屏上组序切换工具：进组时沿用上次所选；在组内再按一次选下一项。"""
     if event.modifiers() != Qt.ShiftModifier:
         return None
     # Shift 让数字键产生的字符随键盘布局变化；Windows 虚拟键码 0x31～0x39 与布局无关，优先用它。
     vk, key = event.nativeVirtualKey(), event.key()
-    if 0x31 <= vk <= 0x39:
-        return DIGIT_TOOLS[vk - 0x31]
-    index = "123456789!@#$%^&*(".find(chr(key)) if key < 0x110000 else -1
-    return DIGIT_TOOLS[index % 9] if index >= 0 else None
+    if 0x30 <= vk <= 0x39:
+        index = vk - 0x31
+    elif Qt.Key_0 <= key <= Qt.Key_9:
+        index = key - Qt.Key_1
+    else:
+        index = "!@#$%^&*(".find(chr(key)) if 0 <= key < 128 else -1
+    if not 0 <= index < len(TOOL_GROUPS):
+        return None
+    group, tools = TOOL_GROUPS[index]
+    for position, (tool_id, _label, _icon) in enumerate(tools):
+        if tool_id == current_tool:
+            return tools[(position + 1) % len(tools)][0]
+    return group
 
 # 操作 id -> (中文名, Lucide 图标名)。撤销单独一组，其余是输出。
 UNDO_ACTION = ("undo", "撤销", "undo-2")
@@ -74,8 +81,11 @@ _END_BUTTONS: list[tuple[str, str, str]] = [
 ]
 _SHORTCUTS = {"undo": "Ctrl+Z", "save": "Ctrl+S", "ocr": "Shift+O", "longshot": "Ctrl+Alt+L",
               CONFIRM_ID: "Ctrl+C / Enter", CANCEL_ID: "Esc"}
-_SHORTCUTS.update({tool: f"Shift+{i + 1}" for i, tool in enumerate(DIGIT_TOOLS) if tool in _TOOL_INFO})
-_SHORTCUTS["rect"] = _SHORTCUTS["ellipse"] = "Shift+1"
+_SHORTCUTS.update({
+    tool_id: f"Shift+{number}" + (" 循环切换" if len(tools) > 1 else "")
+    for number, (_group, tools) in enumerate(TOOL_GROUPS, 1)
+    for tool_id, _label, _icon in tools
+})
 
 
 def _tip(item_id, label):
@@ -178,6 +188,8 @@ class FloatPanel(QWidget):
         self.setWindowTitle("GridStruct-V2 标注工具条")
         # 圆角卡片需要透明背景，否则四角会被填成方形
         self.setAttribute(Qt.WA_TranslucentBackground)
+        # 键盘焦点留在截图遮罩或画布时，Qt 默认跳过未激活工具条的悬停提示。
+        self.setAttribute(Qt.WA_AlwaysShowToolTips)
 
         self._mode = "light"
         self._fade = animation(self, b"windowOpacity")

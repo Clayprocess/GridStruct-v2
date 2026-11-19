@@ -38,7 +38,7 @@ class ScreenShotWindow(QObject):
         self._closed = False
         self._refreshing = False
         self._frozen = False
-        self._guides = get_settings().value("capture_guides", True, type=bool)
+        self._guides = get_settings().value("capture_guides", False, type=bool)
         self._sel = QRect()
         # _snap_rect 是吸附目标，_snap_shown 是正在画的框：切换元素时由旧框滑到新框。
         self._snap_rect = QRect()
@@ -481,8 +481,9 @@ class ScreenShotWindow(QObject):
             self._set_selection(self._vg if self._sel == screen else screen)
         elif self._keep_open and not self._sel.isNull() and modifiers & Qt.ShiftModifier and key == Qt.Key_O:
             self.actionRequested.emit("ocr")
-        elif self._keep_open and not self._sel.isNull() and shortcut_tool(event):
-            self.actionRequested.emit(f"tool:{shortcut_tool(event)}")
+        elif self._keep_open and not self._sel.isNull() and (tool := shortcut_tool(event)):
+            if not event.isAutoRepeat():
+                self.actionRequested.emit(f"tool:{tool}")
         elif not self._sel.isNull() and key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
             previous, dirty = QRect(self._sel), self._hover_region()
             # 同 PixPin：方向键移动 1px；Shift+方向键把对应那条边向内收 1px，Ctrl+方向键向外扩 1px。
