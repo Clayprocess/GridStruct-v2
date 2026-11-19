@@ -17,8 +17,7 @@ from PySide6.QtWidgets import (
     QPushButton, QToolButton, QLineEdit, QComboBox, QCheckBox,
     QSlider, QTabWidget, QListWidget, QGroupBox, QLabel, QSystemTrayIcon,
 )
-from PySide6.QtCore import Qt, QSharedMemory, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QSharedMemory, QTimer
 
 from styles import apply_theme
 from styles import tokens as T
@@ -36,13 +35,14 @@ APP_NAME = "GridStruct-V2"
 _SINGLE_INSTANCE_KEY = "PixShot_SingleInstance_v1"
 
 
-def _ensure_single_instance() -> QSharedMemory | None:
-    """单实例：抢到共享内存返回对象，抢不到返回 None（调用方退出）。"""
-    mem = QSharedMemory(_SINGLE_INSTANCE_KEY)
+def _ensure_single_instance(key: str = _SINGLE_INSTANCE_KEY) -> QSharedMemory | None:
+    """持锁对象必须存活到托盘退出；只有锁被占用才返回 None。"""
+    mem = QSharedMemory(key)
     if mem.create(1):
         return mem
-    print("[GridStruct-V2] 已有实例在运行，退出。")
-    return None
+    if mem.error() == QSharedMemory.SharedMemoryError.AlreadyExists:
+        return None
+    raise OSError(mem.errorString())
 
 
 def main() -> int:
@@ -50,15 +50,19 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setProperty("desktop_check", desktop_check)
     app.setApplicationName(APP_NAME)
+
+    try:
+        mem = _ensure_single_instance()
+    except OSError as exc:
+        show_message(None, "无法检查应用是否已启动", str(exc))
+        return 1
+    if mem is None:
+        print("[GridStruct-V2] 已有实例在运行，退出。")
+        return 0
+
     app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)  # 常驻托盘：无窗口时不退出
     ScreenManager.instance()
-
-    mem = _ensure_single_instance()
-    if mem is None:
-        return 0
-    # mem 必须活到进程结束，故意不释放
-
     try:
         config = get_settings()
     except OSError as exc:
