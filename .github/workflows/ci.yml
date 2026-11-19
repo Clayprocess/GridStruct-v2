@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  minimum-python:
+    name: Python 3.10 安装与入口导入
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pip check
+      - run: python -c "import main, document_main, table.controller, rapidocr, onnxruntime"
+
+  regression:
+    name: Python 3.12 离屏回归
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m ruff check .
+      - name: pytest（含跨列重划与导出）
+        run: python -m pytest -v -m "not windows_integration"
+      - name: 冒烟（含离线模型识别与明暗渲染）
+        run: python tools/smoke_check.py
+      - name: 识别窗口与离线 OCR
+        run: python tools/check_ocr_windows.py
+      - name: 截图 OCR 状态与编辑
+        run: python tools/check_ocr_capture_card.py
+      - name: 设置保存失败回滚
+        run: python tools/check_settings_save.py
+      - name: 表格编辑中断
+        run: python tools/check_table_interrupt.py
+      - name: 标注退出与会话清理
+        run: python tools/check_annotation_end.py

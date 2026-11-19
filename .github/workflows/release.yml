@@ -12,12 +12,21 @@ on:
       - gridstruct-v2.spec
       - tools/build_portable.py
       - requirements.txt
+      - LICENSE
+      - THIRD_PARTY_NOTICES.md
+      - licenses/**
 
 permissions:
   contents: write
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build:
+    needs: checks
     runs-on: windows-latest
     env:
       # 构建脚本和 PyInstaller 输出中文，Windows 控制台默认代码页会报编码错误。
@@ -51,16 +60,6 @@ jobs:
           if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne $tag) { throw "标签 ${{ github.ref_name }} 与 settings/dialog.py 的 _VERSION=$version 不一致" }
           if ($env:PUBLISH -eq "true" -and -not (Test-Path "docs/releases/$tag.md")) { throw "缺少发布说明 docs/releases/$tag.md" }
           "TAG=$tag" >> $env:GITHUB_ENV
-
-      - name: 识别窗口针对性回归
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: python tools/check_ocr_windows.py
-
-      - name: 跨列表格数据回归
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: python tools/check_table.py --cross-column-only
 
       - name: 构建便携包
         run: |
