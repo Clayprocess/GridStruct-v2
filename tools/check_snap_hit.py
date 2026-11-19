@@ -619,7 +619,7 @@ class FakeUiaTree(snap._UiaTree):
 
 def check_uia_dead_ends():
     """最小的含鼠标子元素是空容器时换路：任务栏图标在等宽的子元素下面；Chromium 刚唤醒取到的空结果会重取。"""
-    pane, button = 50033, 50000
+    pane = 50033
     bar, legacy, bridge = QRect(0, 1392, 2560, 48), QRect(55, 1392, 220, 48), QRect(0, 1392, 2560, 48)
     icon, tray_icon = QRect(116, 1392, 44, 48), QRect(2400, 1392, 24, 48)
     tree = {"window": [("bar", bar), ("legacy", legacy), ("tray", QRect(2271, 1392, 289, 48))],
