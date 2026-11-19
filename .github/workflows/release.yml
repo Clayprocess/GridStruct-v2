@@ -38,6 +38,16 @@ jobs:
           QT_QPA_PLATFORM: windows
         run: python tools/check_toolbar_hover.py
 
+      - name: Windows 原生识别窗口图标
+        env:
+          QT_QPA_PLATFORM: windows
+        run: python tools/check_ocr_windows.py --icons-only
+
+      - name: 关于页 Teams 反馈与复制模板
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tools/check_teams_feedback.py
+
       # 针对 v0.2.0 的 Defender 检测反馈调整构建来源；是否影响检测仍需目标环境验证。
       # 在 runner 上编译引导程序，再与官方 wheel 比较，确认没有复用其预编译二进制。
       - name: 安装 PyInstaller（自编引导程序）
