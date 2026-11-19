@@ -1,4 +1,5 @@
 import sys
+import time
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -43,7 +44,13 @@ def test_second_process_can_start_only_after_owner_exits(kill_owner):
         if not kill_owner:
             assert owner.exitCode() == 0, bytes(owner.readAllStandardError())
         successor = main._ensure_single_instance(key)
-        assert successor is not None
+        if kill_owner:
+            # Windows 强杀进程后，waitForFinished() 可能先于共享内存句柄回收返回。
+            deadline = time.monotonic() + 1
+            while successor is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+                successor = main._ensure_single_instance(key)
+        assert successor is not None, "持锁进程退出后，单实例锁仍被占用"
         assert successor.detach()
     finally:
         if owner.state() != QProcess.ProcessState.NotRunning:
