@@ -1,6 +1,6 @@
 # 图标资产
 
-Lucide 图标（MIT 协议），SVG 格式，`stroke="currentColor"`。
+Lucide 图标为 SVG 格式，使用 `stroke="currentColor"`。Lucide 使用 ISC 许可，源自 Feather 的图标还保留其 MIT 版权声明。[上游许可原文及 Feather 图标清单](https://github.com/lucide-icons/lucide/blob/main/LICENSE)
 
 - 来源：https://lucide.dev / https://github.com/lucide-icons/lucide
 - 加载：`from ui.icons import icon, tinted_icon`

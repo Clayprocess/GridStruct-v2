@@ -12,6 +12,7 @@ from importlib import metadata, util
 import json
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import sys
 from zipfile import ZipFile, ZIP_DEFLATED
@@ -20,6 +21,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 ROOT = Path(__file__).resolve().parents[1]
 BOOTLOADER = Path("PyInstaller/bootloader/Windows-64bit-intel/runw.exe")
 MODELS = ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx", "slanet-plus.onnx")
+RUNTIME_PACKAGES = ("PySide6", "onnxruntime", "rapidocr", "XlsxWriter")
 
 
 def check_requirements():
@@ -59,6 +61,37 @@ def check_bootloader(wheel):
     print(f"官方引导程序 {stock}\n当前引导程序 {current}")
     if current == stock:
         raise RuntimeError("PyInstaller 仍在使用官方预编译引导程序；请设置 PYINSTALLER_COMPILE_BOOTLOADER=1 并用 --no-binary pyinstaller 重装。")
+
+
+def copy_licenses(bundle):
+    from PyInstaller.utils.hooks import copy_metadata
+
+    for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
+        shutil.copyfile(ROOT / name, bundle / name)
+    licenses = bundle / "licenses"
+    shutil.copytree(ROOT / "licenses", licenses)
+    shutil.copyfile(Path(sys.base_prefix) / "LICENSE.txt", licenses / "Python.txt")
+
+    # 按构建环境解析运行依赖；PyInstaller 只分发引导程序。
+    metadata_dirs = set(copy_metadata("pyinstaller"))
+    for name in RUNTIME_PACKAGES:
+        metadata_dirs.update(copy_metadata(name, recursive=True))
+    for source, _ in sorted(metadata_dirs):
+        directory = Path(source)
+        destination = licenses / "packages" / directory.name
+        for entry in directory.iterdir():
+            if entry.name.lower() == "licenses" and entry.is_dir():
+                shutil.copytree(entry, destination / entry.name)
+            elif entry.is_file() and entry.name.lower().startswith(("licen", "notice", "copying")):
+                destination.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(entry, destination / entry.name)
+
+    # ONNX Runtime 把主许可和原生库声明放在模块目录中。
+    runtime = metadata.distribution("onnxruntime")
+    destination = licenses / "packages" / f"onnxruntime-{runtime.version}"
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ("LICENSE", "ThirdPartyNotices.txt"):
+        shutil.copyfile(runtime.locate_file(f"onnxruntime/{name}"), destination / name)
 
 
 def verify_bundle(bundle):
@@ -125,12 +158,13 @@ def main():
     )
     bundle = output / "GridStruct-V2"
     hashes = verify_bundle(bundle)
+    copy_licenses(bundle)
     manifest = {
         "format": "Windows onedir portable",
         "built_at": datetime.now().astimezone().isoformat(),
         "python": platform.python_version(),
         "architecture": platform.machine(),
-        "dependencies": {name: metadata.version(name) for name in ("pyinstaller", "PySide6", "onnxruntime", "rapidocr", "XlsxWriter")},
+        "dependencies": {name: metadata.version(name) for name in ("pyinstaller", *RUNTIME_PACKAGES)},
         "bootloader_sha256": sha256(installed_bootloader()),
         "resource_sha256": hashes,
         "native_dependency_load_verified": True,

@@ -69,6 +69,8 @@ slanet-plus.onnx
 
 ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使用时完整解压到可写目录，启动 `GridStruct-V2.exe`，保留旁边的 `_internal/`；无需另外安装 Python。构建脚本校验资源哈希，并在 `build-manifest.json` 中记录依赖版本。资源校验不等于目标电脑运行验收，清单中的 `runtime_verified` 默认仍为 `false`。
 
+项目自有代码采用 MIT 许可。便携包随附 PySide6/Qt（含 LGPLv3 组件）、RapidOCR（Apache-2.0）、图标、模型和其他组件的许可与归属说明。[项目许可证](LICENSE) · [第三方许可与来源](THIRD_PARTY_NOTICES.md)
+
 构建还会在独立进程加载包内 Qt 原生 DLL，避免仅有文件但不能导入的情况；通过后记录 `native_dependency_load_verified=true`。已修复构建环境误收第三方 ICU 导致 QtWidgets 无法导入的问题，构建进程的依赖搜索路径与用户系统配置隔离。
 
 发布走 GitHub Releases：先把 `settings/dialog.py` 的 `_VERSION` 改成新版本，并在 `docs/releases/v<版本>.md` 写好发布说明，一起合入 master。然后在 Actions 页手动运行 `release` 工作流，或推送同名标签（如 `git push origin v0.1.0`）。`.github/workflows/release.yml` 在 Windows runner 上执行上面的构建，把 `GridStruct-V2-v<版本>-portable.zip` 挂到 Release。标签与 `_VERSION` 不一致、或缺少发布说明时构建直接失败。
@@ -84,7 +86,7 @@ ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使
 | `capture/` | 屏幕管理、桌面捕获、选区、吸附、截图流程、长截图 | `ScreenManager`、`DesktopCapture`、`ScreenFrame`、`ScreenshotFlow`、`LongShotFlow`、`ScreenShotWindow`、`RegionDetector`；将选区/拼接结果交给标注流程 |
 | `annotate/` | 标注画布、工具、样式和浮动工具条 | `AnnotationWindow`、`AnnotationCanvas`、`MarkStyle`、`FloatPanel`、`create_tool`；输出动作调用其他模块的公开接口 |
 | `pin/` | 图片/文字贴图、窗口管理、会话保存恢复 | `show_pin`、`show_text_pin`、`show_pin_from_clipboard`、`restore_pins`、`save_pins`、`shutdown_pins`、`disable_click_through`；图片识别调用 OCR 接口 |
-| `ocr/` | 原始证据和全文文档、本地推理、后台任务、复核对话框与文字层 | `OCREngine`、`OCRResult`、`OCRDocument`、`OCRController`、`OCRResultDialog`、`add_text_layer`、`format_text`；不包含表格/公式识别 |
+| `ocr/` | 原始证据和全文文档、本地推理、后台任务、复核对话框与文字层 | `OCREngine`、`OCRResult`、`OCRDocument`、`OCRController`、`OCRResultDialog`、`OCRTextEdit`、`LAYOUTS`、`add_text_layer`、`format_text`；不包含表格/公式识别 |
 | `table/` | 表格网格分析、网格编辑与校对窗口（含识别文档的多页）、表格导出 | `open_table`、`open_document`、`TableDialog`；文字框来自 `ocr` 的 `OCREngine`/`OCRResult`，网格与文档是纯数据（`table/model.py`） |
 | `export/` | 截图图片保存 | `save_image`；当前支持 PNG/JPG；表格的 xlsx/CSV 导出在 `table/` |
 | `settings/` | 设置窗口、便携 INI 和数据目录 | `SettingsDialog`、`get_settings`、`data_directory` |
@@ -101,6 +103,8 @@ UI 使用 PySide6 Qt Widgets，不使用 QML。业务模块通过动态属性选
 不做会员、登录、订阅、云同步、兑换码、工业条码、TTS、摄像头画中画、录屏剪辑和多语种切换界面。当前不提供可浏览的贴图历史库；可修改的全局快捷键为截图和识别文档。
 
 ## 验证范围
+
+提交改动前的安装与自检命令见[贡献指南](CONTRIBUTING.md)。日常 CI 在 Windows 上验证 Python 3.10 安装和入口导入，并在 Python 3.12 上运行 Ruff、pytest、离屏冒烟和专项回归。发布工作流复用这些检查，通过后才编译引导程序并打包。
 
 2026-10-28 交互优化：Windows 源码离屏冒烟 `tools/smoke_check.py` 32/32 通过，含连续落笔、选中对象样式隔离、浮动工具条焦点、键盘预览选择、复制上下文和会话重置。`tools/check_longshot.py`、`tools/check_table.py` 专项通过，并检查了明暗主题渲染。临时全局 Esc 已验证注册/释放及 Qt 原生消息分发边界；本次尚未重做真实桌面外部焦点端到端验收，也未构建新发布包。
 
