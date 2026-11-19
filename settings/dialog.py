@@ -281,7 +281,7 @@ class SettingsDialog(BaseDialog):
         self._snap_only = QCheckBox("仅吸附窗口")
         self._snap_only.setChecked(self._s.value("snap_only_window", False, type=bool))
         self._guides = QCheckBox("显示十字辅助线")
-        self._guides.setChecked(self._s.value("capture_guides", True, type=bool))
+        self._guides.setChecked(self._s.value("capture_guides", False, type=bool))
         detect = page.group("自动识别")
         detect.check(self._snap_only, "开启后只框选整个窗口，不再识别按钮、输入框等控件。")
         detect.check(self._guides)
@@ -289,7 +289,7 @@ class SettingsDialog(BaseDialog):
         self._same_color.setChecked(self._s.value("same_tool_color", True, type=bool))
         page.group("标注").check(self._same_color, "高亮笔保留自己的颜色。")
         self._confirm_exit = QCheckBox("退出截图时，如有未保存的标注先确认")
-        self._confirm_exit.setChecked(self._s.value("capture/confirm_exit", True, type=bool))
+        self._confirm_exit.setChecked(self._s.value("capture/confirm_exit", False, type=bool))
         page.group("退出").check(self._confirm_exit, "按 Esc、点关闭、托盘退出或改做长截图时生效；没有标注时直接退出。")
         return page
 
