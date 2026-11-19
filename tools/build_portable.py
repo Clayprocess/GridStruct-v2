@@ -21,6 +21,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 ROOT = Path(__file__).resolve().parents[1]
 BOOTLOADER = Path("PyInstaller/bootloader/Windows-64bit-intel/runw.exe")
 MODELS = ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx", "slanet-plus.onnx")
+EXECUTABLES = ("GridStruct-V2.exe", "GridStruct-V2 识别文档.exe")
 RUNTIME_PACKAGES = ("PySide6", "onnxruntime", "rapidocr", "XlsxWriter")
 
 
@@ -95,7 +96,7 @@ def copy_licenses(bundle):
 
 
 def verify_bundle(bundle):
-    for name in ("GridStruct-V2.exe", "GridStruct-V2 识别文档.exe"):
+    for name in EXECUTABLES:
         if not (bundle / name).is_file():
             raise RuntimeError(f"构建未输出 {name}。")
     runtime = bundle / "_internal"
@@ -130,6 +131,27 @@ def verify_bundle(bundle):
         check=True,
     )
     return hashes
+
+
+def verify_archive(archive, bundle, resource_hashes):
+    notices = [bundle / "LICENSE", bundle / "THIRD_PARTY_NOTICES.md"]
+    notices.extend(path for path in (bundle / "licenses").rglob("*") if path.is_file())
+    expected = {path.relative_to(bundle).as_posix(): sha256(path) for path in notices}
+    expected.update({name: sha256(bundle / name) for name in EXECUTABLES})
+    for model in MODELS:
+        relative = f"assets/models/{model}"
+        expected[f"_internal/{relative}"] = resource_hashes[relative]
+
+    with ZipFile(archive) as zipped:
+        invalid = zipped.testzip()
+        if invalid is not None:
+            raise RuntimeError(f"ZIP CRC 校验失败：{invalid}")
+        names = set(zipped.namelist())
+        for relative, digest in expected.items():
+            name = f"{bundle.name}/{relative}"
+            if name not in names or hashlib.sha256(zipped.read(name)).hexdigest() != digest:
+                raise RuntimeError(f"ZIP 文件缺失或内容不一致：{relative}")
+    print(f"ZIP 内容核验通过：{len(EXECUTABLES)} 个 EXE、{len(MODELS)} 个模型、{len(notices)} 份许可与声明。")
 
 
 def main():
@@ -185,10 +207,7 @@ def main():
         for file in sorted(bundle.rglob("*")):
             if file.is_file():
                 zipped.write(file, file.relative_to(output))
-    with ZipFile(archive) as zipped:
-        invalid = zipped.testzip()
-        if invalid is not None:
-            raise RuntimeError(f"ZIP CRC 校验失败：{invalid}")
+    verify_archive(archive, bundle, hashes)
     print(f"便携目录：{bundle}")
     print(f"ZIP：{archive}")
     print("资源校验通过；未启动程序或进行真实桌面验收。")
