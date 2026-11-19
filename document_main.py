@@ -25,7 +25,7 @@ def main() -> int:
     except OSError as exc:
         show_message(None, "无法读取便携配置", f"{exc}\n请将应用放在有写入权限的目录。")
         return 1
-    app.setWindowIcon(app_icon(apply_theme(app, config.value("theme", "system"))))
+    apply_theme(app, config.value("theme", "system"))
     enable_menu_effects(app)
     from table import open_document
     if open_document(paths=sys.argv[1:]) is None:

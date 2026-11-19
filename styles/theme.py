@@ -5,7 +5,7 @@
 import tempfile
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from . import tokens as T
@@ -727,12 +727,23 @@ def _system_is_dark() -> bool:
     return QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
 
 
+def _system_scheme_changed(_scheme):
+    app = QApplication.instance()
+    if app.property("theme_preference") == "system":
+        apply_theme(app, "system")
+
+
 def apply_theme(app: QApplication, mode: str = "system") -> str:
     """应用主题，返回实际生效的 'light' | 'dark'。"""
+    from ui import app_icon
+    preference = mode
     if mode == "system":
         mode = "dark" if _system_is_dark() else "light"
     if mode not in T.THEMES:
         raise ValueError(f"unknown theme mode: {mode}")
+    if app.property("theme_preference") is None:
+        app.styleHints().colorSchemeChanged.connect(_system_scheme_changed)
+    app.setProperty("theme_preference", preference)
     t = T.THEMES[mode]
     # QSS 管不到富文本链接色，只能走调色板；链接跟正文同色，靠下划线区分。
     palette = app.palette()
@@ -740,4 +751,12 @@ def apply_theme(app: QApplication, mode: str = "system") -> str:
     app.setPalette(palette)
     app.setStyleSheet(build_qss(t))
     app.setProperty("theme_mode", mode)
+    icon = app_icon(mode)
+    app.setWindowIcon(icon)
+    # 显式交给任务栏的窗口图标不会再继承 QApplication 的变化。
+    for window in app.topLevelWidgets():
+        if window.windowType() == Qt.Window:
+            window.setWindowIcon(icon)
+    for tray in app.findChildren(QSystemTrayIcon):
+        tray.setIcon(icon)
     return mode
