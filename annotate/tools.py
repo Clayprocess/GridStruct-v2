@@ -6,7 +6,7 @@
 #   3. on_release 收尾：合法则 undo.push(AddMarkCommand)，非法则 scene.removeItem；
 #   4. 在 TOOL_CLASSES 注册 id，并加进 annotate/toolbar.py 的 TOOL_GROUPS。
 
-from PySide6.QtCore import QRect, QRectF, QPointF, Qt
+from PySide6.QtCore import QRectF, QPointF, Qt
 from PySide6.QtWidgets import QGraphicsScene, QApplication
 from PySide6.QtGui import QGuiApplication, QPainterPath, QPainterPathStroker, QUndoStack
 

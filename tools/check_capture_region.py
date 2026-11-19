@@ -121,7 +121,7 @@ def check_physical(manager, physical):
 
 
 def main():
-    app = QApplication([])
+    _app = QApplication([])
     baseline = '--baseline' in sys.argv
     samples = 0
     for dpr in (1, 1.25, 1.5, 2, 2.25):

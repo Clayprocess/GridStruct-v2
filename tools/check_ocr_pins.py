@@ -80,7 +80,7 @@ def main():
                 source_controller = OCRController(source, layer_first=True)
                 assert source_controller.adopt_document(document, pixmap)
                 image_pin = pin.show_pin(pixmap, document=document)
-                text_pin = pin.show_text_pin("旧文字贴图仍可恢复")
+                pin.show_text_pin("旧文字贴图仍可恢复")
                 assert image_pin._document is document
                 assert image_pin._ocr_controller.document is document
                 document.set_draft("改过的全文")

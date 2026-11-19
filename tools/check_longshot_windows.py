@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
+from PySide6.QtCore import QEvent, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QTransform
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtTest import QTest

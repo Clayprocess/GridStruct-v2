@@ -16,7 +16,7 @@ from PySide6.QtGui import QFontDatabase, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 from ocr import OCRResult
 from ocr import controller as module
-from styles import apply_theme, tokens as T
+from styles import tokens as T
 
 
 class _Plan:
