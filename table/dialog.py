@@ -828,7 +828,7 @@ class TableDialog(BaseDialog):
         name, document, members = sheet
         data = QMimeData()
         data.setText(export.to_tsv(document))
-        data.setHtml(export.to_html(document))
+        data.setHtml(export.to_html(document, excel_clipboard=True))
         QApplication.clipboard().setMimeData(data)
         what = f"「{name}」" if len(sheets) > 1 or len(members) > 1 else "表格"
         show_toast(f"已复制{what}，可直接粘贴到 Excel / WPS" + self._pending_note([sheet], whole=False))
