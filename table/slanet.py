@@ -20,7 +20,6 @@ MODEL_SHA256 = "d57a942af6a2f57d6a4a0372573c696a2379bf5857c45e2ac69993f3b334514b
 INPUT_SIZE = 488
 MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-MIN_CELL_SIZE = 3
 MAX_GRID_AXIS = 200
 MAX_STRUCTURE_CELLS = 2000
 CELL_TOKENS = ("<td>", "<td", "<td></td>")
@@ -131,7 +130,7 @@ def grid_from_structure(logical, boxes, *, image_width, image_height):
     column_count = max(cell[3] for cell in logical) + 1
     if row_count > MAX_GRID_AXIS or column_count > MAX_GRID_AXIS:
         raise TableStructureError("检测到的表格行列数异常")
-    if row_count * MIN_CELL_SIZE > image_height or column_count * MIN_CELL_SIZE > image_width:
+    if row_count > image_height or column_count > image_width:
         raise TableStructureError("检测到的表格行列数超出截图尺寸")
 
     occupied = set()
@@ -155,11 +154,11 @@ def grid_from_structure(logical, boxes, *, image_width, image_height):
             merges.append(CellMerge(row_start, column_start, row_end + 1, column_end + 1))
     if len(occupied) != row_count * column_count:
         raise TableStructureError("检测到的表格结构不完整")
-    return GridSpec(_build_axis(horizontal, image_height), _build_axis(vertical, image_width), tuple(merges))
+    return GridSpec(_build_axis(horizontal, image_height), _build_axis(vertical, image_width), tuple(merges)).compact()
 
 
 def _build_axis(samples, extent):
-    """每条线取样本中位数，缺样本的线在两侧已知线之间插值，再保证最小格宽。"""
+    """每条线取样本中位数，缺样本的线在两侧已知线之间插值，先保证严格递增；5像素窄格由 compact 统一收敛。"""
     raw = [median(values) if values else None for values in samples]
     raw[0], raw[-1] = 0.0, float(extent)
     known = [index for index, value in enumerate(raw) if value is not None]
@@ -169,11 +168,11 @@ def _build_axis(samples, extent):
     count = len(raw) - 1
     lines = [round(value) for value in raw]
     for index in range(1, count):
-        lines[index] = max(index * MIN_CELL_SIZE, min(extent - (count - index) * MIN_CELL_SIZE, lines[index]))
+        lines[index] = max(index, min(extent - (count - index), lines[index]))
     for index in range(1, count + 1):
-        lines[index] = max(lines[index], lines[index - 1] + MIN_CELL_SIZE)
+        lines[index] = max(lines[index], lines[index - 1] + 1)
     lines[-1] = extent
     for index in range(count - 1, 0, -1):
-        lines[index] = min(lines[index], lines[index + 1] - MIN_CELL_SIZE)
+        lines[index] = min(lines[index], lines[index + 1] - 1)
     lines[0] = 0
     return tuple(lines)

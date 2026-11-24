@@ -9,7 +9,7 @@ v1 分成“网格确认”和“结果校对”两个窗口，这里合成一�
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QDateTime, QMimeData, QPointF, QSignalBlocker, QStandardPaths, Qt, Signal
+from PySide6.QtCore import QDateTime, QSize, QTimer, QRect, QMimeData, QPointF, QSignalBlocker, QStandardPaths, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout,
@@ -24,11 +24,14 @@ from ui import (
 from . import export
 from .editor import ADD_HORIZONTAL, ADD_VERTICAL, DELETE, SELECT, GridCanvas
 from .grid import STRATEGY_LABELS
-from .model import CORRECTED, PENDING
+from .model import CORRECTED, PENDING, GridSpec
 from .analysis import reading_order
 from .pages import FilePage, ImagePage
 from .regions import RegionCanvas, region_label
 from .review import TableReview
+from .amounts import preview_amount
+from .workbench import AMOUNT_ROLE, AmountDelegate, FloatingTools
+from .result_view import ResultTable, ResultView
 
 TOOLS = (
     (SELECT, "选择与拖线", "mouse-pointer-2", "S"),
@@ -59,6 +62,8 @@ class _TableState:
     message: str = ""
     scheme: int = 0
     cell: tuple = ()
+    scope_suggestions: dict = field(default_factory=dict)
+    resized_from: object = None  # 仅直接拖角重分析时保留原表及其校对历史。
     joined: bool = False  # 接上一页：导出时接在上一页最后一张表后面，同一个工作表
 
 
@@ -103,7 +108,9 @@ class TableDialog(BaseDialog):
         self.setWindowTitle("表格识别 · 本地" if len(self.pages) == 1 else "识别文档 · 本地")
         standard_window(self)
         self.setAttribute(Qt.WA_DeleteOnClose)
-        self.resize(1180, 700 if len(self.pages) == 1 else 760)
+        self.resize(1600, 900)
+        self.setObjectName("TableWorkbench")
+        self._amount_preview = {}
         self._mode = QApplication.instance().property("theme_mode") or "light"
         self._canvas = None
         self._syncing = False
@@ -112,40 +119,43 @@ class TableDialog(BaseDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(T.SPACE_3, T.SPACE_3, T.SPACE_3, T.SPACE_3)
         layout.setSpacing(T.SPACE_2)
-        layout.addLayout(self._build_toolbar())
 
         self._area = QScrollArea()
         self._area.setObjectName("TableCanvasArea")
         self._area.setAlignment(Qt.AlignCenter)
-        self._zoom = PreviewZoom(self._area, self, self)
+        self._zoom = PreviewZoom(self._area, self, self, shortcut=False)
 
-        self._table = QTableWidget()
-        self._table.setItemDelegate(MultilineDelegate(self._table))
+        self._table = ResultTable()
+        self._table.setItemDelegate(AmountDelegate(self._table))
         self._table.setWordWrap(True)
-        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
                                     | QAbstractItemView.AnyKeyPressed)
         self._table.itemChanged.connect(self._item_changed)
         self._table.currentCellChanged.connect(self._table_cell_changed)
 
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(T.SPACE_1)
-        right_layout.addLayout(self._build_table_bar())
-        right_layout.addWidget(self._table, 1)
+        self._result_view = ResultView(self._table)
+        self._build_toolbar()
+        self._build_table_bar()
+        self._build_review_tools()
+        self._table.itemSelectionChanged.connect(self._selection_changed)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self._area)
-        splitter.addWidget(right)
-        splitter.setSizes([640, 520])
-        layout.addWidget(splitter, 1)
+        self._splitter = QSplitter(Qt.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.addWidget(self._area)
+        self._splitter.addWidget(self._result_view)
+        self._area.setMinimumWidth(480)
+        self._result_view.setMinimumWidth(400)
+        self._splitter.setSizes([720, 880])
+        layout.addWidget(self._splitter, 1)
         layout.addLayout(self._build_footer())
 
         for sequence, slot in ((QKeySequence.Undo, self._undo), (QKeySequence.Redo, self._redo),
                                (QKeySequence("Ctrl+Shift+C"), self._copy), (QKeySequence("Ctrl+Return"), self._confirm)):
             QShortcut(sequence, self, slot)
+        QShortcut(QKeySequence("Ctrl+0"), self, self._fit_focused_view)
+        self._cancel_amount_shortcut = QShortcut(QKeySequence("Escape"), self, self._cancel_amounts)
+        self._cancel_amount_shortcut.setEnabled(False)
         self._next_shortcut = QShortcut(QKeySequence("F8"), self, self._next_pending)
         # 翻页会换画布，工具快捷键挂在外层滚动区，焦点在任何一页的画布上都生效。
         for tool, _label, _icon, key in TOOLS:
@@ -156,6 +166,7 @@ class TableDialog(BaseDialog):
             QShortcut(QKeySequence("Ctrl+PgUp"), self, lambda: self.show_page(self._index - 1))
             QShortcut(QKeySequence("Ctrl+PgDown"), self, lambda: self.show_page(self._index + 1))
         self.show_page(0)
+        QTimer.singleShot(0, lambda: self._splitter.setSizes([round(self._splitter.width() * .45), round(self._splitter.width() * .55)]))
 
     @property
     def _state(self):
@@ -174,9 +185,10 @@ class TableDialog(BaseDialog):
 
     def _tool_button(self, label, icon_name, slot=None, checkable=False):
         button = QToolButton()
-        button.setIcon(tinted_icon(icon_name, T.THEMES[self._mode]["foreground"]))
+        button.setIcon(tinted_icon(icon_name, T.THEMES[self._mode]["table_foreground"]))
         button.setToolTip(label)
         button.setAccessibleName(label)
+        button.setIconSize(QSize(16, 16))
         button.setAutoRaise(True)
         button.setCheckable(checkable)
         button.setProperty("class", "ghost")
@@ -184,132 +196,197 @@ class TableDialog(BaseDialog):
             button.clicked.connect(slot)
         return button
 
-    @staticmethod
-    def _separator():
-        line = QFrame()
-        line.setObjectName("TableToolSeparator")
-        line.setFrameShape(QFrame.VLine)
-        return line
+    def _label_button(self, text, icon, slot=None, checkable=False, tip=None):
+        button = self._tool_button(tip or text, icon, slot, checkable)
+        button.setText(text)
+        button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        button.setProperty("labelled", True)
+        return button
 
     def _build_toolbar(self):
-        row = QHBoxLayout()
-        row.setSpacing(2)
+        self._source_tools = FloatingTools(self._area)
+        self._regions_button = self._label_button(
+            "框选表格", "square-dashed", checkable=True,
+            tip="在原图上调整、删除或补画表格框；再次点击结束 (R)")
+        self._regions_button.toggled.connect(self._toggle_regions)
+        self._schemes = QComboBox()
+        self._schemes.setObjectName("TableScheme")
+        self._schemes.setFixedWidth(128)
+        self._schemes.setToolTip("按表格结构、文字行或外框选择网格方案；可撤销")
+        self._schemes.activated.connect(self._scheme_chosen)
+        self._source_tools.group(self._regions_button, self._schemes)
+        self._tools = QButtonGroup(self)
+        self._tools.setExclusive(False)
+        self._tool_buttons = {}
+        for tool, label, icon_name, key in TOOLS:
+            text = {SELECT: "选择", ADD_HORIZONTAL: "增加横线", ADD_VERTICAL: "增加竖线", DELETE: "删除线"}[tool]
+            button = self._label_button(text, icon_name, checkable=True, tip=f"{label} ({key})；再次点击退出")
+            button.clicked.connect(lambda _checked=False, value=tool: self._choose_tool(value))
+            self._tools.addButton(button)
+            self._tool_buttons[tool] = button
+        # 选择是默认状态；不再单独占用一个常驻按钮。
+        self._tool_buttons[SELECT].hide()
+        self._source_tools.group(*(self._tool_buttons[t] for t in (ADD_HORIZONTAL, ADD_VERTICAL, DELETE)))
+        self._merge = self._label_button("合并单元格", "table-cells-merge", lambda: self._canvas.merge_selected())
+        self._split = self._label_button("取消合并", "table-cells-split", lambda: self._canvas.split_selected())
+        self._source_tools.group(self._merge, self._split)
+        self._undo_button = self._label_button("撤销", "undo-2", self._undo, tip="撤销 (Ctrl+Z)")
+        self._redo_button = self._label_button("重做", "redo-2", self._redo, tip="重做 (Ctrl+Y)")
+        self._source_tools.group(self._undo_button, self._redo_button)
         if len(self.pages) > 1:
+            self._page_tools = FloatingTools(self._area, bottom=True)
             self._previous_page = self._tool_button("上一页 (Ctrl+PgUp)", "chevron-left", lambda: self.show_page(self._index - 1))
             self._next_page = self._tool_button("下一页 (Ctrl+PgDown)", "chevron-right", lambda: self.show_page(self._index + 1))
-            # 输入页码回车跳转；几十页的扫描件不用一页页翻。
             self._page_input = QLineEdit()
             self._page_input.setObjectName("TablePageInput")
             self._page_input.setAlignment(Qt.AlignCenter)
-            self._page_input.setFixedWidth(44)
-            self._page_input.setToolTip("输入页码后回车跳转")
+            self._page_input.setFixedWidth(20 + 8 * len(str(len(self.pages)) ))
             self._page_input.setAccessibleName("页码")
             self._page_input.returnPressed.connect(self._jump_to_page)
             self._page_total = QLabel(f"/ {len(self.pages)}")
-            for widget in (self._previous_page, self._page_input, self._page_total, self._next_page):
-                row.addWidget(widget)
-            row.addWidget(self._separator())
-        self._regions_button = QToolButton()
-        self._regions_button.setText("框选表格")
-        self._regions_button.setIcon(tinted_icon("square-dashed", T.THEMES[self._mode]["foreground"]))
-        self._regions_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._regions_button.setToolTip("在原图上调整、删除或补画表格框；框外的文字不进表格 (R)")
-        self._regions_button.setAutoRaise(True)
-        self._regions_button.setCheckable(True)
-        self._regions_button.setProperty("class", "ghost")
-        self._regions_button.toggled.connect(self._toggle_regions)
-        row.addWidget(self._regions_button)
-        row.addWidget(self._separator())
-        self._tools = QButtonGroup(self)
-        self._tool_buttons = {}
-        for tool, label, icon_name, key in TOOLS:
-            button = self._tool_button(f"{label} ({key})", icon_name, checkable=True)
-            button.clicked.connect(lambda _checked=False, value=tool: self._canvas.set_tool(value))
-            self._tools.addButton(button)
-            self._tool_buttons[tool] = button
-            row.addWidget(button)
-        self._tool_buttons[SELECT].setChecked(True)
-        row.addWidget(self._separator())
-        self._merge = self._tool_button("合并选中格子", "table-cells-merge", lambda: self._canvas.merge_selected())
-        self._split = self._tool_button("取消合并", "table-cells-split", lambda: self._canvas.split_selected())
-        row.addWidget(self._merge)
-        row.addWidget(self._split)
-        row.addWidget(self._separator())
-        self._undo_button = self._tool_button("撤销 (Ctrl+Z)", "undo-2", self._undo)
-        self._redo_button = self._tool_button("重做 (Ctrl+Y)", "redo-2", self._redo)
-        row.addWidget(self._undo_button)
-        row.addWidget(self._redo_button)
-        row.addStretch()
-        row.addWidget(QLabel("网格方案"))
-        self._schemes = QComboBox()
-        self._schemes.setMinimumWidth(140)
-        self._schemes.setToolTip("自动分析给出的候选网格；切换后可撤销")
-        self._schemes.activated.connect(self._scheme_chosen)
-        row.addWidget(self._schemes)
-        row.addWidget(self._separator())
-        row.addWidget(topmost_button(self, "window/table_topmost"))
-        return row
+            self._page_tools.group(self._previous_page, self._page_input, self._page_total, self._next_page)
+        self._source_tools.place()
+
+    def _fit_focused_view(self):
+        focused = QApplication.focusWidget()
+        # 代理表格的键盘焦点属于外层视图，两个画布共用一个窗口级快捷键。
+        if focused is self._result_view or self._result_view.isAncestorOf(focused):
+            self._result_view.fit()
+        else:
+            self._zoom.fit()
+
+    def _choose_tool(self, tool):
+        target = SELECT if self._canvas.tool == tool else tool
+        self._canvas.set_tool(target)
+        self._sync_tool_buttons()
+
+    def _sync_tool_buttons(self):
+        for tool, button in self._tool_buttons.items():
+            button.setChecked(isinstance(self._canvas, GridCanvas) and self._canvas.tool == tool)
 
     def _build_table_bar(self):
-        """一张图里各张表的切换；多页文档另有“接上一页”。"""
-        row = QHBoxLayout()
-        row.setSpacing(T.SPACE_2)
         self._tabs = QTabBar()
         self._tabs.setObjectName("TableTabs")
         self._tabs.setDrawBase(False)
         self._tabs.setExpanding(False)
         self._tabs.currentChanged.connect(self._select_table)
-        row.addWidget(self._tabs)
-        row.addStretch()
-        self._join = QCheckBox("接上一页")
-        self._join.setToolTip("跨页的续表：接在上一页最后一张表后面，导出到同一个工作表；"
-                              "与那张表首行相同的重复表头自动去掉")
+        self._join = self._label_button("接上一页", "combine", checkable=True,
+                                       tip="接在上一页最后一张表后导出，自动去掉相同的重复表头")
         self._join.toggled.connect(self._join_toggled)
+
+    def _build_review_tools(self):
+        self._review_tools = FloatingTools(self._result_view)
+        self._pending = QLabel()
+        self._pending.setObjectName("TablePending")
+        self._pending.setToolTip("低置信度或跨列切分的文字；改字或确认后消失")
+        self._position = QLabel()
+        self._next = self._label_button("下一处", "arrow-right", self._next_pending, tip="下一处待复核 (F8)")
+        self._confirm_button = self._label_button("确认并下一处", "circle-check", self._confirm, tip="提交当前修改或确认正确，再跳到下一处 (Ctrl+Enter)")
+        self._review_group = self._review_tools.group(self._position, self._pending, self._next, self._confirm_button)
+        self._selected_count = QLabel()
+        self._amount_button = self._label_button("统一金额", "list-ordered", self._preview_amounts,
+                                               tip="自动识别选区金额格式，原表预览；有歧义的值不修改")
+        self._amount_group = self._review_tools.group(self._selected_count, self._amount_button)
+        self._amount_summary = QLabel()
+        self._amount_apply = self._label_button("应用", "check", self._apply_amounts)
+        self._amount_cancel = self._label_button("取消", "x", self._cancel_amounts)
+        self._amount_preview_group = self._review_tools.group(self._amount_summary, self._amount_apply, self._amount_cancel)
+        self._amount_preview_group.hide()
+        self._join_group = self._review_tools.group(self._join)
+        self._join_group.setVisible(len(self.pages) > 1)
         self._join.setVisible(len(self.pages) > 1)
-        row.addWidget(self._join)
-        return row
+        self._tabs_group = self._review_tools.group(self._tabs)
+        self._tabs_group.hide()
+        self._review_tools.place()
 
     def _build_footer(self):
         row = QHBoxLayout()
         row.setSpacing(T.SPACE_2)
         self._status = QLabel()
         self._status.setObjectName("TableStatus")
+        self._status.setMinimumWidth(0)
         row.addWidget(self._status, 1)
         if len(self.pages) > 1:
-            # 页数已知，按页给真实进度。
             self._progress = QProgressBar()
             self._progress.setProperty("class", "slim")
             self._progress.setTextVisible(False)
-            self._progress.setFixedWidth(120)
+            self._progress.setFixedWidth(100)
             self._progress.setRange(0, len(self.pages))
             row.addWidget(self._progress)
-        self._pending = QLabel()
-        self._pending.setObjectName("TablePending")
-        self._pending.setToolTip("文字模型置信度较低的格子；改字或确认后消失，导出 xlsx 时标黄并加批注")
-        self._position = QLabel()
-        row.addWidget(self._position)
-        row.addWidget(self._pending)
-        self._next = QPushButton("下一处")
-        self._next.setProperty("class", "ghost")
-        self._next.setToolTip("跳到下一处待复核格子 (F8)")
-        self._next.clicked.connect(self._next_pending)
-        self._confirm_button = QPushButton("确认并下一处")
-        self._confirm_button.setProperty("class", "ghost")
-        self._confirm_button.setToolTip("提交当前修改或确认识别正确，再跳到下一处 (Ctrl+Enter)")
-        self._confirm_button.clicked.connect(self._confirm)
-        row.addWidget(self._next)
-        row.addWidget(self._confirm_button)
-        row.addSpacing(T.SPACE_2)
-        self._export = QPushButton("导出…")
-        self._export.setProperty("class", "outline")
-        self._export.clicked.connect(self._export_file)
-        self._copy_button = QPushButton("复制表格")
-        self._copy_button.setProperty("class", "primary")
-        self._copy_button.setToolTip("粘贴到 Excel / WPS 时保留合并单元格 (Ctrl+Shift+C)")
-        self._copy_button.clicked.connect(self._copy)
-        row.addWidget(self._export)
-        row.addWidget(self._copy_button)
+        row.addWidget(topmost_button(self, "window/table_topmost"))
+        self._export = self._label_button("导出", "download", self._export_file)
+        self._copy_button = self._label_button("复制表格", "copy", self._copy, tip="复制当前表到 Excel / WPS，保留合并 (Ctrl+Shift+C)")
+        for button in (self._export, self._copy_button):
+            button.setProperty("class", "outline")
+            row.addWidget(button)
         return row
+
+    def _selected_cells(self):
+        grid = self._review.document.grid
+        return sorted({grid.anchor(index.row(), index.column()) for index in self._table.selectedIndexes()})
+
+    def _selection_changed(self):
+        if self._review is None:
+            self._selected_count.clear()
+            return
+        count = len(self._selected_cells())
+        self._selected_count.setText(f"已选 {count} 格" if count else "")
+        self._amount_button.setEnabled(count > 0 and not self._amount_preview)
+        self._review_tools.place()
+
+    def _preview_amounts(self):
+        self._canvas.set_tool(SELECT)
+        self._sync_tool_buttons()
+        self._commit_editor()
+        self._amount_preview = {(row, column): preview_amount(self._review.document.cell(row, column).text)
+                                for row, column in self._selected_cells()}
+        if not self._amount_preview:
+            return
+        changed = sum(p.status == "changed" for p in self._amount_preview.values())
+        ambiguous = sum(p.status == "ambiguous" for p in self._amount_preview.values())
+        self._amount_summary.setText(f"{changed} 格可转换" + (f" · {ambiguous} 格待判断" if ambiguous else ""))
+        self._amount_apply.setEnabled(changed > 0)
+        with QSignalBlocker(self._table):
+            for (row, column), preview in self._amount_preview.items():
+                item = self._table.item(row, column)
+                item.setData(AMOUNT_ROLE, preview)
+                item.setToolTip(preview.reason or f"{preview.before} → {preview.after}")
+                if preview.status == "changed":
+                    self._table.setRowHeight(row, max(self._table.rowHeight(row), 44))
+        self._lock_amount_preview(True)
+        self._result_view.refresh_geometry()
+
+    def _lock_amount_preview(self, locked):
+        self._cancel_amount_shortcut.setEnabled(locked)
+        self._review_group.setVisible(not locked)
+        self._amount_group.setVisible(not locked)
+        self._amount_preview_group.setVisible(locked)
+        self._source_tools.setEnabled(not locked)
+        self._tabs.setEnabled(not locked)
+        self._join.setEnabled(not locked and self._index > 0 and self._state.current == 0)
+        self._canvas.setEnabled(not locked)
+        self._result_view.set_preview_locked(locked)
+        if len(self.pages) > 1:
+            self._page_tools.setEnabled(not locked)
+        self._copy_button.setEnabled(not locked)
+        self._export.setEnabled(not locked)
+        self._review_tools.place()
+
+    def _cancel_amounts(self):
+        if not self._amount_preview:
+            return
+        with QSignalBlocker(self._table):
+            for row, column in self._amount_preview:
+                self._table.item(row, column).setData(AMOUNT_ROLE, None)
+        self._amount_preview = {}
+        self._lock_amount_preview(False)
+        self._refresh()
+        self._set_enabled(True)
+
+    def _apply_amounts(self):
+        changes = [(r, c, p.after) for (r, c), p in self._amount_preview.items() if p.status == "changed"]
+        self._review.edit_many(changes)
+        self._cancel_amounts()
 
     # ---- 分析结果 ----
 
@@ -328,9 +405,25 @@ class TableDialog(BaseDialog):
         """tables 为 analysis.TableResult 序列：首次分析是自动框出的全部表，改框后是改过的那几张。"""
         index = self._index if page is None else page
         state = self._states[index]
-        results = [self._table_state(result, bool(tokens)) for result in tables]
-        # 改框后只重算了几张表：用户可能正在没动过的表里改字，不能重建界面把输入框销毁。
         keep_view = state.regions is not None and _ready(state.table)
+        if index == self._index and not self._regions_mode and not keep_view:
+            self._save_position()
+        pending = {_key(table.rect): table for table in state.tables if table.review is None}
+        results = []
+        for result in tables:
+            previous = pending.get(_key(result.rect))
+            if previous is not None and previous.resized_from is not None:
+                table = previous.resized_from
+                origin = (result.rect.x(), result.rect.y())
+                table.review.replace_source(result.tokens, result.suggestion.selected.grid, origin)
+                table.rect = result.rect
+                table.suggestion = result.suggestion
+                table.scope_suggestions[_key(result.rect)] = result.suggestion
+                table.scheme = 0
+                results.append(table)
+            else:
+                results.append(self._table_state(result, bool(tokens)))
+        # 改框后只重算了几张表：用户可能正在没动过的表里改字，不能重建界面把输入框销毁。
         if state.regions is None:
             state.tables = results
             state.current = 0
@@ -344,7 +437,6 @@ class TableDialog(BaseDialog):
             if keep_view:
                 self._sync_tabs()
             else:
-                self._save_position()
                 self._show_table()
         self._update_progress()
 
@@ -356,9 +448,12 @@ class TableDialog(BaseDialog):
             message = "框里没有识别到文字，可手动划线后直接导出空表"
         if result.note and suggestion.selected.strategy != "structure":
             message += f"（结构模型：{result.note}）"
-        review = TableReview(result.tokens, suggestion.selected.grid)
+        review = TableReview(result.tokens, suggestion.selected.grid, origin=(result.rect.x(), result.rect.y()) if result.rect is not None else (0, 0))
         pending = review.pending_cells()
-        return _TableState(result.rect, review, suggestion, message, cell=pending[0] if pending else (0, 0))
+        table = _TableState(result.rect, review, suggestion, message, cell=pending[0] if pending else (0, 0))
+        x, y = review.origin
+        table.scope_suggestions[(x, y, suggestion.selected.grid.vertical_lines[-1], suggestion.selected.grid.horizontal_lines[-1])] = suggestion
+        return table
 
     def show_error(self, message, page=None):
         index = self._index if page is None else page
@@ -367,6 +462,8 @@ class TableDialog(BaseDialog):
             # 改框后的重新分析失败：整页回到改框前（被挪动的表连同改字一起回来），
             # 没动过的表是同一个对象，失败前正在改的字也在。
             current = state.table
+            if current is not None and current.resized_from is not None:
+                current = current.resized_from
             keep_view = _ready(current) and any(table is current for table in state.restore)
             state.tables = state.restore
             # 当前表在恢复后的列表里位置可能变了，按对象找回。
@@ -416,6 +513,9 @@ class TableDialog(BaseDialog):
         self._join.setEnabled(enabled and self._index > 0 and state.current == 0)
         self._sync_join_label()
         self._refresh_actions()
+        self._amount_button.setEnabled(enabled and bool(self._table.selectedIndexes()) and not self._amount_preview)
+        if self._amount_preview:
+            self._lock_amount_preview(True)
 
     def _can_join(self, page):
         """第 page 页的第一张表能否接上一页：紧挨着的上一页已分析完、最后一张表可用。
@@ -430,7 +530,8 @@ class TableDialog(BaseDialog):
     def _sync_join_label(self):
         current = self._current
         blocked = current is not None and current.joined and self._state.current == 0 and not self._can_join(self._index)
-        self._join.setText("接上一页（上一页暂无可接的表，单独导出）" if blocked else "接上一页")
+        self._join.setText("接上一页")
+        self._join.setToolTip("上一页暂无可接的表，将单独导出" if blocked else "接到上一页最后一张表，导出为同一个工作表")
 
     # ---- 翻页与切换表格 ----
 
@@ -471,6 +572,7 @@ class TableDialog(BaseDialog):
         self._show_table()
 
     def _save_position(self):
+        self._cancel_amounts()
         if self._canvas is not None and self._review is not None:
             self._commit_editor()
             self._current.cell = (self._table.currentRow(), self._table.currentColumn())
@@ -496,6 +598,8 @@ class TableDialog(BaseDialog):
         self._tabs.setCurrentIndex(state.current)
         self._syncing_tabs = False
         self._tabs.setVisible(len(state.tables) > 1)
+        self._tabs_group.setVisible(len(state.tables) > 1)
+        self._review_tools.place()
 
     def _show_table(self):
         """按当前页、当前表重建画布和右侧表格。"""
@@ -534,6 +638,8 @@ class TableDialog(BaseDialog):
             current = self._current
             canvas = GridCanvas(image, current.rect if current is not None else None)
             canvas.set_tool(self._canvas.tool if isinstance(self._canvas, GridCanvas) else SELECT)
+            canvas.toolFinished.connect(self._sync_tool_buttons)
+            canvas.boundsChanged.connect(self._resize_table_bounds)
             canvas.gridChanged.connect(self._grid_changed)
             canvas.selectionChanged.connect(self._refresh_actions)
             canvas.cellSelected.connect(self._select_in_table)
@@ -541,6 +647,7 @@ class TableDialog(BaseDialog):
         bars = self._area.horizontalScrollBar(), self._area.verticalScrollBar()
         position = [bar.value() for bar in bars]
         self._canvas = canvas
+        self._sync_tool_buttons()
         # setWidget 会销毁上一张画布。
         self._zoom.stop_pan()
         self._area.setWidget(canvas)
@@ -557,15 +664,20 @@ class TableDialog(BaseDialog):
             self._area.ensureVisible(round(bounds.center().x() * scale), round(bounds.center().y() * scale),
                                      round(bounds.width() * scale / 2), round(bounds.height() * scale / 2))
 
-    def _activate(self):
+    def _fill_schemes(self):
         table = self._current
         self._schemes.clear()
         for candidate in (table.suggestion.selected, *table.suggestion.alternatives):
-            self._schemes.addItem(STRATEGY_LABELS[candidate.strategy], candidate.grid)
+            self._schemes.addItem(tinted_icon("table-2", T.THEMES[self._mode]["table_foreground"]), STRATEGY_LABELS[candidate.strategy], candidate.grid)
         if table.suggestion.selected.strategy != "manual":
-            # 新画布的初始网格就是整张图一个格子，即“手动划线”的起点。
-            self._schemes.addItem(STRATEGY_LABELS["manual"], self._canvas.grid)
+            grid = table.review.document.grid
+            manual = GridSpec((0, grid.horizontal_lines[-1]), (0, grid.vertical_lines[-1]))
+            self._schemes.addItem(tinted_icon("table-2", T.THEMES[self._mode]["table_foreground"]), STRATEGY_LABELS["manual"], manual)
         self._schemes.setCurrentIndex(table.scheme)
+
+    def _activate(self):
+        table = self._current
+        self._fill_schemes()
         self._set_enabled(True)
         self._canvas.set_grid(table.review.document.grid)
         self._refresh()
@@ -600,10 +712,16 @@ class TableDialog(BaseDialog):
         self._regions_mode = False
         self._apply_regions(regions)
 
+    def _resize_table_bounds(self, bounds):
+        self._save_position()
+        regions = [table.rect for table in self._state.tables]
+        regions[self._state.current] = bounds
+        self._apply_regions(regions, resized=(bounds, self._current))
+
     def _regions_edited(self):
         self._status.setText(f"{self._page_prefix()}已框 {len(self._canvas.regions)} 张表 · {REGION_HINT}")
 
-    def _apply_regions(self, regions):
+    def _apply_regions(self, regions, resized=None):
         """没动过的框保留表格和改字；新框、改过的框重新分析结构（不重跑 OCR）。"""
         state = self._state
         current = state.table
@@ -613,11 +731,13 @@ class TableDialog(BaseDialog):
             table = kept.pop(_key(rect), None)
             if table is None:
                 table = _TableState(rect)
+                if resized is not None and _key(rect) == _key(resized[0]):
+                    table.resized_from = resized[1]
                 pending.append(rect)
             tables.append(table)
         previous = state.tables
         state.tables = tables
-        state.current = next((index for index, table in enumerate(tables) if table is current), 0)
+        state.current = next((index for index, table in enumerate(tables) if table is current or table.resized_from is current), 0)
         if pending:
             state.regions = pending
             state.restore = previous
@@ -650,7 +770,7 @@ class TableDialog(BaseDialog):
             table.setRowCount(grid.row_count)
             table.setColumnCount(grid.column_count)
             table.setHorizontalHeaderLabels([_column_name(index) for index in range(grid.column_count)])
-            pending = QColor(T.THEMES[self._mode]["pending"])
+            pending = QColor(T.THEMES[self._mode]["table_pending"])
             for row, values in enumerate(document.cells):
                 for column, cell in enumerate(values):
                     item = table.item(row, column)
@@ -658,6 +778,8 @@ class TableDialog(BaseDialog):
                         item = QTableWidgetItem()
                         table.setItem(row, column, item)
                     item.setText(cell.text)
+                    item.setTextAlignment(Qt.AlignVCenter | (Qt.AlignRight if column > 0 else Qt.AlignLeft))
+                    item.setData(Qt.ForegroundRole, QColor(T.THEMES[self._mode]["table_pending_foreground"]) if cell.status == PENDING else None)
                     covered = grid.is_covered(row, column)
                     item.setFlags(Qt.NoItemFlags if covered else Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
                     item.setData(Qt.BackgroundRole, pending if cell.status == PENDING else None)
@@ -670,12 +792,18 @@ class TableDialog(BaseDialog):
             # 只在行列数变化时重排列宽，拖线和改字时列宽不跳。
             table.resizeColumnsToContents()
             for column in range(grid.column_count):
-                table.setColumnWidth(column, max(64, min(240, table.columnWidth(column) + T.SPACE_3)))
+                source_width = grid.vertical_lines[column + 1] - grid.vertical_lines[column]
+                proportional = round(724 * source_width / grid.vertical_lines[-1])
+                table.setColumnWidth(column, max(64, min(240, max(proportional, table.columnWidth(column) + T.SPACE_3))))
         table.resizeRowsToContents()
+        for row in range(table.rowCount()):
+            table.setRowHeight(row, max(32, table.rowHeight(row)))
+        self._result_view.refresh_geometry()
         self._syncing = False
         self._status.setText(f"{self._page_prefix()}{self._current.message} · {grid.row_count} 行 × {grid.column_count} 列"
                              + (f" · {len(grid.merges)} 处合并" if grid.merges else ""))
         self._refresh_actions()
+        self._selection_changed()
 
     def _refresh_actions(self):
         review = self._review
@@ -685,11 +813,12 @@ class TableDialog(BaseDialog):
         self._redo_button.setEnabled(review is not None and review.can_redo)
         count = review.document.pending_count if review is not None else 0
         self._pending.setText(f"待复核 {count} 处")
-        self._next_shortcut.setEnabled(count > 0)
+        self._next_shortcut.setEnabled(count > 0 and not self._amount_preview)
         row, column = self._table.currentRow(), self._table.currentColumn()
         self._position.setText(f"当前 {_column_name(column)}{row + 1}" if row >= 0 else "")
         for widget in (self._pending, self._next, self._confirm_button):
             widget.setVisible(count > 0)
+        self._review_tools.place()
 
     def _item_changed(self, item):
         if self._syncing:
@@ -719,24 +848,47 @@ class TableDialog(BaseDialog):
     # ---- 操作 ----
 
     def _scheme_chosen(self, index):
+        self._cancel_amounts()
         self._current.scheme = index
         self._canvas.set_grid(self._schemes.itemData(index))
         self._review.set_grid(self._canvas.grid)
         self._refresh()
 
     def _undo(self):
+        if self._amount_preview:
+            self._cancel_amounts()
+            return
         if self._review is not None and self._review.can_undo:
             self._review.undo()
-            self._canvas.set_grid(self._review.document.grid)
+            self._restore_review_geometry()
             self._refresh()
 
     def _redo(self):
+        if self._amount_preview:
+            self._cancel_amounts()
+            return
         if self._review is not None and self._review.can_redo:
             self._review.redo()
-            self._canvas.set_grid(self._review.document.grid)
+            self._restore_review_geometry()
             self._refresh()
 
+    def _restore_review_geometry(self):
+        grid = self._review.document.grid
+        x, y = self._review.origin
+        bounds = QRect(x, y, grid.vertical_lines[-1], grid.horizontal_lines[-1])
+        self._current.rect = bounds
+        suggestion = self._current.scope_suggestions.get(_key(bounds))
+        if suggestion is not None:
+            self._current.suggestion = suggestion
+            candidates = (suggestion.selected, *suggestion.alternatives)
+            self._current.scheme = next((i for i, candidate in enumerate(candidates) if candidate.grid == grid), 0)
+            self._fill_schemes()
+        self._canvas.bounds = bounds
+        self._canvas.set_grid(grid)
+
     def _next_pending(self):
+        if self._amount_preview or self._review is None:
+            return
         self._commit_editor()
         cells = self._review.pending_cells()
         if not cells:
@@ -748,18 +900,20 @@ class TableDialog(BaseDialog):
     def _focus_cell(self, row, column):
         self._table.setCurrentCell(row, column)
         self._table.scrollToItem(self._table.currentItem())
-        self._table.setFocus()
+        self._result_view.focus_table()
 
     def _commit_editor(self):
         # 快捷键会先于编辑器收键，输出和确认前先保存仍在输入框里的改字。
-        editor = QApplication.focusWidget()
+        editor = self._table.focusWidget()
         if isinstance(editor, QPlainTextEdit) and self._table.isAncestorOf(editor):
             delegate = self._table.itemDelegate()
             delegate.commitData.emit(editor)
             delegate.closeEditor.emit(editor, QStyledItemDelegate.NoHint)
-            self._table.setFocus()
+            self._result_view.focus_table()
 
     def _confirm(self):
+        if self._amount_preview:
+            return
         self._commit_editor()
         row, column = self._table.currentRow(), self._table.currentColumn()
         if self._review is not None and row >= 0:
@@ -768,7 +922,7 @@ class TableDialog(BaseDialog):
             if self._review.pending_cells():
                 self._next_pending()
             else:
-                self._table.setFocus()
+                self._result_view.focus_table()
 
     def _sheets(self):
         """已分析的表按页序排成工作表：[(名称, 文档, [(页, 表), ...])]。还没出结果的表不等。
@@ -819,7 +973,7 @@ class TableDialog(BaseDialog):
 
     def _copy(self):
         """复制当前这张表；跨页接起来的续表一起复制。"""
-        if self._review is None:
+        if self._review is None or self._amount_preview:
             return
         self._commit_editor()
         sheets = self._sheets()
@@ -834,6 +988,8 @@ class TableDialog(BaseDialog):
         show_toast(f"已复制{what}，可直接粘贴到 Excel / WPS" + self._pending_note([sheet], whole=False))
 
     def _export_file(self):
+        if self._amount_preview:
+            return
         self._commit_editor()
         sheets = self._sheets()
         if not sheets:

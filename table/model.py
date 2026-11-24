@@ -11,6 +11,8 @@ from itertools import pairwise
 LOW_CONFIDENCE_WEIGHTED = 0.85
 LOW_CONFIDENCE_MINIMUM = 0.70
 
+MIN_CELL_SIZE = 5  # 所有来源和手动编辑共用原图像素线距。
+
 PENDING = "pending"
 CONFIRMED = "confirmed"
 CORRECTED = "corrected"
@@ -128,6 +130,19 @@ class GridSpec:
         if orientation == "h":
             return GridSpec(tuple(lines), self.vertical_lines, tuple(kept))
         return GridSpec(self.horizontal_lines, tuple(lines), tuple(kept))
+
+    def compact(self):
+        """移除过近的内部边界，不把模型生成的空白窄格强行撑宽；外框始终保留。"""
+        grid = self
+        for orientation in ("h", "v"):
+            index = 1
+            while index < len(grid.lines(orientation)) - 1:
+                lines = grid.lines(orientation)
+                if lines[index] - lines[index - 1] < MIN_CELL_SIZE or lines[-1] - lines[index] < MIN_CELL_SIZE:
+                    grid = grid.without_line(orientation, index)
+                else:
+                    index += 1
+        return grid
 
     def with_line(self, orientation, position):
         """插入一条线；跨过它的合并区域随之多占一行/列。"""

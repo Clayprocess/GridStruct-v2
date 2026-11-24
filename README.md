@@ -90,7 +90,7 @@ ZIP 包含运行依赖、图标与本地模型，不带本机 `user-data/`。使
 | `settings/` | 设置窗口、便携 INI 和数据目录 | `SettingsDialog`、`get_settings`、`data_directory` |
 | `tray/` | 托盘入口和 Windows 全局热键 | `create_tray`、`GlobalHotkey` |
 | `styles/` | 设计 tokens 与主题 | `tokens`、`apply_theme`；视觉值只定义在 `styles/tokens.py`，QSS 只写在 `styles/theme.py` |
-| `ui/` | 通用图标、对话框与动效 | `tinted_icon`、`painted_icon`、`paint_svg`、`BaseDialog`；公开子模块 `ui.motion` 提供共享动效，可直接导入。SVG 优先用 Lucide，允许遵循相同规格的自绘资源（见 `assets/icons/README.md`）与控件效果预览 |
+| `ui/` | 通用图标、对话框与动效 | `tinted_icon`、`painted_icon`、`paint_svg`、`BaseDialog`、`PreviewZoom`、`ZoomBar`；公开子模块 `ui.motion` 提供共享动效，可直接导入。SVG 优先用 Lucide，允许遵循相同规格的自绘资源（见 `assets/icons/README.md`）与控件效果预览 |
 
 UI 使用 PySide6 Qt Widgets，不使用 QML。业务模块通过动态属性选择按钮样式，不直接写 QSS。
 
@@ -154,3 +154,7 @@ OCR 后续补齐也已实机验证：截图与图片贴图默认保留原图文�
 2026-10-11 本机只有一块 3840×2160、150% 显示器。已验证：源码进程 PerMonitorV2、原生整屏裁切逐像素一致、Windows 原生冒烟、BFS 四项、可见 Qt 业务窗口的截图/长截图生命周期与高 DPI 标注/OCR；内存检查覆盖负原点、100/125/150/200/225% 坐标和裁切、混合 DPR 原生拼接以及重试次数。向自身隐藏接收窗口发送 `TaskbarCreated` 后刷新通过，不等于实际重启 Explorer。脚本中的截图复制在边界记录输出，不等于真实系统剪贴板验收。
 
 尚未验证：两块真实混合 DPI 显示器上的文字清晰度、鼠标跨屏连续框选、截图期间真实分辨率/缩放切换、物理插拔，以及任务管理器 DPI 列人工核对。桌面控制工具的应用授权等待超时，真实鼠标验收未完成；上述程序内检查不能替代这些硬件与交互验收。
+
+## 表格校对工作台（本次实现）
+
+表格识别窗口新增左右画布内悬浮工具组、45:55 初始比例、右表缩放/平移与连续多选、5px 最小线距、直接拖角改框，以及金额格式自动识别和原表预览。复核操作移到右上，复制与导出继续使用已有实现。确认决策、替代方案和验收边界见 [工作台记录](docs/table-review-workbench.md)。

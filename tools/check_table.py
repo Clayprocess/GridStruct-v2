@@ -565,12 +565,13 @@ def check_reanalysis_races(app):
     table.setCurrentCell(0, 0)
     table.editItem(table.currentItem())
     app.processEvents()
-    editor = app.focusWidget()
+    editor = table.focusWidget()
     assert isinstance(editor, QPlainTextEdit)
+    assert app.focusWidget() is dialog._result_view and dialog._result_view.scene().hasFocus()
     editor.setPlainText("user change in progress")
     dialog.apply_analysis((), (result(QRect(200, 100, 100, 40), "new"),))
     app.processEvents()
-    assert app.focusWidget() is editor and editor.toPlainText() == "user change in progress", "重算完成不得销毁输入框"
+    assert app.focusWidget() is dialog._result_view and table.focusWidget() is editor and editor.toPlainText() == "user change in progress", "重算完成不得销毁输入框"
     dialog._commit_editor()
     assert dialog._review.document.rows[0][0] == "user change in progress", dialog._review.document.rows
     assert dialog._tabs.count() == 2 and dialog._tabs.tabText(1) == "表2"
@@ -583,13 +584,14 @@ def check_reanalysis_races(app):
     table.setCurrentCell(0, 0)
     table.editItem(table.currentItem())
     app.processEvents()
-    editor = app.focusWidget()
+    editor = table.focusWidget()
     assert isinstance(editor, QPlainTextEdit)
+    assert app.focusWidget() is dialog._result_view and dialog._result_view.scene().hasFocus()
     editor.setPlainText("typing while it fails")
     with patch("table.dialog.show_message"):
         dialog.show_error("结构模型出错")
     app.processEvents()
-    assert app.focusWidget() is editor and editor.toPlainText() == "typing while it fails", "重算失败不得销毁输入框"
+    assert app.focusWidget() is dialog._result_view and table.focusWidget() is editor and editor.toPlainText() == "typing while it fails", "重算失败不得销毁输入框"
     assert dialog._state.current == 1 and "重新分析失败" in dialog._status.text()
     dialog._commit_editor()
     assert dialog._review.document.rows[0][0] == "typing while it fails", dialog._review.document.rows
@@ -608,7 +610,7 @@ def check_reanalysis_races(app):
     dialog._apply_regions([])
     dialog.show_page(2)
     assert [members for _name, _document, members in dialog._sheets()] == [[(0, 0)], [(2, 0)]]
-    assert "上一页暂无可接的表" in dialog._join.text()
+    assert "上一页暂无可接的表" in dialog._join.toolTip()
     assert "第 3 页勾了接上一页" in dialog._pending_note(dialog._sheets())
     # 上一页还在重算或识别失败时同样不接。
     dialog._states[1].tables = [dialog._states[0].tables[0].__class__(first)]
@@ -760,25 +762,28 @@ def check_review_navigation(app):
     assert (table.currentRow(), table.currentColumn()) == (0, 0)
     assert table.hasFocus() and dialog._canvas._selected == {(0, 0)}
     assert dialog._position.text() == "当前 A1" and "3" in dialog._pending.text()
-    QTest.keyClick(table, Qt.Key_F8)
+    QTest.keyClick(app.focusWidget(), Qt.Key_F8)
     assert (table.currentRow(), table.currentColumn()) == (1, 0)
-    QTest.keyClick(table, Qt.Key_Return, Qt.ControlModifier)
+    assert dialog._canvas._selected == {(1, 0)}
+    QTest.keyClick(app.focusWidget(), Qt.Key_Return, Qt.ControlModifier)
     assert (table.currentRow(), table.currentColumn()) == (1, 1)
+    assert dialog._canvas._selected == {(1, 1)}
     assert dialog._review.document.pending_count == 2
     table.editItem(table.currentItem())
     app.processEvents()
-    editor = app.focusWidget()
+    editor = table.focusWidget()
     assert isinstance(editor, QPlainTextEdit)
     editor.setPlainText("丁改")
-    QTest.keyClick(editor, Qt.Key_Return, Qt.ControlModifier)
+    QTest.keyClick(app.focusWidget(), Qt.Key_Return, Qt.ControlModifier)
     app.processEvents()
     assert dialog._review.document.rows[1][1] == "丁改"
     assert (table.currentRow(), table.currentColumn()) == (0, 0)
     assert table.hasFocus() and dialog._review.document.pending_count == 1
+    assert dialog._canvas._selected == {(0, 0)}
     # 合并格后的 Enter/Tab 导航直接到下一锚点，不落进被覆盖的格子。
     table.editItem(table.currentItem())
     app.processEvents()
-    editor = app.focusWidget()
+    editor = table.focusWidget()
     editor.setPlainText("甲改")
     QTest.keyClick(editor, Qt.Key_Return, Qt.AltModifier)
     QTest.keyClicks(editor, "next")

@@ -12,7 +12,7 @@ from statistics import median
 
 import numpy as np
 
-from .model import GridSpec, Rect
+from .model import GridSpec, Rect, MIN_CELL_SIZE
 
 # 表格线检测：核长按原图比例，始终在原分辨率上做，不缩放。
 MIN_RULE_KERNEL = 12
@@ -41,7 +41,7 @@ BULLET_MARKS = frozenset("•·●○▪▫■□◆◇▶▷►▸-–—*+☐�
 
 # 几何与打分。
 TOKEN_INSET_RATIO = 0.10
-MIN_GRID_CELL_SIZE = 3
+MIN_GRID_CELL_SIZE = MIN_CELL_SIZE
 MIN_SNAP_RADIUS = 8
 SNAP_RADIUS_RATIO = 0.025
 MAX_SNAP_RADIUS = 56
@@ -215,7 +215,7 @@ def text_grid(tokens, width, height):
                                          insets, horizontal=True))
     horizontal.append(height)
     vertical, alignment = _column_lines(rows, width)
-    return GridSpec(_regularize(horizontal, height), vertical), alignment
+    return GridSpec(_regularize(horizontal, height), vertical).compact(), alignment
 
 
 def _cluster_rows(tokens):
@@ -298,7 +298,7 @@ def snap_grid(grid, rules, tokens):
     insets = [_inset(token.box) for token in tokens]
     horizontal = _snap_axis(grid.horizontal_lines, rules.image_height, rules.horizontal_lines, insets, True)
     vertical = _snap_axis(grid.vertical_lines, rules.image_width, rules.vertical_lines, insets, False)
-    return GridSpec(horizontal, vertical, grid.merges)
+    return GridSpec(horizontal, vertical, grid.merges).compact()
 
 
 def _snap_axis(lines, extent, rule_lines, insets, horizontal):
@@ -484,8 +484,8 @@ def _regularize(lines, extent):
     result = [0]
     internal = len(lines) - 2
     for offset, value in enumerate(lines[1:-1]):
-        lower = result[-1] + MIN_GRID_CELL_SIZE
-        upper = extent - (internal - offset + 1) * MIN_GRID_CELL_SIZE
+        lower = result[-1] + 1
+        upper = extent - (internal - offset)
         if lower > upper:
             raise ValueError("网格放不进图像范围")
         result.append(max(lower, min(upper, round(value))))

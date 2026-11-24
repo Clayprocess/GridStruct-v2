@@ -22,7 +22,7 @@ _MARGIN = QMargins(T.SPACE_2, T.SPACE_2, T.SPACE_2, T.SPACE_2)
 
 
 class PreviewZoom(QObject):
-    def __init__(self, area, target, window):
+    def __init__(self, area, target, window, *, shortcut=True):
         super().__init__(area)
         self._area = area
         self._target = target
@@ -32,8 +32,9 @@ class PreviewZoom(QObject):
         self._panning = False
         area.installEventFilter(self)
         area.viewport().installEventFilter(self)
-        self._bar = _ZoomBar(area, self)
-        QShortcut(QKeySequence("Ctrl+0"), window, self.fit)
+        self._bar = ZoomBar(area, self)
+        if shortcut:
+            QShortcut(QKeySequence("Ctrl+0"), window, self.fit)
 
     def watch(self, widget):
         """视口里的画布自己收鼠标和键盘（如表格网格），要在画布上也接住。"""
@@ -132,7 +133,7 @@ class PreviewZoom(QObject):
         return True
 
 
-class _ZoomBar(QFrame):
+class ZoomBar(QFrame):
     """预览右下角的缩放条：缩小、当前比例（点一下回到 100%）、放大、适应窗口。"""
 
     def __init__(self, area, zoom):
@@ -147,7 +148,7 @@ class _ZoomBar(QFrame):
 
         def button(icon, tip, slot):
             widget = QToolButton()
-            widget.setIcon(tinted_icon(icon, color, 14))
+            widget.setIcon(tinted_icon(icon, color, 16 if area.objectName() in ("TableCanvasArea", "TableResultView") else 14))
             widget.setToolTip(tip)
             widget.setAccessibleName(tip)
             widget.clicked.connect(slot)

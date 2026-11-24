@@ -210,8 +210,9 @@ class TableReview:
     划过其他格子的中间位置不会把人工结果挤丢。
     """
 
-    def __init__(self, tokens, grid):
+    def __init__(self, tokens, grid, origin=(0, 0)):
         self._tokens = tuple(tokens)
+        self.origin = tuple(origin)
         self.document = build_document(self._tokens, grid)
         self._base = None
         self._undo = []
@@ -242,6 +243,34 @@ class TableReview:
                 self._record(self._base)
             self._base = None
 
+    def replace_source(self, tokens, grid, origin):
+        """外框重分析保留校对；校正位置随原图原点平移，整次范围变化可撤销。"""
+        self._settle()
+        tokens, origin = tuple(tokens), tuple(origin)
+        dx, dy = self.origin[0] - origin[0], self.origin[1] - origin[1]
+        cells = []
+        for row, values in enumerate(self.document.cells):
+            updated = []
+            for column, cell in enumerate(values):
+                corrections = cell.corrections
+                if not corrections and cell.human:
+                    corrections = (CellCorrection(self.document.grid.cell_rect(row, column), cell.text, cell.status),)
+                moved = tuple(replace(part, box=Rect(part.box.left + dx, part.box.top + dy,
+                                                    part.box.right + dx, part.box.bottom + dy))
+                              for part in corrections)
+                # 裁出新外框的校正仅留在撤销快照，不能被 cell_at 夹到边缘格。
+                moved = tuple(part for part in moved
+                              if 0 <= part.box.center_x < grid.vertical_lines[-1]
+                              and 0 <= part.box.center_y < grid.horizontal_lines[-1])
+                # 全被裁出后清掉临时基底的人工状态，避免 carry_over 再按旧格生成校正。
+                updated.append(replace(cell, corrections=moved, status=cell.status if moved else ""))
+            cells.append(tuple(updated))
+        base = replace(self.document, cells=tuple(cells))
+        document = carry_over(base, build_document(tokens, grid))
+        if document != self.document or tokens != self._tokens or origin != self.origin:
+            self._record(self.document)
+            self.document, self._tokens, self.origin = document, tokens, origin
+
     def edit(self, row, column, text):
         self._settle()
         cell = self.document.cell(row, column)
@@ -251,6 +280,20 @@ class TableReview:
         # 改回原文等于撤销人工修改，格子回到识别时的状态。
         status = CORRECTED if text != cell.original_text else PENDING if cell.needs_review else ""
         self.document = self.document.with_cell(row, column, replace(cell, text=text, status=status, corrections=()))
+
+    def edit_many(self, changes):
+        """金额预览应用是一次操作；取消预览不触碰 document 或历史。"""
+        self._settle()
+        document = self.document
+        for row, column, text in changes:
+            cell = document.cell(row, column)
+            if text == cell.text:
+                continue
+            status = CORRECTED if text != cell.original_text else PENDING if cell.needs_review else ""
+            document = document.with_cell(row, column, replace(cell, text=text, status=status, corrections=()))
+        if document != self.document:
+            self._record(self.document)
+            self.document = document
 
     def confirm(self, row, column):
         self._settle()
@@ -271,17 +314,18 @@ class TableReview:
 
     def undo(self):
         self._settle()
-        self._redo.append(self.document)
-        self.document = self._undo.pop()
+        self._redo.append((self.document, self._tokens, self.origin))
+        self.document, self._tokens, self.origin = self._undo.pop()
 
     def redo(self):
         self._settle()
         if not self._redo:
             # 被打断的拖线算一次新改动，已清空重做；这次 Ctrl+Y 只把拖线记下。
             return
-        self._undo.append(self.document)
-        self.document = self._redo.pop()
+        self._undo.append((self.document, self._tokens, self.origin))
+        self.document, self._tokens, self.origin = self._redo.pop()
 
     def _record(self, document):
-        self._undo.append(document)
+        # 仅存文档会让撤销外框后仍用新坐标的 OCR 再分格，下一次拖线就串位。
+        self._undo.append((document, self._tokens, self.origin))
         self._redo.clear()

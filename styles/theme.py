@@ -688,6 +688,44 @@ QLabel#TablePending, QLabel#OCRPending {{
     font-size: {T.FONT_SM}px;
 }}
 
+/* 表格工作台局部样式，其他识别窗口保留原视觉。 */
+QWidget#TableWorkbench {{ background: {t['table_card']}; color: {t['table_foreground']}; }}
+QWidget#TableWorkbench QScrollArea#TableCanvasArea, QGraphicsView#TableResultView {{
+    background: {t['table_surface']}; border: 1px solid {t['table_border']};
+    border-radius: {T.TABLE_CONTROL_RADIUS}px;
+}}
+QWidget#TableWorkbench QScrollArea#TableCanvasArea > QWidget#qt_scrollarea_viewport {{ background: {t['table_surface']}; }}
+QFrame#TableFloatingTools {{
+    background: {t['table_card']}; border: 1px solid {t['table_border']}; border-radius: {T.TABLE_CONTROL_RADIUS}px;
+}}
+QFrame#TableToolGroup {{ background: {t['table_control']}; border: none; border-radius: {T.TABLE_CONTROL_RADIUS}px; }}
+QFrame#TableFloatingTools QLabel {{ background: transparent; color: {t['table_muted']}; border: none; padding: 0 3px; font-size: {T.FONT_SM}px; }}
+QWidget#TableWorkbench QToolButton {{
+    color: {t['table_foreground']}; background: transparent; border: 1px solid transparent;
+    border-radius: {T.TABLE_CONTROL_RADIUS}px; padding: 4px 6px; min-height: 22px;
+}}
+QWidget#TableWorkbench QToolButton:hover {{ background: {t['table_hover']}; border-color: {t['table_border']}; }}
+QWidget#TableWorkbench QToolButton:checked {{ background: {t['table_selection']}; color: {t['table_selected_foreground']}; border-color: {t['table_focus']}; }}
+QWidget#TableWorkbench QToolButton:disabled {{ color: {t['table_muted']}; }}
+QWidget#TableWorkbench QToolButton[class="outline"] {{ border-color: {t['table_border']}; }}
+QWidget#TableWorkbench QFrame#ZoomBar {{ background: {t['table_control']}; border-color: {t['table_border']}; border-radius: {T.TABLE_CONTROL_RADIUS}px; }}
+QWidget#TableWorkbench QFrame#ZoomBar QToolButton {{ min-width: 20px; min-height: 20px; padding: 3px; }}
+QWidget#TableWorkbench QToolButton#ZoomLevel {{ min-width: 36px; color: {t['table_muted']}; }}
+QComboBox#TableScheme {{ background: transparent; border: 1px solid transparent; border-radius: {T.TABLE_CONTROL_RADIUS}px; color: {t['table_foreground']}; padding: 4px; min-height: 22px; }}
+QComboBox#TableScheme:hover {{ background: {t['table_hover']}; border-color: {t['table_border']}; }}
+QLineEdit#TablePageInput {{ background: transparent; color: {t['table_foreground']}; border: 1px solid transparent; border-radius: {T.TABLE_CONTROL_RADIUS}px; padding: 2px 0; min-height: 22px; }}
+QLineEdit#TablePageInput:focus {{ border-color: {t['table_focus']}; }}
+QFrame#TableFloatingTools QLabel#TablePending {{ background: {t['table_pending']}; color: {t['table_pending_foreground']}; border-radius: {T.TABLE_CONTROL_RADIUS}px; padding: 4px 6px; }}
+QTableWidget#ReviewTable {{
+    background: {t['table_card']}; color: {t['table_foreground']}; border: none; border-radius: 0;
+    gridline-color: {t['table_border']}; selection-background-color: {t['table_selection']}; selection-color: {t['table_selected_foreground']};
+}}
+QTableWidget#ReviewTable::item {{ padding: 4px 6px; border: none; }}
+QTableWidget#ReviewTable::item:selected {{ background: {t['table_selection']}; color: {t['table_selected_foreground']}; border: none; }}
+QTableWidget#ReviewTable QHeaderView::section {{ background: {t['table_control']}; color: {t['table_muted']}; border-color: {t['table_border']}; }}
+QTableWidget#ReviewTable QHeaderView::section:checked {{ background: {t['table_selection']}; color: {t['table_selected_foreground']}; }}
+QTableWidget#ReviewTable QPlainTextEdit {{ background: {t['table_card']}; color: {t['table_foreground']}; border: 1px solid {t['table_focus']}; }}
+
 /* ===== 贴图（pin/window.py）：卡片本体由 paintEvent 画，这里只管浮动提示 ===== */
 /* 提示浮在任意截图内容上，明暗主题都用深底浅字，与截图尺寸提示同源。 */
 QLabel#PinHud, QFrame#Toast {{
