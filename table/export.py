@@ -5,6 +5,7 @@
 """
 
 import csv
+import re
 from html import escape
 from io import StringIO
 from math import ceil
@@ -19,6 +20,9 @@ MINIMUM_COLUMN_WIDTH = 8.0
 MAXIMUM_COLUMN_WIDTH = 42.0
 DEFAULT_ROW_HEIGHT = 22.0
 MAXIMUM_ROW_HEIGHT = 110.0
+
+_EXCEL_INTEGER = re.compile(r"[+-]?([0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)")
+_EXCEL_LITERAL = re.compile(r"=[ \t]*(?:[^\W\d_]+[ \t]*[：，。；、][^\r\n]*)?")
 
 
 def stack(documents, remove_repeated_headers=False):
@@ -53,8 +57,17 @@ def to_csv(document):
     return output.getvalue()
 
 
-def to_html(document):
-    """合并单元格写成 rowspan/colspan；粘贴到 Excel/WPS/Word 时保留合并关系。"""
+def _excel_text(value):
+    text = value.strip()
+    if match := _EXCEL_INTEGER.fullmatch(text):
+        digits = match[1].replace(",", "")
+        return len(digits) >= 12 or (len(digits) > 1 and digits.startswith("0"))
+    # 只标记空等号或带全角标点的说明，不猜测其他以等号开头的内容。
+    return bool(_EXCEL_LITERAL.fullmatch(text))
+
+
+def to_html(document, *, excel_clipboard=False):
+    """合并格保留行列跨度；Excel 文本标记只用于剪贴板，不写入网页导出。"""
     grid, rows = document.grid, []
     for row, values in enumerate(document.rows):
         cells = []
@@ -67,6 +80,8 @@ def to_html(document):
                 attributes += f' rowspan="{merge.bottom - merge.top}"'
             if merge is not None and merge.right - merge.left > 1:
                 attributes += f' colspan="{merge.right - merge.left}"'
+            if excel_clipboard and _excel_text(value):
+                attributes += r''' style="mso-number-format:'\@'"'''
             cells.append(f"<td{attributes}>{escape(value).replace(chr(10), '<br>')}</td>")
         rows.append(f"<tr>{''.join(cells)}</tr>")
     return f"<table>{''.join(rows)}</table>"

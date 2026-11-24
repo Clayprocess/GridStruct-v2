@@ -268,7 +268,7 @@ def check_cross_column_regrid(app):
                 dialog._copy()
                 mime = app.clipboard().mimeData()
                 assert tuple(tuple(row) for row in csv.reader(StringIO(mime.text()), delimiter="\t")) == document.rows
-                assert mime.html() == export.to_html(document)
+                assert mime.html() == export.to_html(document, excel_clipboard=True)
                 assert "待复核" in toast.call_args.args[0]
             dialog.close()
             app.processEvents()
