@@ -27,6 +27,7 @@ class _Request:
 
 class _Worker(QObject):
     stage = Signal(object, str)
+    recognized = Signal(object, object)
     finished = Signal(object, object, str)
 
     @Slot(object)
@@ -35,7 +36,8 @@ class _Worker(QObject):
             return
         try:
             result = analyze(request.image, request.results, on_stage=lambda stage: self.stage.emit(request, stage),
-                             tokens=request.tokens, regions=request.regions)
+                             tokens=request.tokens, regions=request.regions,
+                             on_results=lambda results: self.recognized.emit(request, results))
         except Exception as exc:
             self.finished.emit(request, None, str(exc))
         else:
@@ -53,6 +55,7 @@ class _Service(QObject):
         self._worker.moveToThread(self._thread)
         self.requested.connect(self._worker.run)
         self._worker.stage.connect(self._stage)
+        self._worker.recognized.connect(self._recognized)
         self._worker.finished.connect(self._finished)
         self._thread.finished.connect(self._worker.deleteLater)
         app.aboutToQuit.connect(self.shutdown)
@@ -62,6 +65,13 @@ class _Service(QObject):
     def _stage(self, request, stage):
         if not request.cancelled:
             request.dialog.set_stage(stage, request.page)
+
+    @Slot(object, object)
+    def _recognized(self, request, results):
+        if request.cancelled:
+            return
+        # 结构失败也保留首次识别的真实结果，重试和模式切换都不必再跑 OCR。
+        request.dialog.apply_text_results(results, request.page, request.image)
 
     @Slot(object, object, str)
     def _finished(self, request, result, error):
@@ -85,6 +95,7 @@ _active = {}  # 窗口 -> 正在分析的请求；关窗时作废
 
 def _submit_next(dialog):
     """多页逐页送去分析，一次只占一页图像的内存。"""
+    global _service
     index = dialog.take_next_page()
     if index is None:
         _active.pop(dialog, None)
@@ -101,25 +112,27 @@ def _submit_next(dialog):
         dialog.set_stage("structure", index)
     request = _Request(image, page.results, dialog, index, tokens=tokens, regions=regions)
     _active[dialog] = request
+    if _service is None:
+        _service = _Service(QApplication.instance())
     _service.requested.emit(request)
 
 
-def _open(pages, title=None):
-    global _service
-    if _service is None:
-        _service = _Service(QApplication.instance())
-    dialog = TableDialog(pages)
-    if title:
-        dialog.setWindowTitle(title)
-
+def _connect_analysis(dialog):
     def closed():
         request = _active.pop(dialog, None)
         if request is not None:
             request.cancelled = True
 
     dialog.destroyed.connect(closed)
-    # 改了表格框：后台空闲就接着分析，正在跑别的页时排在它后面。
+    # 文字入口首次切到表格时才发这个信号；改框和多页仍沿用同一个串行队列。
     dialog.analysisRequested.connect(lambda: None if dialog in _active else _submit_next(dialog))
+
+
+def _open(pages, title=None, *, text_document=None):
+    dialog = TableDialog(pages, text_document=text_document, initial_mode="table")
+    if title:
+        dialog.setWindowTitle(title)
+    _connect_analysis(dialog)
     dialog.show()
     dialog.raise_()
     dialog.activateWindow()
@@ -127,13 +140,25 @@ def _open(pages, title=None):
     return dialog
 
 
-def open_table(image, results=None):
+def open_text_workbench(document, pixmap=None, parent=None):
+    """复用已有文字文档构造共享窗口；由调用方显示，首次切表格才开始结构分析。"""
+    image = document.image if pixmap is None else pixmap.toImage()
+    pages = [] if image.isNull() else [ImagePage(image.copy(), document.raw_results)]
+    dialog = TableDialog(pages, parent, text_document=document)
+    _connect_analysis(dialog)
+    return dialog
+
+
+def open_table(image, results=None, *, text_document=None):
     """image 为 QImage/QPixmap；results 为同图已有的 OCR 结果，可省一次识别。
 
+    text_document 复用同图已有的全文草稿；结构分析始终使用 results 的原始证据。
     窗口独立于截图/贴图存在：截图会话结束后表格仍可继续校对。
     """
     image = image.toImage() if isinstance(image, QPixmap) else image
-    return _open([ImagePage(image.copy(), results)])
+    if results is None and text_document is not None:
+        results = text_document.raw_results
+    return _open([ImagePage(image.copy(), results)], text_document=text_document)
 
 
 _choosing = False

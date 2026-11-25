@@ -217,6 +217,13 @@ class RegionCanvas(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton or self._drag is None:
             return
+        self.finish_drag()
+        self.mouseMoveEvent(event)
+
+    def finish_drag(self):
+        """切模式或翻页与松手使用同一份已经预览的框。"""
+        if self._drag is None:
+            return
         mode, _start, rect = self._drag
         self._drag = None
         if mode == "new":
@@ -226,7 +233,6 @@ class RegionCanvas(QWidget):
                 self.regionsChanged.emit()
         elif self.regions[self.selected] != rect:
             self.regionsChanged.emit()
-        self.mouseMoveEvent(event)
         self.update()
 
     def contextMenuEvent(self, event):

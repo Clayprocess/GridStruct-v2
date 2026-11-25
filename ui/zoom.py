@@ -22,7 +22,7 @@ _MARGIN = QMargins(T.SPACE_2, T.SPACE_2, T.SPACE_2, T.SPACE_2)
 
 
 class PreviewZoom(QObject):
-    def __init__(self, area, target, window):
+    def __init__(self, area, target, window, *, shortcut=True):
         super().__init__(area)
         self._area = area
         self._target = target
@@ -32,8 +32,9 @@ class PreviewZoom(QObject):
         self._panning = False
         area.installEventFilter(self)
         area.viewport().installEventFilter(self)
-        self._bar = _ZoomBar(area, self)
-        QShortcut(QKeySequence("Ctrl+0"), window, self.fit)
+        self._bar = ZoomBar(area, self)
+        if shortcut:
+            QShortcut(QKeySequence("Ctrl+0"), window, self.fit)
 
     def watch(self, widget):
         """视口里的画布自己收鼠标和键盘（如表格网格），要在画布上也接住。"""
@@ -59,6 +60,22 @@ class PreviewZoom(QObject):
         size = self._area.viewport().size().shrunkBy(_MARGIN)
         self._target.set_zoom_scale(max(MIN_SCALE, min(FIT_MAX, self._target.fit_zoom_scale(size))))
         self._bar.update_state()
+
+    def capture_view(self, pixels_per_unit):
+        """用原图物理像素记录中心与倍率，文字场景和网格画布的坐标单位可能不同。"""
+        if self.fitted:
+            return None
+        center = self._area.viewport().rect().center()
+        return (self.scale / pixels_per_unit, self._target.to_content(center) * pixels_per_unit)
+
+    def restore_view(self, view, pixels_per_unit):
+        if view is None:
+            self.fit()
+            return
+        scale, center = view
+        self.set_scale(scale * pixels_per_unit)
+        delta = self._target.from_content(center / pixels_per_unit) - self._area.viewport().rect().center()
+        self._scroll(round(delta.x()), round(delta.y()))
 
     def zoom_by(self, factor, anchor=None):
         self.set_scale(self.scale * factor, anchor)
@@ -132,7 +149,7 @@ class PreviewZoom(QObject):
         return True
 
 
-class _ZoomBar(QFrame):
+class ZoomBar(QFrame):
     """预览右下角的缩放条：缩小、当前比例（点一下回到 100%）、放大、适应窗口。"""
 
     def __init__(self, area, zoom):
@@ -147,7 +164,7 @@ class _ZoomBar(QFrame):
 
         def button(icon, tip, slot):
             widget = QToolButton()
-            widget.setIcon(tinted_icon(icon, color, 14))
+            widget.setIcon(tinted_icon(icon, color, 16 if area.objectName() in ("TableCanvasArea", "TableResultView") else 14))
             widget.setToolTip(tip)
             widget.setAccessibleName(tip)
             widget.clicked.connect(slot)

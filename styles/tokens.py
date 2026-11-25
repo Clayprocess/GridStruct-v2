@@ -74,6 +74,25 @@ DARK = {
     "settings_card":     "#1c1c1f",
 }
 
+# 表格校对工作台：局部主题值，不改变其他窗口的视觉语言。
+LIGHT.update({
+    "table_surface": "#f4f4f5", "table_control": "#f8f8f9",
+    "table_card": "#ffffff", "table_foreground": "#09090b",
+    "table_muted": "#71717a", "table_border": "#e4e4e7",
+    "table_selection": "#dce8ff", "table_selected_foreground": "#172b4d",
+    "table_pending": "#fff3c4", "table_pending_foreground": "#694600",
+    "table_hover": "#eeeeef", "table_focus": "#3388ff", "table_tab_active": "#217346",
+})
+DARK.update({
+    "table_surface": "#25282d", "table_control": "#2c3037",
+    "table_card": "#1b1d21", "table_foreground": "#edf0f5",
+    "table_muted": "#b5bdc9", "table_border": "#454b56",
+    "table_selection": "#294a77", "table_selected_foreground": "#edf0f5",
+    "table_pending": "#55401e", "table_pending_foreground": "#ffe4a3",
+    "table_hover": "#373d47", "table_focus": "#8abbff", "table_tab_active": "#76c99d",
+})
+TABLE_CONTROL_RADIUS = 9
+
 # PDF 透明页面按白纸合成，原始内容不随界面主题变色。
 PAPER_BACKGROUND = "#ffffff"
 

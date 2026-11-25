@@ -108,7 +108,7 @@ def main():
                 assert image_pin._document.text() == "来源关闭后继续修改"
                 image_pin._recognize()
                 flush(app)
-                assert image_pin._ocr_controller._dialogs[-1]._document is document
+                assert image_pin._ocr_controller._dialogs[-1].text_pane._document is document
                 assert infer.call_count == 0
                 assert image_pin.grab().save(str(evidence / f"pin-ocr-{mode}.png"))
                 assert pin.shutdown_pins()

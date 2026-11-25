@@ -227,7 +227,7 @@ def annotation_transfer():
         assert target._document is document and target._document.text() == "已校正"
         target._document.set_draft("来源关闭后校正")
         target._recognize()
-        assert target._ocr_controller._dialogs[-1]._document is document
+        assert target._ocr_controller._dialogs[-1].text_pane._document is document
         fresh = AnnotationWindow(pixmap, QPoint())
         fresh._ocr.adopt_document(document, pixmap)
         fresh.select_tool("rect")

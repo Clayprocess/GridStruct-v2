@@ -247,7 +247,10 @@ class AnnotationWindow(QWidget):
             from table import open_table
             pixmap = self._render()
             document = self._ocr.document
-            open_table(pixmap, document.results if document is not None and document.matches(pixmap) else None)
+            if document is not None and document.matches(pixmap):
+                open_table(pixmap, document.raw_results, text_document=document)
+            else:
+                open_table(pixmap, None)
             self.close()
         elif action == "longshot":
             # 改做长截图会关掉当前截图，和 Esc 同一条确认规则。

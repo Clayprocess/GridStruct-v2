@@ -319,8 +319,9 @@ class OCRController(QObject):
         """
         if self._document is None or not self._document:
             return
-        if self._dialogs and self._dialogs[-1]._document is self._document:
+        if self._dialogs and self._dialogs[-1].entry_document is self._document:
             dialog = self._dialogs[-1]
+            dialog.set_mode("text")
             if dialog.isMinimized():
                 dialog.setWindowState(dialog.windowState() & ~Qt.WindowMinimized)
             dialog.show()
