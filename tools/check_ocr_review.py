@@ -27,7 +27,7 @@ def flush(app):
 
 
 def span_of(dialog, identifier):
-    return next(span for span in dialog._text.spans if span[2].item_id == identifier)
+    return next(span for span in dialog.text_pane._text.spans if span[2].item_id == identifier)
 
 
 def check_spans():
@@ -81,66 +81,68 @@ def main():
             second.show()
             flush(app)
             # 默认“段落”：一段的几行合成一行，英文之间补空格；没写满的一行（Amount 那行）后面分段。
-            assert document.layout == "paragraph" and first._layout_buttons["paragraph"].isChecked()
-            assert first._text.toPlainText() == document.text()
+            assert document.layout == "paragraph" and first.text_pane._layouts.currentData() == "paragraph"
+            assert first.text_pane._text.toPlainText() == document.text()
             assert document.text().startswith("Invoice 2026 Amount: 12O.OO\nTax: 6.00"), document.text()
-            assert len(first._text.spans) == 4
+            assert len(first.text_pane._text.spans) == 4
             # 低置信度：波浪线标记 + 计数，F8 跳过去并在原图高亮那一行。
-            assert first._pending.text() == "低置信度 1 处" and first._pending.isVisible()
+            assert first.text_pane._pending.text() == "低置信度 1 处" and first.text_pane._pending.isVisible()
             assert any(selection.format.underlineStyle() == QTextCharFormat.WaveUnderline
-                       for selection in first._text.extraSelections())
-            first._text.next_pending()
+                       for selection in first.text_pane._text.extraSelections())
+            first.text_pane._text.next_pending()
             start, end, _item = span_of(first, identifier)
-            assert first._text.textCursor().position() == start
+            assert first.text_pane._text.textCursor().position() == start
             assert document.focused_ids == (identifier,)
-            assert [item._focused for item in first._layer.childItems()] == [False, True, False, False]
+            assert [item._focused for item in first.text_pane._layer.childItems()] == [False, True, False, False]
             # 另一个窗口跟着定位；“点原图上的字”同样让光标跳到全文里对应位置。
-            assert second._text.textCursor().position() == start
+            assert second.text_pane._text.textCursor().position() == start
             document.focus((records[2].item_id,))
-            assert first._text.textCursor().position() == span_of(first, records[2].item_id)[0]
+            assert first.text_pane._text.textCursor().position() == span_of(first, records[2].item_id)[0]
             # 在全文里移动光标，原图跟着高亮。
-            cursor = first._text.textCursor()
+            cursor = first.text_pane._text.textCursor()
             cursor.setPosition(start + 2)
-            first._text.setTextCursor(cursor)
+            first.text_pane._text.setTextCursor(cursor)
             assert document.focused_ids == (identifier,)
             # 改字：只改全文，原图文字层与识别结果不变；改过的那条不再标低置信度。
             cursor.setPosition(start)
             cursor.setPosition(end, QTextCursor.KeepAnchor)
-            first._text.setTextCursor(cursor)
-            first._text.setFocus()
-            QTest.keyClicks(first._text, "Amount: 120.00")
-            assert "Amount: 120.00" in document.draft and second._text.toPlainText() == document.draft
+            first.text_pane._text.setTextCursor(cursor)
+            first.text_pane._text.setFocus()
+            QTest.keyClicks(first.text_pane._text, "Amount: 120.00")
+            assert "Amount: 120.00" in document.draft and second.text_pane._text.toPlainText() == document.draft
             assert document.results[1].text == "Amount: 12O.OO"
-            assert next(item for item in first._layer.childItems() if identifier in item._ids).toPlainText() == "Amount: 12O.OO"
-            assert first._text.pending_spans() == [] and not first._pending.isVisible()
-            assert first._status.text().startswith("已修改")
-            assert len(first._text.spans) == 3
-            first._copy_all()
+            assert next(item for item in first.text_pane._layer.childItems() if identifier in item._ids).toPlainText() == "Amount: 12O.OO"
+            assert first.text_pane._text.pending_spans() == [] and not first.text_pane._pending.isVisible()
+            assert first.text_pane._status.text().startswith("已修改")
+            assert len(first.text_pane._text.spans) == 3
+            first.text_pane._copy_all()
             assert QApplication.clipboard().text() == document.draft
-            first._no_spaces.setChecked(True)
-            first._copy_all()
+            first.text_pane._no_spaces.setChecked(True)
+            first.text_pane._copy_all()
             assert " " not in QApplication.clipboard().text()
-            first._no_spaces.setChecked(False)
+            first.text_pane._no_spaces.setChecked(False)
             # 改过再换排版要确认：取消则什么都不变，确认则按识别结果重排、记住选择。
             with patch("ocr.editor.ask_confirmation", return_value=False) as asked:
-                first._layout_buttons["lines"].setChecked(True)
-                assert asked.called and first._layout_buttons["paragraph"].isChecked()
+                first.text_pane._layouts.setCurrentIndex(first.text_pane._layouts.findData("lines"))
+                assert asked.called and first.text_pane._layouts.currentData() == "paragraph"
                 assert document.layout == "paragraph" and "Amount: 120.00" in document.text()
             with patch("ocr.editor.ask_confirmation", return_value=True):
-                first._layout_buttons["lines"].setChecked(True)
+                first.text_pane._layouts.setCurrentIndex(first.text_pane._layouts.findData("lines"))
             assert document.layout == "lines" and document.draft is None
-            assert second._layout_buttons["lines"].isChecked() and second._text.toPlainText() == document.text()
+            assert second.text_pane._layouts.currentData() == "lines" and second.text_pane._text.toPlainText() == document.text()
             assert "Invoice 2026\nAmount: 12O.OO\nTax: 6.00" in document.text()
             assert settings.value("ocr/layout") == "lines"
             # 没改过时换排版不用确认。
             with patch("ocr.editor.ask_confirmation", side_effect=AssertionError("asked without edits")):
-                first._layout_buttons["single"].setChecked(True)
+                first.text_pane._layouts.setCurrentIndex(first.text_pane._layouts.findData("single"))
                 assert "\n" not in document.text()
-                first._layout_buttons["paragraph"].setChecked(True)
-            with patch("table.open_table") as open_table:
-                first._open_table()
-                assert open_table.call_args.args[1][1].text == "Amount: 12O.OO"
-            rotated = next(item for item in first._layer.childItems() if records[3].item_id in item._ids)
+                first.text_pane._layouts.setCurrentIndex(first.text_pane._layouts.findData("paragraph"))
+            # 同一窗口切表格仍复用逐框识别结果，全文草稿不会反写 OCR 证据。
+            with patch("table.controller._submit_next"):
+                first.set_mode("table")
+                assert first.pages[0].results[1].text == "Amount: 12O.OO"
+                first.set_mode("text")
+            rotated = next(item for item in first.text_pane._layer.childItems() if records[3].item_id in item._ids)
             mapped = rotated.mapToScene(rotated.boundingRect().topLeft())
             assert abs(mapped.x() - 500 / 1.5) < .01 and abs(mapped.y() - 310 / 1.5) < .01
             assert abs(rotated.transform().m12()) > .01
@@ -149,7 +151,7 @@ def main():
             rendered.setDevicePixelRatio(image.devicePixelRatio())
             rendered.fill(Qt.transparent)
             painter = QPainter(rendered)
-            first._preview.scene().render(painter, first._preview.sceneRect(), first._preview.sceneRect())
+            first.text_pane._preview.scene().render(painter, first.text_pane._preview.sceneRect(), first.text_pane._preview.sceneRect())
             painter.end()
             assert rendered == image
             for dialog in (first, second):
@@ -161,7 +163,7 @@ def main():
             document.set_draft(document.text().replace("12O.OO", "120.00"))
             settings.setValue("ocr/layout", "single")
             reopened = OCRResultDialog(document)
-            assert reopened._layout_buttons["lines"].isChecked() and "120.00" in reopened._text.toPlainText()
+            assert reopened.text_pane._layouts.currentData() == "lines" and "120.00" in reopened.text_pane._text.toPlainText()
             reopened.deleteLater()
             OUTPUT.mkdir(parents=True, exist_ok=True)
             for mode in ("light", "dark"):
@@ -171,7 +173,7 @@ def main():
                 dialog = OCRResultDialog(shown)
                 dialog.show()
                 flush(app)
-                dialog._text.next_pending()
+                dialog.text_pane._text.next_pending()
                 flush(app)
                 assert dialog.grab().save(str(OUTPUT / f"review-{mode}.png"))
                 dialog.close()
@@ -180,8 +182,8 @@ def main():
             adjacent = OCRDocument([OCRResult(QRect(10, 10, 90, 20), "第一行", .99),
                                     OCRResult(QRect(10, 35, 90, 20), "第二行", .4)], image)
             dialog = OCRResultDialog(adjacent)
-            assert dialog._text.toPlainText() == "第一行第二行"
-            dialog._text.next_pending()
+            assert dialog.text_pane._text.toPlainText() == "第一行第二行"
+            dialog.text_pane._text.next_pending()
             assert adjacent.focused_ids == (adjacent.results[1].item_id,)
             dialog.deleteLater()
             # 两处相同的字删掉第一处（Clay 审查 PR #47 复现）：剩下的归第二条，不再标低置信度、点原图第二条能定位。
@@ -191,25 +193,25 @@ def main():
                 settings.setValue("ocr/layout", mode)
                 dialog = OCRResultDialog(twins)
                 assert twins.layout == mode
-                start, end, _item = dialog._text.spans[0]
+                start, end, _item = dialog.text_pane._text.spans[0]
                 if mode == "lines":
                     end += 1
-                cursor = dialog._text.textCursor()
+                cursor = dialog.text_pane._text.textCursor()
                 cursor.setPosition(start)
                 cursor.setPosition(end, QTextCursor.KeepAnchor)
-                dialog._text.setTextCursor(cursor)
-                QTest.keyClick(dialog._text, Qt.Key_Backspace)
-                assert dialog._text.toPlainText() == "100", (mode, dialog._text.toPlainText())
-                assert [(begin, stop, item.score) for begin, stop, item in dialog._text.spans] == [(0, 3, .99)], \
-                    (mode, dialog._text.spans)
-                assert dialog._text.pending_spans() == []
+                dialog.text_pane._text.setTextCursor(cursor)
+                QTest.keyClick(dialog.text_pane._text, Qt.Key_Backspace)
+                assert dialog.text_pane._text.toPlainText() == "100", (mode, dialog.text_pane._text.toPlainText())
+                assert [(begin, stop, item.score) for begin, stop, item in dialog.text_pane._text.spans] == [(0, 3, .99)], \
+                    (mode, dialog.text_pane._text.spans)
+                assert dialog.text_pane._text.pending_spans() == []
                 twins.focus((twins.results[1].item_id,))
                 assert twins.focused_ids == (twins.results[1].item_id,)
                 # 贴图会话保存再读回：定位照旧归第二条，不退回文字比对重猜。
                 restored = OCRDocument.from_payload(twins.to_payload(), image)
                 reopened = OCRResultDialog(restored)
-                assert [(begin, stop, item.score) for begin, stop, item in reopened._text.spans] == [(0, 3, .99)], \
-                    (mode, reopened._text.spans)
+                assert [(begin, stop, item.score) for begin, stop, item in reopened.text_pane._text.spans] == [(0, 3, .99)], \
+                    (mode, reopened.text_pane._text.spans)
                 reopened.deleteLater()
                 # 定位数据和全文对不上（被改坏）时按损坏处理，交给贴图恢复的备份流程，不猜。
                 broken = twins.to_payload()
@@ -221,15 +223,15 @@ def main():
                 else:
                     raise AssertionError("overlapping spans accepted")
                 # 删掉第二处则第一条留在原处。
-                QTest.keyClick(dialog._text, Qt.Key_Z, Qt.ControlModifier)
-                assert dialog._text.toPlainText() == twins.recognized_text() and len(dialog._text.spans) == 2
-                start, end, _item = dialog._text.spans[1]
+                QTest.keyClick(dialog.text_pane._text, Qt.Key_Z, Qt.ControlModifier)
+                assert dialog.text_pane._text.toPlainText() == twins.recognized_text() and len(dialog.text_pane._text.spans) == 2
+                start, end, _item = dialog.text_pane._text.spans[1]
                 cursor.setPosition(start - (1 if mode == "lines" else 0))
                 cursor.setPosition(end, QTextCursor.KeepAnchor)
-                dialog._text.setTextCursor(cursor)
-                QTest.keyClick(dialog._text, Qt.Key_Delete)
-                assert [(begin, stop, item.score) for begin, stop, item in dialog._text.spans] == [(0, 3, .4)], \
-                    (mode, dialog._text.spans)
+                dialog.text_pane._text.setTextCursor(cursor)
+                QTest.keyClick(dialog.text_pane._text, Qt.Key_Delete)
+                assert [(begin, stop, item.score) for begin, stop, item in dialog.text_pane._text.spans] == [(0, 3, .4)], \
+                    (mode, dialog.text_pane._text.spans)
                 dialog.deleteLater()
             # 两条都改过、撤销一处（Clay 审查 PR #47 复现）：撤回原文的那条恢复定位和低置信度标记。
             settings.setValue("ocr/layout", "lines")
@@ -237,27 +239,27 @@ def main():
                                 OCRResult(QRect(10, 35, 90, 20), "Bravo", .4)], image)
             dialog = OCRResultDialog(pair)
             for position, letter in ((1, "x"), (7, "y")):
-                cursor = dialog._text.textCursor()
+                cursor = dialog.text_pane._text.textCursor()
                 cursor.setPosition(position)
                 cursor.setPosition(position + 1, QTextCursor.KeepAnchor)
-                dialog._text.setTextCursor(cursor)
-                QTest.keyClicks(dialog._text, letter)
-            assert dialog._text.toPlainText() == "Axpha\nByavo" and dialog._text.spans == []
-            QTest.keyClick(dialog._text, Qt.Key_Z, Qt.ControlModifier)
-            assert dialog._text.toPlainText() == "Axpha\nBravo", dialog._text.toPlainText()
-            assert [(begin, stop, item.text) for begin, stop, item in dialog._text.spans] == [(6, 11, "Bravo")]
-            assert len(dialog._text.pending_spans()) == 1
-            QTest.keyClick(dialog._text, Qt.Key_Z, Qt.ControlModifier)
-            assert pair.draft is None and len(dialog._text.spans) == 2
+                dialog.text_pane._text.setTextCursor(cursor)
+                QTest.keyClicks(dialog.text_pane._text, letter)
+            assert dialog.text_pane._text.toPlainText() == "Axpha\nByavo" and dialog.text_pane._text.spans == []
+            QTest.keyClick(dialog.text_pane._text, Qt.Key_Z, Qt.ControlModifier)
+            assert dialog.text_pane._text.toPlainText() == "Axpha\nBravo", dialog.text_pane._text.toPlainText()
+            assert [(begin, stop, item.text) for begin, stop, item in dialog.text_pane._text.spans] == [(6, 11, "Bravo")]
+            assert len(dialog.text_pane._text.pending_spans()) == 1
+            QTest.keyClick(dialog.text_pane._text, Qt.Key_Z, Qt.ControlModifier)
+            assert pair.draft is None and len(dialog.text_pane._text.spans) == 2
             dialog.deleteLater()
             legacy = OCRResultDialog([OCRResult(QRect(0, 0, 50, 20), "legacy", .9)])
-            assert legacy._preview.isHidden() and not legacy._to_table.isEnabled()
-            legacy._copy_all()
+            assert legacy.text_pane._preview.isHidden() and not legacy._mode_bar._buttons["table"].isEnabled()
+            legacy.text_pane._copy_all()
             assert QApplication.clipboard().text() == "legacy"
             legacy.deleteLater()
             empty = OCRResultDialog([])
-            assert empty._text.toPlainText() == "" and empty._status.text() == "未检测到文字"
-            empty._copy_all()
+            assert empty.text_pane._text.toPlainText() == "" and empty.text_pane._status.text() == "未检测到文字"
+            empty.text_pane._copy_all()
             assert QApplication.clipboard().text() == ""
             empty.deleteLater()
             flush(app)

@@ -5,6 +5,7 @@ from .toast import show_toast
 from .menu import round_corners
 from .delegates import MultilineDelegate
 from .zoom import PreviewZoom, ZoomBar
+from .recognition_modes import RecognitionModeBar
 
 __all__ = ["BaseDialog", "MessageDialog", "show_message", "ask_confirmation", "standard_window", "topmost_button",
-           "APP_ICON_SIZES", "app_icon", "app_icon_pixmap", "tinted_icon", "paint_svg", "painted_icon", "floating_window_type", "show_desktop_check", "show_toast", "round_corners", "MultilineDelegate", "PreviewZoom", "ZoomBar"]
+           "APP_ICON_SIZES", "app_icon", "app_icon_pixmap", "tinted_icon", "paint_svg", "painted_icon", "floating_window_type", "show_desktop_check", "show_toast", "round_corners", "MultilineDelegate", "PreviewZoom", "ZoomBar", "RecognitionModeBar"]

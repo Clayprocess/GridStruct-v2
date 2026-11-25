@@ -40,7 +40,7 @@ class FilePage:
     source: object  # QPdfDocument 或图片路径
     index: int
     label: str
-    results = None
+    results: object = None  # 仅缓存文字证据，不常驻 PDF 页面的像素
 
     def render(self):
         if isinstance(self.source, QPdfDocument):

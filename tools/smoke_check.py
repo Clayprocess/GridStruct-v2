@@ -1072,13 +1072,13 @@ def drawing_interaction():
 def ocr_copy_text():
     from ocr import OCRResult, OCRResultDialog
     dialog = OCRResultDialog([OCRResult(QRect(), "plain text", 0.99)])
-    cursor = dialog._text.textCursor()
+    cursor = dialog.text_pane._text.textCursor()
     cursor.select(QTextCursor.Document)
-    dialog._text.setTextCursor(cursor)
+    dialog.text_pane._text.setTextCursor(cursor)
     # 复制选中交给输入框自带的 Ctrl+C，窗口不再单设按钮。
-    dialog._text.copy()
+    dialog.text_pane._text.copy()
     assert app.clipboard().text() == "plain text"
-    dialog._copy_all()
+    dialog.text_pane._copy_all()
     assert app.clipboard().text() == "plain text"
     dialog.deleteLater()
 

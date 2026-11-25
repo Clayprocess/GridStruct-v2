@@ -61,6 +61,22 @@ class PreviewZoom(QObject):
         self._target.set_zoom_scale(max(MIN_SCALE, min(FIT_MAX, self._target.fit_zoom_scale(size))))
         self._bar.update_state()
 
+    def capture_view(self, pixels_per_unit):
+        """用原图物理像素记录中心与倍率，文字场景和网格画布的坐标单位可能不同。"""
+        if self.fitted:
+            return None
+        center = self._area.viewport().rect().center()
+        return (self.scale / pixels_per_unit, self._target.to_content(center) * pixels_per_unit)
+
+    def restore_view(self, view, pixels_per_unit):
+        if view is None:
+            self.fit()
+            return
+        scale, center = view
+        self.set_scale(scale * pixels_per_unit)
+        delta = self._target.from_content(center / pixels_per_unit) - self._area.viewport().rect().center()
+        self._scroll(round(delta.x()), round(delta.y()))
+
     def zoom_by(self, factor, anchor=None):
         self.set_scale(self.scale * factor, anchor)
 

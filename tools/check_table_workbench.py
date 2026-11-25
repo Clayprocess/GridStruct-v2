@@ -153,9 +153,69 @@ def check_second_table():
     app.processEvents()
 
 
+def check_table_picker(mode):
+    apply_theme(app, mode)
+    image = QImage(600, 3000, QImage.Format_RGB32)
+    image.fill(QColor(T.PAPER_BACKGROUND))
+    dialog = TableDialog([ImagePage(image), ImagePage(image)])
+    tables = tuple(replace(sample(), rect=QRect(40, 40 + index * 150, 360, 120)) for index in range(17))
+    dialog.apply_analysis((), tables, page=0)
+    dialog.apply_analysis((), (sample(),), page=1)
+    dialog.resize(920, 900)
+    dialog.show()
+    app.processEvents()
+    picker = dialog._table_picker
+    assert picker.isVisible() and dialog._tabs.count() == 17
+    assert dialog._review_tools.width() <= dialog._result_view.viewport().width() - 24
+    assert not picker.geometry().intersects(dialog._result_view._bar.geometry())
+    before = picker.geometry(), picker._back.geometry(), picker._forward.geometry()
+    widths = [dialog._tabs.tabRect(index).width() for index in range(17)]
+    assert len(set(widths)) == 1
+    # 先确认箭头的真实命中区在窗口内，再发送点击，避免QtTest绕过父控件裁切。
+    for _ in range(30):
+        if not picker._forward.isEnabled():
+            break
+        button = picker._forward
+        assert dialog.childAt(button.mapTo(dialog, button.rect().center())) is button
+        QTest.mouseClick(button, Qt.LeftButton)
+        app.processEvents()
+    assert not picker._forward.isEnabled()
+    last = dialog._tabs.tabRect(16)
+    assert dialog.childAt(dialog._tabs.mapTo(dialog, last.center())) is dialog._tabs
+    QTest.mouseClick(dialog._tabs, Qt.LeftButton, pos=last.center())
+    app.processEvents()
+    assert dialog._state.current == 16
+    assert before == (picker.geometry(), picker._back.geometry(), picker._forward.geometry())
+    assert widths == [dialog._tabs.tabRect(index).width() for index in range(17)]
+    scroll = picker._scroll.horizontalScrollBar()
+    end = scroll.value()
+    assert dialog.childAt(picker._back.mapTo(dialog, picker._back.rect().center())) is picker._back
+    QTest.mouseClick(picker._back, Qt.LeftButton)
+    app.processEvents()
+    assert scroll.value() < end and dialog._state.current == 16
+    assert before == (picker.geometry(), picker._back.geometry(), picker._forward.geometry())
+    dialog._tabs.setFocus()
+    for _ in range(16):
+        QTest.keyClick(dialog._tabs, Qt.Key_Left)
+        app.processEvents()
+    assert dialog._state.current == 0 and picker._scroll.horizontalScrollBar().value() == 0
+    output = ROOT / '.scratch' / 'workbench-preview'
+    output.mkdir(parents=True, exist_ok=True)
+    dialog.grab().save(str(output / f'{mode}-many-tables-narrow.png'))
+    dialog.resize(1800, 900)
+    app.processEvents()
+    assert not picker.geometry().intersects(dialog._result_view._bar.geometry())
+    dialog.grab().save(str(output / f'{mode}-many-tables-wide.png'))
+    dialog.show_page(1)
+    assert not picker.isVisible(), '单表不显示表格标签'
+    dialog.close()
+    app.processEvents()
+
+
 if __name__ == '__main__':
     app = QApplication([])
     for mode in ('light', 'dark'):
         check(mode)
+        check_table_picker(mode)
     check_second_table()
-    print('PASS: light/dark amount preview interruption, apply/undo/redo and tool toggle')
+    print('PASS: light/dark amount preview interruption, apply/undo/redo, tool toggle and 17-table narrow/wide navigation')

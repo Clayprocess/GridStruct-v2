@@ -153,17 +153,21 @@ def analyze_region(pixels, tokens, rect=None):
     return TableResult(rect, tokens, suggest(pixels, tokens, structure), note)
 
 
-def analyze(image, results=None, on_stage=None, tokens=None, regions=None):
+def analyze(image, results=None, on_stage=None, tokens=None, regions=None, on_results=None):
     """返回 (整页文字框, 每张表的 TableResult)。
 
     截图、贴图和识别文档都先在整张图里找有线表格，一张都没有就裁掉空白边当一张表，不把图片边缘当表格边界。
     regions 为用户框选的区域时按框分析；tokens 为这张图已有的文字框时不再识别，
-    改框后重新分析只跑结构，不重跑 OCR。
+    改框后重新分析只跑结构，不重跑 OCR。on_results 在结构分析前交出完整 OCR 证据，
+    不用分格用的轴对齐 Token 反造文字结果，保留旋转四点框与逐字位置。
     """
     if tokens is None:
         if results is None:
             from ocr import OCREngine
             results = OCREngine().recognize_image(image, on_stage=on_stage)
+        results = tuple(results)
+        if on_results is not None:
+            on_results(results)
         tokens = tokens_from_results(results, image)
     pixels = image_to_bgr(image)
     if regions is None:

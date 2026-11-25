@@ -1,18 +1,13 @@
-"""文字识别窗口：左边原图可缩放、滑选，右边是一份可直接修改的全文（复核窗口方案 A，Clay 2026-11-05 定）。
+"""共享识别工作台内的文字校对面板；每页保留编辑器与原生撤销历史。"""
 
-布局与表格识别窗口一致：上方工具行、中间原图对照、底部状态 + 主操作。
-上方切换的是排版，不是视图。全文的编辑、双向定位与低置信度标记在 editor.py，截图里的识别卡片也用它。
-"""
-
-from PySide6.QtCore import QPointF, Qt, Slot
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSignalBlocker, QSize, Qt, Slot
 from PySide6.QtGui import QKeySequence, QPainter, QPixmap, QShortcut, QTransform
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QFrame, QGraphicsScene, QGraphicsTextItem, QGraphicsView,
-    QHBoxLayout, QLabel, QPushButton, QSplitter, QToolButton, QVBoxLayout,
+    QApplication, QComboBox, QGraphicsScene, QGraphicsTextItem, QGraphicsView,
+    QHBoxLayout, QLabel, QSplitter, QToolButton, QVBoxLayout, QWidget,
 )
 from styles import tokens as T
-from ui import BaseDialog, PreviewZoom, show_toast, standard_window, topmost_button
-from ui.motion import SelectionPill
+from ui import PreviewZoom, paint_svg, show_toast, tinted_icon
 from .editor import OCRTextEdit
 from .layer import add_text_layer
 from .layout import LAYOUTS
@@ -52,136 +47,180 @@ class _ImagePreview(QGraphicsView):
         return not isinstance(self.itemAt(point), QGraphicsTextItem)
 
 
-class OCRResultDialog(BaseDialog):
-    def __init__(self, results, parent=None, pixmap=None):
+class _TextPreview(_ImagePreview):
+    def __init__(self, editor):
+        super().__init__()
+        self.setObjectName("OCRResultView")
+        self.editor = editor
+        self.setScene(QGraphicsScene(self))
+        editor.setFixedSize(620, 440)
+        self.proxy = self.scene().addWidget(editor)
+        self.setSceneRect(self.proxy.boundingRect().adjusted(-80, -80, 80, 80))
+
+    def pans_at(self, point):
+        return self.itemAt(point) is None
+
+
+class _TextZoom(PreviewZoom):
+    def eventFilter(self, watched, event):
+        # 正文保留空格输入和滚动，画布空白仍沿用共享缩放和平移。
+        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease):
+            if self._target.editor.hasFocus() and event.key() == Qt.Key_Space:
+                return False
+        if event.type() == QEvent.Wheel:
+            point = self._area.viewport().mapFromGlobal(event.globalPosition().toPoint())
+            if not self._target.pans_at(point) and not event.modifiers() & Qt.ControlModifier:
+                return False
+        return super().eventFilter(watched, event)
+
+
+class _CopySpaceButton(QToolButton):
+    def sizeHint(self):
+        return super().sizeHint() + QSize(20, 0)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.isChecked():
+            color = T.THEMES[QApplication.instance().property("theme_mode") or "light"]["table_selected_foreground"]
+            painter = QPainter(self)
+            paint_svg(painter, "check", color, QRectF(self.width() - 16, (self.height() - 12) / 2, 12, 12))
+            painter.end()
+
+
+class OCRReviewPane(QWidget):
+    def __init__(self, document, pixmap, parent=None):
         super().__init__(parent)
-        from settings import get_settings
-        self._settings = get_settings()
-        image = pixmap.toImage() if pixmap is not None else None
-        document = results if isinstance(results, OCRDocument) else OCRDocument(results, image)
-        if pixmap is None and not document.image.isNull():
-            pixmap = QPixmap.fromImage(document.image)
-        self.setWindowTitle("文字识别 · 本地")
-        standard_window(self)
-        self.resize(1100, 680)
+        from table import FloatingTools
+        self.setObjectName("OCRReview")
+        self._document, self._pixmap = document, pixmap
         self._mode = QApplication.instance().property("theme_mode") or "light"
         self._layer = None
-
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(T.SPACE_3, T.SPACE_3, T.SPACE_3, T.SPACE_3)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(T.SPACE_2)
-        layout.addLayout(self._build_toolbar())
-
         self._preview = _ImagePreview()
         self._preview.setMinimumWidth(200)
         self._preview.setScene(QGraphicsScene(self._preview))
-        self._zoom = PreviewZoom(self._preview, self._preview, self)
-
+        self._zoom = PreviewZoom(self._preview, self._preview, self, shortcut=False)
         self._text = OCRTextEdit(self._mode)
+        self._text.setProperty("review", True)
+        self._result_view = _TextPreview(self._text)
+        self.result_zoom = _TextZoom(self._result_view, self._result_view, self, shortcut=False)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.addWidget(self._preview)
+        self.splitter.addWidget(self._result_view)
+        self.splitter.setSizes([450, 550])
+        layout.addWidget(self.splitter, 1)
+
+        self._tools = FloatingTools(self._result_view)
+        self._pending = QLabel()
+        self._pending.setObjectName("TablePending")
+        self._pending.setToolTip("模型置信度较低，仅供参考；文字正确时无需修改")
+        self._next = self._button("下一处", "arrow-right", "下一处低置信度文字 (F8)")
+        self._next.clicked.connect(self._next_pending)
+        self._pending_group = self._tools.group(self._pending, self._next)
+        self._layouts = QComboBox()
+        self._layouts.setAccessibleName("文字排版")
+        for mode, label, tip in LAYOUTS:
+            self._layouts.addItem(label, mode)
+            self._layouts.setItemData(self._layouts.count() - 1, tip, Qt.ToolTipRole)
+        self._layouts.currentIndexChanged.connect(self._choose_layout)
+        self._no_spaces = self._button("去空格", "eraser", "仅复制时去掉普通和全角空格，不修改正文", _CopySpaceButton)
+        self._no_spaces.setCheckable(True)
+        self._tools.group(self._layouts, self._no_spaces)
+
+        footer = QHBoxLayout()
+        self._status = QLabel()
+        self._status.setObjectName("OCRStatus")
+        footer.addWidget(self._status, 1)
+        self._copy = self._button("复制全文", "copy", "复制全部文字 (Ctrl+Shift+C)")
+        self._copy.setProperty("class", "outline")
+        self._copy.clicked.connect(self._copy_all)
+        footer.addWidget(self._copy)
+        layout.addLayout(footer)
+        self._next_shortcut = QShortcut(QKeySequence("F8"), self, self._next_pending)
+        self._copy_shortcut = QShortcut(QKeySequence("Ctrl+Shift+C"), self, self._copy_all)
+        self._fit_shortcut = QShortcut(QKeySequence("Ctrl+0"), self, self._fit_active)
+        for shortcut in (self._next_shortcut, self._copy_shortcut, self._fit_shortcut):
+            shortcut.setContext(Qt.WindowShortcut)
         self._text.marksChanged.connect(self._update_status)
-
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self._preview)
-        splitter.addWidget(self._text)
-        splitter.setSizes([560, 520])
-        layout.addWidget(splitter, 1)
-        layout.addLayout(self._build_footer())
-
-        self._next_shortcut = QShortcut(QKeySequence("F8"), self, self._text.next_pending)
-        QShortcut(QKeySequence("Ctrl+Shift+C"), self, self._copy_all)
-        self._load(document, pixmap)
-
-    def _load(self, document, pixmap):
-        """pixmap 为空表示历史纯文字结果，没有原图可对照。"""
-        self._document, self._pixmap = document, pixmap
-        if pixmap is not None:
-            scene = self._preview.scene()
-            scene.addPixmap(pixmap).setTransformationMode(Qt.SmoothTransformation)
-            self._layer = add_text_layer(scene, document, self._mode)
-            size = pixmap.deviceIndependentSize()
-            scene.setSceneRect(0, 0, size.width(), size.height())
-            self._zoom.fit()
-        self._preview.setVisible(pixmap is not None)
-        self._to_table.setEnabled(pixmap is not None)
         document.changed.connect(self._show_layout)
         document.focused.connect(self._scroll_preview)
         self._text.set_document(document)
         self._show_layout()
+        self.set_source_pixmap(pixmap)
+        self._zoom.fit()
+        self.result_zoom.fit()
 
-    # ---- 构造 ----
+    def set_source_pixmap(self, pixmap):
+        """文件页离开时卸载原图，回来重渲；不重绑全文以保留原生撤销栈。"""
+        self._zoom.stop_pan()
+        self._pixmap = pixmap
+        self._layer = None
+        scene = self._preview.scene()
+        scene.clear()
+        scene.setSceneRect(0, 0, 0, 0)
+        if pixmap is not None:
+            scene.addPixmap(pixmap).setTransformationMode(Qt.SmoothTransformation)
+            self._layer = add_text_layer(scene, self._document, self._mode)
+            size = pixmap.deviceIndependentSize()
+            scene.setSceneRect(0, 0, size.width(), size.height())
+        self._preview.setVisible(pixmap is not None)
+        self._update_status()
 
-    def _build_toolbar(self):
-        row = QHBoxLayout()
-        row.setSpacing(T.SPACE_2)
-        caption = QLabel("排版")
-        caption.setObjectName("OCRStatus")
-        row.addWidget(caption)
-        frame = QFrame()
-        frame.setObjectName("SegmentGroup")
-        segments = QHBoxLayout(frame)
-        segments.setContentsMargins(1, 1, 1, 1)
-        segments.setSpacing(2)
-        pill = SelectionPill(frame, "background", "border")
-        group = QButtonGroup(frame)
-        self._layout_buttons = {}
-        for mode, label, tip in LAYOUTS:
-            button = QToolButton()
-            button.setObjectName("Segment")
-            button.setProperty("pill", True)
-            button.setText(label)
-            button.setToolTip(tip)
-            button.setCheckable(True)
-            button.toggled.connect(lambda on, value=mode, target=button: on and (pill.track(target), self._choose_layout(value)))
-            group.addButton(button)
-            segments.addWidget(button)
-            self._layout_buttons[mode] = button
-        row.addWidget(frame)
-        row.addStretch()
-        # 只影响复制出去的文字，不改全文。
-        self._no_spaces = QCheckBox("去空格")
-        self._no_spaces.setToolTip("复制时去掉所有空格")
-        row.addWidget(self._no_spaces)
-        row.addWidget(topmost_button(self, "window/ocr_topmost"))
-        return row
+    def _sync_shortcuts(self):
+        visible = self.isVisible()
+        self._next_shortcut.setEnabled(visible and bool(self._text.pending_spans()))
+        self._copy_shortcut.setEnabled(visible)
+        self._fit_shortcut.setEnabled(visible)
 
-    def _build_footer(self):
-        row = QHBoxLayout()
-        row.setSpacing(T.SPACE_2)
-        self._status = QLabel()
-        self._status.setObjectName("OCRStatus")
-        row.addWidget(self._status, 1)
-        self._pending = QLabel()
-        self._pending.setObjectName("OCRPending")
-        self._pending.setToolTip("模型置信度较低的文字标了波浪线，仅供参考；文字正确时无需修改")
-        self._next = QPushButton("下一处")
-        self._next.setProperty("class", "ghost")
-        self._next.setToolTip("跳到下一处低置信度文字 (F8)")
-        self._next.clicked.connect(self._text.next_pending)
-        row.addWidget(self._pending)
-        row.addWidget(self._next)
-        row.addSpacing(T.SPACE_2)
-        self._to_table = QPushButton("按表格整理…")
-        self._to_table.setProperty("class", "outline")
-        self._to_table.setToolTip("复用本次识别的文字，在原图上划分行列后导出 Excel")
-        self._to_table.clicked.connect(self._open_table)
-        self._copy = QPushButton("复制全文")
-        self._copy.setProperty("class", "primary")
-        self._copy.setToolTip("复制右侧全部文字 (Ctrl+Shift+C)")
-        self._copy.clicked.connect(self._copy_all)
-        row.addWidget(self._to_table)
-        row.addWidget(self._copy)
-        return row
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_shortcuts()
 
-    # ---- 排版与状态 ----
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._sync_shortcuts()
 
-    def _choose_layout(self, mode):
-        if not self._text.choose_layout(mode):
-            self._show_layout()
+    @property
+    def preview(self):
+        return self._preview
+
+    @property
+    def zoom(self):
+        return self._zoom
+
+    def _button(self, text, icon, tip, button_type=QToolButton):
+        button = button_type()
+        button.setText(text)
+        button.setIcon(tinted_icon(icon, T.THEMES[self._mode]["table_foreground"], 16))
+        button.setIconSize(QSize(16, 16))
+        button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        button.setProperty("class", "ghost")
+        button.setProperty("labelled", True)
+        button.setToolTip(tip)
+        return button
+
+    def _next_pending(self):
+        # 代理内的正文焦点还需要外层视图激活，否则模式栏仍会吃掉后续输入。
+        self._result_view.setFocus(Qt.OtherFocusReason)
+        self._text.next_pending()
+
+    def _fit_active(self):
+        if self._text.hasFocus() or self._result_view.hasFocus():
+            self.result_zoom.fit()
+        else:
+            self._zoom.fit()
+
+    def _choose_layout(self, index):
+        self._text.choose_layout(self._layouts.itemData(index))
+        self._show_layout()
 
     @Slot()
     def _show_layout(self):
-        self._layout_buttons[self._document.layout].setChecked(True)
+        with QSignalBlocker(self._layouts):
+            self._layouts.setCurrentIndex(self._layouts.findData(self._document.layout))
 
     @Slot()
     def _update_status(self):
@@ -194,11 +233,9 @@ class OCRResultDialog(BaseDialog):
         self._status.setText(message)
         count = len(self._text.pending_spans())
         self._pending.setText(f"低置信度 {count} 处")
-        for widget in (self._pending, self._next):
-            widget.setVisible(count > 0)
-        self._next_shortcut.setEnabled(count > 0)
-
-    # ---- 联动 ----
+        self._pending_group.setVisible(count > 0)
+        self._sync_shortcuts()
+        self._tools.place()
 
     @Slot(object)
     def _scroll_preview(self, ids):
@@ -207,13 +244,9 @@ class OCRResultDialog(BaseDialog):
             visible = self._preview.mapToScene(self._preview.viewport().rect()).boundingRect()
             for item in self._layer.childItems():
                 rect = item.sceneBoundingRect()
-                # 只在这一行完全不在视野里时才滚：在原图上点字也会走到这里，放大后一点就跳会很怪；
-                # 整行比视野还宽时对准行首，而不是被拉到行尾。
                 if wanted.intersection(item._ids) and not visible.intersects(rect):
                     rect.setWidth(min(rect.width(), visible.width() / 2))
                     self._preview.ensureVisible(rect, 20, 20)
-
-    # ---- 输出 ----
 
     def _copy_all(self):
         text = self._document.text()
@@ -222,6 +255,12 @@ class OCRResultDialog(BaseDialog):
         QApplication.clipboard().setText(text)
         show_toast("已复制全文")
 
-    def _open_table(self):
-        from table import open_table
-        open_table(self._pixmap, self._document.results)
+
+def OCRResultDialog(results, parent=None, pixmap=None):
+    """兼容旧调用点；返回唯一公共窗口，由调用者照常 show。"""
+    from table import open_text_workbench
+    image = pixmap.toImage() if pixmap is not None else None
+    document = results if isinstance(results, OCRDocument) else OCRDocument(results, image)
+    if pixmap is None and not document.image.isNull():
+        pixmap = QPixmap.fromImage(document.image)
+    return open_text_workbench(document, pixmap, parent=parent)

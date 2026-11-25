@@ -689,13 +689,22 @@ def check_ocr_reuse(app):
             annotation._ocr.adopt_document(document, pixmap)
             pin = PinWindow(pixmap, document=document)
             dialog = OCRResultDialog(document)
-            for entry in (lambda: annotation._on_action("table"), pin._recognize_table, dialog._open_table):
+            for entry in (lambda: annotation._on_action("table"), pin._recognize_table):
                 with patch("table.open_table") as opened:
                     entry()
                     passed_image, results = opened.call_args.args
                     passed_image = passed_image.toImage() if isinstance(passed_image, QPixmap) else passed_image
                     tokens = tokens_from_results(results, passed_image)
                     assert [token.text for token in tokens] == ["120O", "total"]
+                    assert opened.call_args.kwargs["text_document"] is document
+                    assert document.draft == "1200 total"
+            # OCR 复核入口现在复用同一工作台，切表格不得再创建窗口或把草稿当识别框。
+            with patch("table.controller._submit_next"):
+                dialog.set_mode("table")
+                assert dialog.mode == "table"
+                assert [record.text for record in dialog.pages[0].results] == ["120O", "total"]
+                dialog.set_mode("text")
+                assert dialog.text_pane._document is document and document.draft == "1200 total"
             pin._allow_close = True
             pin.close()
             dialog.close()

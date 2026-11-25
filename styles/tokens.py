@@ -81,7 +81,7 @@ LIGHT.update({
     "table_muted": "#71717a", "table_border": "#e4e4e7",
     "table_selection": "#dce8ff", "table_selected_foreground": "#172b4d",
     "table_pending": "#fff3c4", "table_pending_foreground": "#694600",
-    "table_hover": "#eeeeef", "table_focus": "#3388ff",
+    "table_hover": "#eeeeef", "table_focus": "#3388ff", "table_tab_active": "#217346",
 })
 DARK.update({
     "table_surface": "#25282d", "table_control": "#2c3037",
@@ -89,7 +89,7 @@ DARK.update({
     "table_muted": "#b5bdc9", "table_border": "#454b56",
     "table_selection": "#294a77", "table_selected_foreground": "#edf0f5",
     "table_pending": "#55401e", "table_pending_foreground": "#ffe4a3",
-    "table_hover": "#373d47", "table_focus": "#8abbff",
+    "table_hover": "#373d47", "table_focus": "#8abbff", "table_tab_active": "#76c99d",
 })
 TABLE_CONTROL_RADIUS = 9
 

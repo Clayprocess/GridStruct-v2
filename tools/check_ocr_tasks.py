@@ -130,7 +130,7 @@ def main():
         assert first.adopt_document(second.document, pixmap)
         assert engine.calls == 3 and first.document is second.document
         first.show_results()
-        assert first._dialogs[-1]._document is second.document
+        assert first._dialogs[-1].text_pane._document is second.document
         first._dialogs[-1].close()
         app.processEvents()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)

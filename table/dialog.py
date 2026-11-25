@@ -10,16 +10,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, QSize, QTimer, QRect, QMimeData, QPointF, QSignalBlocker, QStandardPaths, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QImage, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSplitter, QStyledItemDelegate,
-    QTabBar, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFileDialog, QHBoxLayout,
+    QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QScrollArea, QSplitter, QStackedWidget, QStyledItemDelegate,
+    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 from styles import tokens as T
 from ui import (
-    BaseDialog, MultilineDelegate, PreviewZoom, show_message, show_toast, standard_window, tinted_icon, topmost_button,
+    BaseDialog, PreviewZoom, RecognitionModeBar, show_message, show_toast, standard_window, tinted_icon,
 )
 from . import export
 from .editor import ADD_HORIZONTAL, ADD_VERTICAL, DELETE, SELECT, GridCanvas
@@ -30,7 +30,7 @@ from .pages import FilePage, ImagePage
 from .regions import RegionCanvas, region_label
 from .review import TableReview
 from .amounts import preview_amount
-from .workbench import AMOUNT_ROLE, AmountDelegate, FloatingTools
+from .workbench import AMOUNT_ROLE, AmountDelegate, FloatingTools, TablePicker, TableTabs
 from .result_view import ResultTable, ResultView
 
 TOOLS = (
@@ -96,16 +96,25 @@ class TableDialog(BaseDialog):
     # 用户改了表格框，有页面要重新分析；后台服务空闲时取走（table/controller.py）。
     analysisRequested = Signal()
 
-    def __init__(self, source, parent=None):
+    def __init__(self, source, parent=None, *, text_document=None, initial_mode=None):
         """source 为一张 QImage（截图/贴图），或识别文档的页面列表（table/pages.py）。"""
         super().__init__(parent)
         self.pages = [ImagePage(source)] if isinstance(source, QImage) else list(source)
         self._states = [_PageState() for _page in self.pages]
         self._index = 0
         # 识别文档的工作表按“第N页-表M”命名；截图、贴图只有一张图，按“表M”。
-        self._document = any(isinstance(page, FilePage) for page in self.pages)
+        self._file_document = any(isinstance(page, FilePage) for page in self.pages)
         self._regions_mode = False
-        self.setWindowTitle("表格识别 · 本地" if len(self.pages) == 1 else "识别文档 · 本地")
+        self.entry_document = text_document
+        self.mode = initial_mode or ("text" if text_document is not None else "table")
+        self.setWindowTitle("识别工作台 · 本地")
+        self._text_panes = {}
+        self.text_pane = None
+        self._table_pane = None
+        self._table_dirty = True
+        self._split_fraction = .45
+        self._source_view = None
+        self._shown_once = False
         standard_window(self)
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.resize(1600, 900)
@@ -120,6 +129,31 @@ class TableDialog(BaseDialog):
         layout.setContentsMargins(T.SPACE_3, T.SPACE_3, T.SPACE_3, T.SPACE_3)
         layout.setSpacing(T.SPACE_2)
 
+        self._mode_bar = RecognitionModeBar(self, initial_mode=self.mode, has_image=bool(self.pages))
+        self._mode_bar.modeRequested.connect(self.set_mode)
+        layout.addWidget(self._mode_bar)
+        self._stack = QStackedWidget()
+        layout.addWidget(self._stack, 1)
+        self._waiting = QScrollArea()
+        self._waiting.setWidgetResizable(True)
+        self._wait_label = QLabel()
+        self._wait_label.setAlignment(Qt.AlignCenter)
+        self._waiting.setWidget(self._wait_label)
+        self._stack.addWidget(self._waiting)
+        if len(self.pages) > 1:
+            QShortcut(QKeySequence("Ctrl+PgUp"), self, lambda: self.show_page(self._index - 1))
+            QShortcut(QKeySequence("Ctrl+PgDown"), self, lambda: self.show_page(self._index + 1))
+        if self.pages:
+            self.show_page(0)
+        else:
+            self._show_text_page()
+
+    def _build_table_pane(self):
+        self._table_pane = QWidget()
+        layout = QVBoxLayout(self._table_pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(T.SPACE_2)
+        self._stack.addWidget(self._table_pane)
         self._area = QScrollArea()
         self._area.setObjectName("TableCanvasArea")
         self._area.setAlignment(Qt.AlignCenter)
@@ -152,21 +186,128 @@ class TableDialog(BaseDialog):
 
         for sequence, slot in ((QKeySequence.Undo, self._undo), (QKeySequence.Redo, self._redo),
                                (QKeySequence("Ctrl+Shift+C"), self._copy), (QKeySequence("Ctrl+Return"), self._confirm)):
-            QShortcut(sequence, self, slot)
-        QShortcut(QKeySequence("Ctrl+0"), self, self._fit_focused_view)
-        self._cancel_amount_shortcut = QShortcut(QKeySequence("Escape"), self, self._cancel_amounts)
+            QShortcut(sequence, self._table_pane, slot)
+        QShortcut(QKeySequence("Ctrl+0"), self._table_pane, self._fit_focused_view)
+        self._cancel_amount_shortcut = QShortcut(QKeySequence("Escape"), self._table_pane, self._cancel_amounts)
         self._cancel_amount_shortcut.setEnabled(False)
-        self._next_shortcut = QShortcut(QKeySequence("F8"), self, self._next_pending)
+        self._next_shortcut = QShortcut(QKeySequence("F8"), self._table_pane, self._next_pending)
         # 翻页会换画布，工具快捷键挂在外层滚动区，焦点在任何一页的画布上都生效。
         for tool, _label, _icon, key in TOOLS:
             QShortcut(QKeySequence(key), self._area, lambda value=tool: self._tool_buttons[value].click(),
                       context=Qt.WidgetWithChildrenShortcut)
         QShortcut(QKeySequence("R"), self._area, self._regions_button.click, context=Qt.WidgetWithChildrenShortcut)
+
+    def _settle_table(self):
+        if self._regions_mode:
+            self._regions_button.setChecked(False)
+        elif isinstance(self._canvas, GridCanvas):
+            self._canvas.set_tool(self._canvas.tool)
+        self._zoom.stop_pan()
+        self._save_position()
+
+    def _view_parts(self):
+        if self.mode == "table" and self._canvas is not None:
+            return self._splitter, self._zoom, 1.
+        if self.mode == "text" and self.text_pane is not None and self.pages:
+            return self.text_pane.splitter, self.text_pane.zoom, self._text_dpr
+        return None
+
+    def _capture_view(self):
+        parts = self._view_parts()
+        if parts is not None:
+            splitter, zoom, dpr = parts
+            sizes = splitter.sizes()
+            if sum(sizes):
+                self._split_fraction = sizes[0] / sum(sizes)
+            self._source_view = zoom.capture_view(dpr)
+
+    def _restore_view(self):
+        parts = self._view_parts()
+        if parts is not None:
+            splitter, zoom, dpr = parts
+            width = splitter.width() - splitter.handleWidth()
+            left = round(self._split_fraction * width)
+            splitter.setSizes([left, width - left])
+            zoom.restore_view(self._source_view, dpr)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not event.spontaneous() and not self._shown_once:
+            self._shown_once = True
+            self._restore_view()
+
+    def _display_table_pane(self):
+        if self._table_pane is None:
+            self._build_table_pane()
+        if self._table_dirty:
+            self._show_table()
+            self._table_dirty = False
+        self._stack.setCurrentWidget(self._table_pane)
         if len(self.pages) > 1:
-            QShortcut(QKeySequence("Ctrl+PgUp"), self, lambda: self.show_page(self._index - 1))
-            QShortcut(QKeySequence("Ctrl+PgDown"), self, lambda: self.show_page(self._index + 1))
-        self.show_page(0)
-        QTimer.singleShot(0, lambda: self._splitter.setSizes([round(self._splitter.width() * .45), round(self._splitter.width() * .55)]))
+            self._page_tools.set_area(self._area)
+        self._restore_view()
+
+    def _show_text_page(self, image=None):
+        from ocr import OCRDocument, OCRReviewPane
+        page = self.pages[self._index] if self.pages else None
+        document = self.entry_document if self._index == 0 else None
+        pane = self._text_panes.get(self._index)
+        if page is not None and document is None and page.results is None:
+            state = self._state
+            self._show_wait(f"识别失败：{state.error}" if state.error else state.stage)
+            return
+        pixmap = None
+        if page is not None:
+            try:
+                pixmap = QPixmap.fromImage(image if image is not None else page.render())
+            except ValueError as exc:
+                self._show_wait(f"无法打开本页原图：{exc}")
+                return
+            self._text_dpr = pixmap.devicePixelRatio()
+        if pane is None:
+            if document is None:
+                document = OCRDocument(page.results)
+            pane = OCRReviewPane(document, pixmap)
+            self._text_panes[self._index] = pane
+            self._stack.addWidget(pane)
+        elif isinstance(page, FilePage):
+            pane.set_source_pixmap(pixmap)
+        self.text_pane = pane
+        self._stack.setCurrentWidget(pane)
+        if len(self.pages) > 1:
+            self._page_tools.set_area(pane.preview)
+        self._restore_view()
+
+    def _show_wait(self, message):
+        self.text_pane = None
+        self._wait_label.setText(message)
+        self._stack.setCurrentWidget(self._waiting)
+        if len(self.pages) > 1:
+            self._page_tools.set_area(self._waiting)
+
+    def apply_text_results(self, results, page, image):
+        """只在正在等文字的那一页创建编辑器，迟到或重试的回调不能覆盖草稿。"""
+        self.pages[page].results = results
+        if self.mode == "text" and page == self._index and self.text_pane is None:
+            self._show_text_page(image)
+
+    def set_mode(self, mode):
+        if mode == self.mode or mode not in ("text", "table") or (mode == "table" and not self.pages):
+            return
+        if self.mode == "table":
+            self._settle_table()
+        self._capture_view()
+        if self.text_pane is not None and self.pages and isinstance(self.pages[self._index], FilePage):
+            self.text_pane.set_source_pixmap(None)
+        self.mode = mode
+        self._mode_bar.set_mode(mode)
+        if mode == "text":
+            self._show_text_page()
+        else:
+            self.text_pane = None
+            self._display_table_pane()
+            if not self._state.queued and not self._state.analyzed:
+                self.analysisRequested.emit()
 
     @property
     def _state(self):
@@ -240,10 +381,14 @@ class TableDialog(BaseDialog):
             self._page_input = QLineEdit()
             self._page_input.setObjectName("TablePageInput")
             self._page_input.setAlignment(Qt.AlignCenter)
-            self._page_input.setFixedWidth(20 + 8 * len(str(len(self.pages)) ))
+            self._page_input.setFixedWidth(10 + 8 * len(str(len(self.pages))))
+            self._page_input.setFixedHeight(28)
+            self._previous_page.setFixedSize(28, 28)
+            self._next_page.setFixedSize(28, 28)
             self._page_input.setAccessibleName("页码")
             self._page_input.returnPressed.connect(self._jump_to_page)
             self._page_total = QLabel(f"/ {len(self.pages)}")
+            self._page_total.setObjectName("TablePageTotal")
             self._page_tools.group(self._previous_page, self._page_input, self._page_total, self._next_page)
         self._source_tools.place()
 
@@ -265,10 +410,9 @@ class TableDialog(BaseDialog):
             button.setChecked(isinstance(self._canvas, GridCanvas) and self._canvas.tool == tool)
 
     def _build_table_bar(self):
-        self._tabs = QTabBar()
-        self._tabs.setObjectName("TableTabs")
-        self._tabs.setDrawBase(False)
-        self._tabs.setExpanding(False)
+        self._tabs = TableTabs()
+        self._table_picker = TablePicker(self._result_view, self._tabs, self._result_view._bar)
+        self._picker_page = None
         self._tabs.currentChanged.connect(self._select_table)
         self._join = self._label_button("接上一页", "combine", checkable=True,
                                        tip="接在上一页最后一张表后导出，自动去掉相同的重复表头")
@@ -295,8 +439,6 @@ class TableDialog(BaseDialog):
         self._join_group = self._review_tools.group(self._join)
         self._join_group.setVisible(len(self.pages) > 1)
         self._join.setVisible(len(self.pages) > 1)
-        self._tabs_group = self._review_tools.group(self._tabs)
-        self._tabs_group.hide()
         self._review_tools.place()
 
     def _build_footer(self):
@@ -313,7 +455,6 @@ class TableDialog(BaseDialog):
             self._progress.setFixedWidth(100)
             self._progress.setRange(0, len(self.pages))
             row.addWidget(self._progress)
-        row.addWidget(topmost_button(self, "window/table_topmost"))
         self._export = self._label_button("导出", "download", self._export_file)
         self._copy_button = self._label_button("复制表格", "copy", self._copy, tip="复制当前表到 Excel / WPS，保留合并 (Ctrl+Shift+C)")
         for button in (self._export, self._copy_button):
@@ -393,6 +534,8 @@ class TableDialog(BaseDialog):
     def set_stage(self, stage, page=None):
         state = self._states[self._index if page is None else page]
         state.stage = STAGES[stage]
+        if self.mode == "text" and state is self._state and self.text_pane is None:
+            self._wait_label.setText(state.stage)
         if state is self._state and not _ready(self._current) and not self._regions_mode:
             self._status.setText(self._page_prefix() + state.stage)
 
@@ -406,7 +549,7 @@ class TableDialog(BaseDialog):
         index = self._index if page is None else page
         state = self._states[index]
         keep_view = state.regions is not None and _ready(state.table)
-        if index == self._index and not self._regions_mode and not keep_view:
+        if self.mode == "table" and index == self._index and not self._regions_mode and not keep_view:
             self._save_position()
         pending = {_key(table.rect): table for table in state.tables if table.review is None}
         results = []
@@ -433,7 +576,9 @@ class TableDialog(BaseDialog):
             state.tables = [next(filled, table) if table.review is None else table for table in state.tables]
             state.regions = state.restore = None
         state.tokens = tokens
-        if index == self._index and not self._regions_mode:
+        if index == self._index and self.mode == "text":
+            self._table_dirty = True
+        elif index == self._index and not self._regions_mode:
             if keep_view:
                 self._sync_tabs()
             else:
@@ -469,7 +614,9 @@ class TableDialog(BaseDialog):
             # 当前表在恢复后的列表里位置可能变了，按对象找回。
             state.current = next((number for number, table in enumerate(state.tables) if table is current), 0)
             state.regions = state.restore = None
-            if index == self._index and not self._regions_mode:
+            if index == self._index and self.mode == "text":
+                self._table_dirty = True
+            elif index == self._index and not self._regions_mode:
                 if keep_view:
                     # 用户可能正在当前表里改字：只更新标签，不重建界面销毁输入框。
                     self._sync_tabs()
@@ -483,7 +630,9 @@ class TableDialog(BaseDialog):
         if index == self._index:
             self._status.setText(f"{self._page_prefix()}识别失败：{message}")
         self._update_progress()
-        if len(self.pages) == 1:
+        if self.mode == "text" and index == self._index and self.text_pane is None:
+            self._wait_label.setText(f"识别失败：{message}")
+        if len(self.pages) == 1 and self.mode == "table":
             show_message(self, "表格识别失败", message)
 
     def take_next_page(self):
@@ -547,29 +696,45 @@ class TableDialog(BaseDialog):
         text = self._page_input.text().strip()
         total = len(self.pages)
         self._page_input.setText(str(self._index + 1))
-        if not text.isdigit():
-            self._status.setText(f"页码无效：请输入 1–{total} 之间的数字")
+        report = self._status.setText if self.mode == "table" else show_toast
+        try:
+            number = int(text) if text.isdecimal() else None
+        except ValueError:
+            number = None
+        if number is None:
+            report(f"页码无效：请输入 1–{total} 之间的数字")
             return
-        number = int(text)
         if not 1 <= number <= total:
-            self._status.setText(f"没有第 {number} 页：共 {total} 页")
+            report(f"没有第 {number} 页：共 {total} 页")
             return
         self.show_page(number - 1)
-        self._canvas.setFocus()
+        if self.mode == "table":
+            self._canvas.setFocus()
 
     def show_page(self, index):
-        if not 0 <= index < len(self.pages) or (self._canvas is not None and index == self._index):
+        if not 0 <= index < len(self.pages):
             return
-        if self._regions_mode:
-            self._regions_button.setChecked(False)
-        self._save_position()
+        if index == self._index and (self._canvas is not None or self.text_pane is not None):
+            return
+        if self.mode == "table" and self._canvas is not None:
+            self._settle_table()
+            self._capture_view()
+        elif self.text_pane is not None:
+            self._capture_view()
+            if isinstance(self.pages[self._index], FilePage):
+                self.text_pane.set_source_pixmap(None)
+            self.text_pane = None
         self._index = index
+        self._table_dirty = True
+        if self.mode == "text":
+            self._show_text_page()
+        else:
+            self._display_table_pane()
         if len(self.pages) > 1:
             self._page_input.setText(str(index + 1))
             self._page_input.setToolTip(f"{self.pages[index].label}；输入页码后回车跳转")
             self._previous_page.setEnabled(index > 0)
             self._next_page.setEnabled(index < len(self.pages) - 1)
-        self._show_table()
 
     def _save_position(self):
         self._cancel_amounts()
@@ -591,14 +756,14 @@ class TableDialog(BaseDialog):
         while self._tabs.count() > len(state.tables):
             self._tabs.removeTab(self._tabs.count() - 1)
         while self._tabs.count() < len(state.tables):
-            self._tabs.addTab("")
+            self._tabs.addTab(tinted_icon("table-2", T.THEMES[self._mode]["table_foreground"]), "")
         for index, table in enumerate(state.tables):
             self._tabs.setTabText(index, region_label(index) + ("" if table.review is not None else " …"))
             self._tabs.setTabToolTip(index, "接在上一页最后一张表后面" if table.joined and index == 0 else "")
         self._tabs.setCurrentIndex(state.current)
         self._syncing_tabs = False
-        self._tabs.setVisible(len(state.tables) > 1)
-        self._tabs_group.setVisible(len(state.tables) > 1)
+        self._table_picker.refresh(reveal=self._picker_page != self._index)
+        self._picker_page = self._index
         self._review_tools.place()
 
     def _show_table(self):
@@ -708,6 +873,7 @@ class TableDialog(BaseDialog):
             self._set_enabled(False)
             self._status.setText(self._page_prefix() + REGION_HINT)
             return
+        self._canvas.finish_drag()
         regions = self._canvas.regions
         self._regions_mode = False
         self._apply_regions(regions)
@@ -938,7 +1104,7 @@ class TableDialog(BaseDialog):
                     # 上一页末表一定在最后一组末尾：页按顺序排，且它本身可用。
                     groups[-1][2].append((page, index))
                     continue
-                if self._document:
+                if self._file_document:
                     name = f"第{page + 1}页-{region_label(index)}"
                 else:
                     name = region_label(index) if len(state.tables) > 1 else export.SHEET_NAME

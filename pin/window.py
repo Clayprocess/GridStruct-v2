@@ -516,7 +516,10 @@ class PinWindow(_PinBase):
     def _recognize_table(self):
         from table import open_table
         document = self._document
-        open_table(self._base, document.results if document is not None and document.matches(self._base) else None)
+        if document is not None and document.matches(self._base):
+            open_table(self._base, document.raw_results, text_document=document)
+        else:
+            open_table(self._base, None)
 
     def _rerun_ocr(self):
         dialog = _ConfirmDialog("重新识别", "重新识别将丢弃已改的文字和全文编辑，确认继续？", self)
